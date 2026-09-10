@@ -1,0 +1,8 @@
+# TODO: 실제 ESS 사양으로 교체 필요 (placeholder)
+ess:
+  capacity_mwh: 0
+  power_mw: 0
+  round_trip_efficiency: 0.85
+  soc_min: 0.0
+  soc_max: 1.0
+  soc_init: 0.0

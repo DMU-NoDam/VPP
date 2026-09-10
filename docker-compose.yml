@@ -1,0 +1,25 @@
+services:
+  collector:
+    build: ./services/collector
+    volumes: ["./data:/app/data"]
+    env_file: .env
+
+  forecast_api:
+    build: ./services/forecast_api
+    ports: ["8001:8001"]
+    volumes: ["./data:/app/data"]
+    env_file: .env
+
+  dispatch_api:
+    build: ./services/dispatch_api
+    ports: ["8002:8002"]
+    volumes: ["./data:/app/data", "./config:/app/config"]
+    env_file: .env
+
+  dashboard:
+    build: ./services/dashboard
+    ports: ["8501:8501"]
+    environment:
+      FORECAST_URL: http://forecast_api:8001
+      DISPATCH_URL: http://dispatch_api:8002
+    depends_on: [forecast_api, dispatch_api]

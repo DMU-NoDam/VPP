@@ -1,0 +1,19 @@
+# TODO: EPSIS 실측값으로 교체 필요 (현재는 미션 문서 예시값)
+generators:
+  - id: nuclear_1
+    fuel_cost_won_per_kwh: 6.5
+    capacity_mw: 24000
+    ramp_mw_per_h: 100
+    co2_ton_per_mwh: 0.0
+  - id: coal_1
+    fuel_cost_won_per_kwh: 45.2
+    capacity_mw: 28000
+    ramp_mw_per_h: 300
+    min_up_h: 6
+    co2_ton_per_mwh: 0.91
+  - id: lng_1
+    fuel_cost_won_per_kwh: 125.8
+    capacity_mw: 32000
+    ramp_mw_per_h: 500
+    min_up_h: 2
+    co2_ton_per_mwh: 0.45

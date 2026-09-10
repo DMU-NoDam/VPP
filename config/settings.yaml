@@ -1,0 +1,6 @@
+# TODO: 운영 파라미터 확정 필요 (placeholder)
+horizon_h: 24
+time_step_min: 60
+timezone: Asia/Seoul
+solver: CBC
+reserve_margin_mw: 0

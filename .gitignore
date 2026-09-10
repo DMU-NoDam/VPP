@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# venv
+.venv/
+venv/
+
+# env
+.env
+
+# data (스냅샷 캐시는 제출 필수이므로 제외하지 않는다)
+data/*.parquet
+!data/snapshot/
+!data/snapshot/**

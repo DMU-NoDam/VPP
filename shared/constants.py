@@ -1,0 +1,10 @@
+"""서비스 공용 상수 (스캐폴드)."""
+
+API_PREFIX = "/api/v1"
+
+FORECAST_PORT = 8001
+DISPATCH_PORT = 8002
+DASHBOARD_PORT = 8501
+
+TIMEZONE = "Asia/Seoul"
+HORIZON_H = 24
