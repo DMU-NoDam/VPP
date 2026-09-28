@@ -18,3 +18,7 @@ venv/
 data/*.parquet
 !data/snapshot/
 !data/snapshot/**
+
+# claude
+CLAUDE.*
+.claude/
