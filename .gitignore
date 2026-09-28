@@ -22,3 +22,6 @@ data/*.parquet
 # claude
 CLAUDE.*
 .claude/
+
+#docs
+docs/VPP_PROJECT_CONTEXT.md
