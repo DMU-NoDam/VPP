@@ -3,8 +3,9 @@ name = "vpp-dispatch"
 version = "0.1.0"
 requires-python = ">=3.10,<3.13"
 dependencies = [
-  "fastapi>=0.110", "uvicorn[standard]>=0.29", "pandas>=2.2",
+  "fastapi>=0.110", "uvicorn[standard]>=0.29", "pandas>=2.2", "numpy>=1.26",
   "pydantic>=2.6", "pulp>=2.8", "requests>=2.31", "streamlit>=1.35",
+  "lightgbm>=4.0", "torch>=2.2", "scikit-learn>=1.4",
 ]
 
 [project.optional-dependencies]
