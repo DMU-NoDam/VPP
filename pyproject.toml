@@ -5,6 +5,7 @@ requires-python = ">=3.10,<3.13"
 dependencies = [
   "fastapi>=0.110", "uvicorn[standard]>=0.29", "pandas>=2.2",
   "pydantic>=2.6", "pulp>=2.8", "requests>=2.31", "streamlit>=1.35",
+  "plotly>=5.20",
 ]
 
 [project.optional-dependencies]
