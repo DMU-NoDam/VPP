@@ -15,6 +15,10 @@ line-length = 100
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP"]
 
+[tool.ruff.lint.isort]
+# collector 는 패키지 없이 평평한 모듈로 돌아간다 (main.py 가 같은 폴더에서 import).
+known-first-party = ["shared", "collector", "data_api", "domain", "sources", "store"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--cov=services --cov-report=term-missing"
