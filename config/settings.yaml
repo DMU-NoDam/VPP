@@ -1,6 +1,19 @@
-# TODO: 운영 파라미터 확정 필요 (placeholder)
+# 운영 파라미터
+# [미정] horizon_h / reserve_margin 산식은 팀 확정 전 placeholder.
+
 horizon_h: 24
 time_step_min: 60
 timezone: Asia/Seoul
-solver: CBC
-reserve_margin_mw: 0
+
+# MILP solver.
+# [현재 방향] HiGHS 우선. PuLP 번들 CBC 바이너리는 osx/i64(x86_64) 전용이라
+# Apple Silicon 로컬에서는 "Bad CPU type"으로 실행되지 않는다 (Docker/linux에서는 동작).
+# 선택지: HiGHS | PULP_CBC_CMD
+solver: HiGHS
+solver_msg: false
+# [권장] 10초 KPI 대비 안전장치. 0 또는 null이면 미적용.
+solver_time_limit_s: 60
+solver_mip_gap: 0.0
+
+# 예비율. [미정] 산식은 팀 확정 필요 (CLAUDE.md 결정 로그 참조).
+reserve_margin_ratio: 0.10
