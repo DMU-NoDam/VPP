@@ -5,7 +5,7 @@ requires-python = ">=3.10,<3.13"
 dependencies = [
   "fastapi>=0.110", "uvicorn[standard]>=0.29", "pandas>=2.2",
   "pydantic>=2.6", "pulp>=2.8", "requests>=2.31", "streamlit>=1.35",
-  "plotly>=5.20",
+  "plotly>=5.20", "pyyaml>=6.0", "numpy>=1.26",
 ]
 
 [project.optional-dependencies]
@@ -18,7 +18,7 @@ select = ["E", "F", "I", "N", "UP"]
 
 [tool.ruff.lint.isort]
 # collector 는 패키지 없이 평평한 모듈로 돌아간다 (main.py 가 같은 폴더에서 import).
-known-first-party = ["shared", "collector", "data_api", "domain", "sources", "store"]
+known-first-party = ["shared", "collector", "data_api", "domain", "sources", "store", "logic", "scenarios", "ui", "page_scenarios"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

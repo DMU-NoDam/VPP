@@ -1,0 +1,10 @@
+# 레포 루트를 빌드 컨텍스트로 쓰는 이미지(dispatch_api)용
+.git
+.venv
+venv
+data
+**/__pycache__
+.pytest_cache
+.ruff_cache
+.coverage
+.env

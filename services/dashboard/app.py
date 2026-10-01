@@ -1,723 +1,976 @@
-"""dashboard — 통합 관제 대시보드 (실데이터 연동 전 UI 목업).
+"""dashboard — 통합 관제 대시보드 (Streamlit :8501).
 
-CLAUDE.md 요구사항 10번(통합 관제 대시보드)과 최종 결과물 4번을 기준으로
-화면 골격만 먼저 구성한다. 모든 수치는 더미 데이터이며, 실제로는
-FORECAST_URL(forecast_api)·DISPATCH_URL(dispatch_api)을 REST로 호출해
-shared/schemas.py 계약에 맞는 응답을 받아와야 한다.
+화면만 그린다. 설정 로드·REST 호출·계산은 logic.py 에 있고, 판정 기준과 목업 설비값은
+config/dashboard.yaml 에 있다.
 
-디자인: 다크 네이비 + 시안 네온 + 코너 브래킷 패널(관제 대시보드 관례).
-요구사항의 "한 화면에 표시"를 지키기 위해 탭 없이 단일 스크롤 페이지로 배치한다.
+페이지 구성:
+    통합 관제      스크롤 없이 한 화면 — 수급 게이지·알람, Merit Order, 최적화 결과,
+                   탄소 추이, ESS, 위기 시나리오 (CLAUDE.md 최종 결과물 4·기능 요구 10)
+    분석 상세      168h 예측·성능 지표, 최적화 상세, 위기 시나리오 게이지, 배출 내역
+    시간대 데이터  KPX 실측, 출력 히트맵, 시간대 상세표·CSV
+    시나리오 생성기 page_scenarios.py
+사이드바의 관측 시각·조정값은 앞의 세 페이지가 함께 쓴다 (main 에서 한 번 그린다).
 
-TODO(통합): mock_* 함수를 requests.get/post(FORECAST_URL·DISPATCH_URL) 호출로 교체.
-    현재는 shared/를 import하지 않는다 — Dockerfile이 app.py 한 파일만 COPY하는
-    구조라(services/dashboard 디렉터리가 빌드 컨텍스트) shared/는 빌드 이미지에
-    없다. 실연동 시점에 빌드 컨텍스트를 레포 루트로 바꾸거나 스키마를 복제해야 한다.
+데이터 출처 (모두 REST, 다른 서비스 코드는 import 하지 않는다):
+    collector     GET  /data/{name}                    실측 수요·발전원별 출력·SMP
+    forecast_api  GET  /health                         연결 상태
+    dispatch_api  GET  /health                         연결 상태
+                  POST /api/v1/dispatch/stochastic     VSS (shared/schemas.py StochasticResponse)
+                  POST /api/v1/scenarios               시나리오 생성기 페이지 (page_scenarios.py)
+응답이 없거나 계약이 아직 없는 패널은 목업으로 그린다. 서비스 응답을 쓴 패널에만 LIVE 태그를 단다.
+
+TODO(통합): /forecast, /dispatch/milp 응답 계약이 정해지면 logic.sample_* 대신 파서를 붙인다.
 """
 
 from __future__ import annotations
 
-import math
-import random
 from dataclasses import dataclass
+from datetime import date, timedelta
 
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
+from streamlit.delta_generator import DeltaGenerator
 
-# ── 상수 (CLAUDE.md 성능 기준 §63, 발전원 파라미터 §92 기준) ────────────────
-RESERVE_WARNING_PCT = 7.0
-RESERVE_CRITICAL_PCT = 5.0
+import logic
+import page_scenarios
+from logic import API_PREFIX, ApiResult, Settings
+from ui import (
+    C_BRIGHT,
+    C_GREEN,
+    C_ORANGE,
+    C_RED,
+    C_TEXT,
+    C_YELLOW,
+    HEAT_SCALE,
+    badge,
+    compact,
+    fetch_health,
+    gauge_label,
+    get_settings,
+    inject_custom_css,
+    kpi_badge,
+    panel_title,
+    pw,
+    source_tag,
+    style_dark,
+    ton,
+    won,
+)
 
-# 급전 우선순위(연료비 오름차순)
-GENERATOR_ORDER = ["원자력", "수력", "태양광", "풍력", "석탄", "LNG"]
-GENERATOR_COLOR = {
-    "원자력": "#22d3ee",
-    "수력": "#3b82f6",
-    "태양광": "#fde047",
-    "풍력": "#4ade80",
-    "석탄": "#64748b",
-    "LNG": "#f472b6",
+# 발전원 코드 → 색 (logic 목업 설비와 같은 코드)
+FUEL_COLOR = {
+    "nuclear": "#a3e635",
+    "hydro": "#2dd4bf",
+    "solar": "#facc15",
+    "wind": "#86efac",
+    "coal": "#6b7280",
+    "lng": "#fb923c",
 }
-CO2_TON_PER_MWH = {
-    "원자력": 0.0, "수력": 0.0, "태양광": 0.0,
-    "풍력": 0.0, "석탄": 0.91, "LNG": 0.45,
+# collector generation_by_fuel 의 발전원 코드 → 표시 이름
+COLLECTOR_FUEL_KO = {
+    "nuclear": "원자력", "bituminous_coal": "유연탄", "anthracite": "국내탄", "lng": "가스",
+    "oil": "유류", "hydro": "수력", "pumped": "양수", "solar": "태양광", "renewable": "신재생",
 }
-# 설비용량 (CLAUDE.md §92 EPSIS 참조표)
-CAPACITY_MW = {
-    "원자력": 24000, "수력": 6500, "석탄": 28000,
-    "LNG": 32000, "태양광": 12000, "풍력": 3500,
-}
-ESS_POWER_MW = 100  # config/ess.yaml power_mw=0(플레이스홀더) 대신 화면 시연용 임시값
+STATUS_COLOR = {"ok": C_GREEN, "warn": C_YELLOW, "critical": C_RED}
+# 한 화면 배치를 위한 차트 높이 (1080p 기준 스크롤 없음)
+H_MERIT, H_SMALL, H_GAUGE = 282, 188, 116
+NO_BAR = {"displayModeBar": False}
 
-# 관제 화면 팔레트
-C_CYAN = "#22d3ee"
-C_TEXT = "#a9c8e0"
-C_BRIGHT = "#e8f6ff"
-C_VIOLET = "#a78bfa"
-C_PINK = "#f472b6"
-C_YELLOW = "#fde047"
-HEAT_SCALE = [[0.0, "#08213a"], [0.35, "#0e7490"], [0.7, "#22d3ee"], [1.0, "#a5f3fc"]]
 
 # 발전원 아이콘 (인라인 SVG — 외부 이미지 파일 의존 없음)
 _ICON_SVG = {
-    "원자력": (
+    "nuclear": (
         '<circle cx="12" cy="12" r="2.1" fill="{c}" stroke="none"/>'
         '<ellipse cx="12" cy="12" rx="9.6" ry="4.1"/>'
         '<ellipse cx="12" cy="12" rx="9.6" ry="4.1" transform="rotate(60 12 12)"/>'
         '<ellipse cx="12" cy="12" rx="9.6" ry="4.1" transform="rotate(120 12 12)"/>'
     ),
-    "수력": (
+    "hydro": (
         '<path d="M12 2.8s-6.6 7.3-6.6 11.3a6.6 6.6 0 0 0 13.2 0C18.6 10.1 12 2.8 12 2.8Z"/>'
         '<path d="M8.6 14.6c1.1-1 2.3-1 3.4 0s2.3 1 3.4 0"/>'
     ),
-    "태양광": (
+    "solar": (
         '<circle cx="12" cy="12" r="4"/>'
         '<path d="M12 1.8v2.6M12 19.6v2.6M1.8 12h2.6M19.6 12h2.6'
         'M4.8 4.8l1.9 1.9M17.3 17.3l1.9 1.9M19.2 4.8l-1.9 1.9M6.7 17.3l-1.9 1.9"/>'
     ),
-    "풍력": (
+    "wind": (
         '<path d="M12 13.1V21.6M9.4 21.6h5.2"/>'
         '<circle cx="12" cy="11.6" r="1.5" fill="{c}" stroke="none"/>'
         '<path d="M12 10.1V2.6M13.4 12.4l6.4 3.7M10.6 12.4l-6.4 3.7"/>'
     ),
-    "석탄": (
+    "coal": (
         '<path d="M2.6 20.6v-8.2l5.4 3.1v-3.1l5.4 3.1v-3.1l5.4 3.1v5.1Z"/>'
         '<path d="M6.2 9.2V5.6h2.8v4.9"/>'
     ),
-    "LNG": (
+    "lng": (
         '<path d="M12 21.4c3.5 0 6.1-2.4 6.1-5.7 0-3.5-2.6-5.3-3.8-8.2-.6 2.1-1.7 2.9-2.7 3.7'
         ".2-2.6-.8-5.3-2.6-7.4-.4 2.9-2.3 4.3-3.5 6.4-.8 1.5-1.2 3.1-1.2 4.9 0 3.5 2.7 6.3 "
         '7.7 6.3Z"/>'
     ),
 }
 
-CRISIS_SCENARIOS = {
-    "없음": {},
-    "폭염 (수요 +15%)": {"demand_mult": 1.15},
-    "발전소 탈락 (-1,400MW)": {"capacity_delta_mw": -1400},
-    "재생에너지 램프다운 (태양광 -50%)": {"solar_mult": 0.5},
-}
-
-# 하루 수요 곡선(전형적인 한국 부하 패턴을 본뜬 토이 값, MW)
-_DEMAND_SHAPE_MW = [
-    52000, 50000, 49000, 48000, 49000, 52000,
-    58000, 66000, 72000, 76000, 79000, 81000,
-    82000, 80000, 78000, 77000, 78000, 80000,
-    84000, 86000, 83000, 74000, 65000, 57000,
-]
-_SOLAR_SHAPE_MW = [
-    0, 0, 0, 0, 0, 200,
-    1200, 3600, 6400, 8800, 10400, 11200,
-    11600, 11200, 10000, 8000, 5600, 2800,
-    800, 100, 0, 0, 0, 0,
-]
-
 
 @dataclass
-class HourRow:
+class Context:
+    """한 번의 실행에서 여러 페이지가 함께 쓰는 값 (사이드바 조정 반영)."""
+
+    settings: Settings
+    urls: dict[str, str]
+    health: dict[str, ApiResult]
     hour: int
-    demand_mw: float
-    nuclear_mw: float
-    hydro_mw: float
-    solar_mw: float
-    wind_mw: float
-    coal_mw: float
-    lng_mw: float
-    ess_charge_mw: float
-    ess_discharge_mw: float
-    ess_soc_pct: float
-    carbon_ton: float
-    available_capacity_mw: float
+    adjust: logic.Adjust
+    base: pd.DataFrame      # 오늘 기본값 시계열 (조정 비교용)
+    df: pd.DataFrame        # 오늘 조정 반영 시계열
+    now: pd.Series          # 관측 시각 행
+    period: pd.DataFrame    # 분석 기간 시계열 (탄소·ESS, 조정 반영)
+    start: date
+    end: date
 
     @property
-    def reserve_pct(self) -> float:
-        return (self.available_capacity_mw - self.demand_mw) / self.demand_mw * 100
+    def prev(self) -> pd.Series:
+        """관측 시각 한 시간 전 행 (0시면 23시)."""
+        return self.df.loc[self.df.hour == (self.hour - 1) % 24].iloc[0]
+
+    @property
+    def days(self) -> int:
+        """분석 기간 일수."""
+        return (self.end - self.start).days + 1
+
+    @property
+    def period_label(self) -> str:
+        """분석 기간 표시 (예: 09/25–10/01 · 7일)."""
+        if self.days == 1:
+            return f"{self.start:%m/%d} 하루"
+        return f"{self.start:%m/%d}–{self.end:%m/%d} · {self.days}일"
 
 
-# ── 더미 데이터 생성 ────────────────────────────────────────────────────────
-@st.cache_data
-def mock_timeseries(seed: int = 42) -> pd.DataFrame:
-    """24시간 더미 급전 결과. dispatch_api MILP 응답이 연결되면 제거."""
-    rng = random.Random(seed)
-    soc = 30.0  # %
-    rows: list[HourRow] = []
-
-    for h in range(24):
-        demand = _DEMAND_SHAPE_MW[h] * (1 + rng.uniform(-0.015, 0.015))
-        solar = _SOLAR_SHAPE_MW[h] * (1 + rng.uniform(-0.05, 0.05)) if _SOLAR_SHAPE_MW[h] else 0.0
-        wind = 800 + 700 * math.sin(h / 24 * 4 * math.pi) + rng.uniform(-300, 300)
-        wind = max(wind, 0.0)
-
-        # ESS: 야간(00~05시, 23시) 충전, 저녁 피크(18~20시) 방전
-        ess_charge = ESS_POWER_MW if h in (0, 1, 2, 3, 4, 5, 23) else 0.0
-        ess_discharge = ESS_POWER_MW if h in (18, 19, 20) else 0.0
-        soc = min(max(soc + ess_charge * 0.85 / 4 - ess_discharge / 0.85 / 4, 0.0), 100.0)
-
-        # Merit Order 급전: 원자력(기저) → 재생(must-run) → 석탄 → LNG → 수력(첨두)
-        # 수력은 값은 싸지만 에너지 제약이 있어 양수발전처럼 첨두에 투입한다고 가정.
-        # ESS 방전은 발전기가 맡을 부하를 덜어주고, 충전은 부하로 더해진다.
-        nuclear = CAPACITY_MW["원자력"] * 0.95
-        hydro_base = CAPACITY_MW["수력"] * 0.12  # 유입식 기저 출력
-
-        net_demand = demand + ess_charge - ess_discharge
-        remaining = max(net_demand - (nuclear + hydro_base + solar + wind), 0.0)
-        coal = min(remaining, CAPACITY_MW["석탄"])
-        remaining -= coal
-        lng = min(remaining, CAPACITY_MW["LNG"])
-        remaining -= lng
-        hydro = hydro_base + min(remaining, CAPACITY_MW["수력"] - hydro_base)
-
-        carbon = coal * CO2_TON_PER_MWH["석탄"] + lng * CO2_TON_PER_MWH["LNG"]
-
-        available_capacity = (
-            CAPACITY_MW["원자력"] + CAPACITY_MW["수력"] + CAPACITY_MW["석탄"] + CAPACITY_MW["LNG"]
-            + solar + wind + ESS_POWER_MW
-        )
-
-        rows.append(
-            HourRow(
-                hour=h, demand_mw=demand, nuclear_mw=nuclear, hydro_mw=hydro,
-                solar_mw=solar, wind_mw=wind, coal_mw=coal, lng_mw=lng,
-                ess_charge_mw=ess_charge, ess_discharge_mw=ess_discharge, ess_soc_pct=soc,
-                carbon_ton=carbon, available_capacity_mw=available_capacity,
-            )
-        )
-    return pd.DataFrame([r.__dict__ | {"reserve_pct": r.reserve_pct} for r in rows])
+# ── 데이터 가져오기 (캐시) ───────────────────────────────────────────────────
 
 
-def apply_scenario(row: pd.Series, scenario_key: str) -> tuple[float, float]:
-    """선택한 위기 시나리오를 (수요, 가용용량)에 반영해 반환한다."""
-    cfg = CRISIS_SCENARIOS[scenario_key]
-    demand = row.demand_mw * cfg.get("demand_mult", 1.0)
-    capacity = row.available_capacity_mw + cfg.get("capacity_delta_mw", 0.0)
-    if "solar_mult" in cfg:
-        capacity -= row.solar_mw * (1 - cfg["solar_mult"])
-    return demand, capacity
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_collector(base_url: str, name: str, limit: int) -> ApiResult:
+    """collector 데이터셋의 최근 limit 행."""
+    return logic.call_api("GET", f"{base_url}/data/{name}", params={"limit": limit}, timeout=5.0)
 
 
-# ── 스타일 (다크 네이비 + 시안 네온 + 코너 브래킷) ──────────────────────────
-def inject_custom_css() -> None:
-    st.markdown(
-        """
-        <style>
-        :root { --vpp-corner: #22d3ee; }
-
-        /* 배경: 딥 네이비 + 상단 시안 글로우 */
-        .stApp {
-            background:
-                radial-gradient(1100px 520px at 50% -8%, rgba(34,211,238,.10), transparent 62%),
-                linear-gradient(180deg, #05101d 0%, #0a1c30 45%, #05101d 100%);
-        }
-        /* 미세 그리드 텍스처 */
-        .stApp::before {
-            content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
-            background-image:
-                linear-gradient(rgba(34,211,238,.030) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(34,211,238,.030) 1px, transparent 1px);
-            background-size: 52px 52px, 52px 52px;
-        }
-        /* Streamlit 기본 상단 바 — 배경 그라데이션이 그대로 비치도록 투명 처리 */
-        header[data-testid="stHeader"] { background: transparent !important; }
-        div[data-testid="stDecoration"] { display: none; }
-        div[data-testid="stToolbar"] { right: .6rem; }
-
-        .block-container { padding-top: 3.4rem; max-width: 1500px; }
-
-        /* 패널: 반투명 + 4모서리 코너 브래킷 */
-        div[data-testid="stVerticalBlockBorderWrapper"] {
-            position: relative;
-            background-color: rgba(11, 32, 56, .55) !important;
-            border: 1px solid rgba(34,211,238,.10) !important;
-            border-radius: 3px !important;
-            background-image:
-                linear-gradient(var(--vpp-corner), var(--vpp-corner)),
-                linear-gradient(var(--vpp-corner), var(--vpp-corner)),
-                linear-gradient(var(--vpp-corner), var(--vpp-corner)),
-                linear-gradient(var(--vpp-corner), var(--vpp-corner)),
-                linear-gradient(var(--vpp-corner), var(--vpp-corner)),
-                linear-gradient(var(--vpp-corner), var(--vpp-corner)),
-                linear-gradient(var(--vpp-corner), var(--vpp-corner)),
-                linear-gradient(var(--vpp-corner), var(--vpp-corner));
-            background-repeat: no-repeat;
-            background-size:
-                15px 2px, 2px 15px, 15px 2px, 2px 15px,
-                15px 2px, 2px 15px, 15px 2px, 2px 15px;
-            background-position:
-                left top, left top, right top, right top,
-                left bottom, left bottom, right bottom, right bottom;
-        }
-        div[data-testid="stVerticalBlockBorderWrapper"] > div { padding: .7rem .85rem; }
-
-        /* 헤더 */
-        .vpp-header { display: flex; align-items: center; gap: .5rem; margin-bottom: .2rem; }
-        .vpp-deco {
-            flex: 1; height: 1px; position: relative;
-            background-image: repeating-linear-gradient(90deg,
-                rgba(34,211,238,.55) 0 4px, transparent 4px 13px);
-        }
-        .vpp-deco::before, .vpp-deco::after {
-            content: "◎"; position: absolute; top: 50%; transform: translateY(-50%);
-            color: var(--vpp-corner); font-size: 13px; line-height: 1;
-            text-shadow: 0 0 9px rgba(34,211,238,.85);
-        }
-        .vpp-deco::before { left: 14%; }
-        .vpp-deco::after  { right: 14%; }
-        .vpp-title {
-            font-size: 1.95rem; font-weight: 800; letter-spacing: .05em; white-space: nowrap;
-            padding: 0 1.1rem; color: #4fe3f7;
-            text-shadow: 0 0 18px rgba(34,211,238,.55), 0 0 42px rgba(34,211,238,.28);
-        }
-        .vpp-subtitle {
-            text-align: center; color: #7fa8c4; font-size: .78rem;
-            letter-spacing: .04em; margin-bottom: 1.1rem;
-        }
-
-        /* 알람 배너 */
-        .vpp-alarm {
-            padding: .62rem 1rem; border-radius: 3px; font-size: .92rem;
-            margin: .1rem 0 1.15rem; border-left: 3px solid; letter-spacing: .01em;
-        }
-        .vpp-alarm.ok { background: rgba(74,222,128,.07); border-color: #4ade80; color: #86efac; }
-        .vpp-alarm.warn { background: rgba(251,191,36,.08); border-color: #fbbf24; color: #fcd34d; }
-        .vpp-alarm.critical {
-            background: rgba(244,63,94,.10); border-color: #fb7185; color: #fda4af;
-            animation: vpp-blink 1.6s ease-in-out infinite;
-        }
-        @keyframes vpp-blink { 0%,100% { opacity: 1; } 50% { opacity: .62; } }
-
-        /* 뱃지 */
-        .vpp-badge {
-            display: inline-flex; align-items: center; gap: .35rem;
-            padding: .18rem .6rem; border-radius: 3px; margin: .12rem .18rem .12rem 0;
-            font-size: .74rem; font-weight: 600; line-height: 1.6; border: 1px solid;
-        }
-        .vpp-badge.ok {
-            background: rgba(74,222,128,.09); color: #4ade80;
-            border-color: rgba(74,222,128,.35);
-        }
-        .vpp-badge.warn {
-            background: rgba(251,191,36,.09); color: #fbbf24;
-            border-color: rgba(251,191,36,.35);
-        }
-        .vpp-badge.critical {
-            background: rgba(244,63,94,.11); color: #fb7185; border-color: rgba(244,63,94,.4);
-            box-shadow: 0 0 12px rgba(244,63,94,.22);
-        }
-
-        /* 발전원 카드 */
-        .vpp-gen-card {
-            border: 1px solid; border-left-width: 3px; border-radius: 3px;
-            padding: .6rem .7rem .55rem;
-        }
-        .vpp-gen-head { display: flex; align-items: center; gap: .42rem; margin-bottom: .38rem; }
-        .vpp-gen-name { font-size: .82rem; font-weight: 700; letter-spacing: .02em; }
-        .vpp-gen-value { font-size: 1.22rem; font-weight: 700; color: #e8f6ff; line-height: 1.1; }
-        .vpp-gen-unit { font-size: .66rem; color: #7fa8c4; margin-left: .22rem; font-weight: 600; }
-        .vpp-gen-bar {
-            height: 4px; border-radius: 2px; background: rgba(255,255,255,.07);
-            margin: .45rem 0 .34rem; overflow: hidden;
-        }
-        .vpp-gen-bar > span { display: block; height: 100%; border-radius: 2px; }
-        .vpp-gen-foot {
-            display: flex; justify-content: space-between;
-            font-size: .67rem; color: #7fa8c4;
-        }
-
-        /* 게이지 라벨 (plotly 밖이라 폭 변화에도 안 잘림) */
-        .vpp-gauge-label {
-            text-align: center; font-size: .76rem; color: #8fb3cc;
-            font-weight: 600; letter-spacing: .03em;
-            margin: .1rem 0 -.5rem; line-height: 1.35;
-        }
-
-        /* 패널 제목 */
-        .vpp-section-title {
-            font-size: .84rem; font-weight: 600; color: #cfe8f7;
-            letter-spacing: .02em; margin: .1rem 0 .5rem;
-        }
-        .vpp-mock-tag { color: #6b8ba5; font-size: .73rem; }
-
-        /* 메트릭 */
-        div[data-testid="stMetricLabel"] { font-size: .76rem; color: #8fb3cc; font-weight: 600; }
-        div[data-testid="stMetricValue"] {
-            font-size: 1.5rem; font-weight: 700; color: #e8f6ff;
-            text-shadow: 0 0 14px rgba(34,211,238,.32);
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
+@st.cache_data(ttl=300, show_spinner="확률론적 최적화 호출 중…")
+def fetch_stochastic(base_url: str, timeout: float) -> ApiResult:
+    """POST /dispatch/stochastic. 풀이가 수 초 걸려 5분 캐시한다."""
+    payload = {"start": f"{date.today().isoformat()}T00:00:00+09:00", "horizon_h": 24}
+    return logic.call_api(
+        "POST", f"{base_url}{API_PREFIX}/dispatch/stochastic", payload=payload, timeout=timeout
     )
 
 
-def style_dark(fig: go.Figure, height: int = 300) -> go.Figure:
-    """모든 plotly 차트에 공통 관제 테마를 적용한다."""
-    fig.update_layout(
-        height=height,
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color=C_TEXT, size=11),
-        margin=dict(l=12, r=12, t=28, b=12),
-        legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=10)),
-        hoverlabel=dict(bgcolor="#0b2038", bordercolor="rgba(34,211,238,.45)", font_color=C_BRIGHT),
+def stochastic_result(ctx: Context) -> tuple[dict, bool, float | None]:
+    """(VSS 요약, LIVE 여부, 지연시간). 서비스가 없거나 응답이 깨지면 목업."""
+    res = (
+        fetch_stochastic(ctx.urls["dispatch_api"], ctx.settings.timeout_s)
+        if ctx.health["dispatch_api"].ok
+        else ApiResult(error="dispatch_api down")
     )
-    axis = dict(
-        gridcolor="rgba(34,211,238,.08)",
-        zerolinecolor="rgba(34,211,238,.16)",
-        linecolor="rgba(34,211,238,.20)",
-    )
-    fig.update_xaxes(**axis)
-    fig.update_yaxes(**axis)
-    return fig
+    try:
+        if res.ok:
+            return logic.parse_stochastic(res.data), True, res.latency_s
+    except (KeyError, TypeError, ValueError):
+        pass
+    return logic.parse_stochastic(logic.sample_stochastic()), False, None
 
 
-def reserve_status(reserve_pct: float) -> tuple[str, str]:
-    """예비율 배지 (라벨, css클래스)."""
-    if reserve_pct < RESERVE_CRITICAL_PCT:
-        return "Critical", "critical"
-    if reserve_pct < RESERVE_WARNING_PCT:
-        return "Warning", "warn"
-    return "Normal", "ok"
-
-
-def badge(label: str, css_class: str) -> str:
-    return f'<span class="vpp-badge {css_class}">{label}</span>'
+# ── 작은 그리기 도구 ─────────────────────────────────────────────────────────
 
 
 def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
+    """'#rrggbb' → (r, g, b)."""
     h = hex_color.lstrip("#")
     return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
 
 
-def gen_icon(name: str, size: int = 24) -> str:
-    """발전원 아이콘 SVG를 해당 발전원 색상 + 네온 글로우로 렌더한다."""
-    color = GENERATOR_COLOR[name]
+def gen_icon(code: str, size: int = 24) -> str:
+    """발전원 아이콘 SVG를 해당 발전원 색상으로 렌더한다."""
+    color = FUEL_COLOR[code]
     return (
         f'<svg width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" '
         f'stroke="{color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" '
-        f'style="filter:drop-shadow(0 0 5px {color}80);flex:none">'
-        f"{_ICON_SVG[name].format(c=color)}</svg>"
+        f'style="flex:none">'
+        f"{_ICON_SVG[code].format(c=color)}</svg>"
     )
 
 
-def panel_title(text: str) -> None:
-    st.markdown(f'<div class="vpp-section-title">{text}</div>', unsafe_allow_html=True)
+def html(text: str) -> None:
+    """HTML 조각 출력."""
+    st.markdown(text, unsafe_allow_html=True)
 
 
-def gauge_label(text: str) -> None:
-    """게이지 위 라벨. plotly 밖(HTML)이라 차트 폭이 변해도 잘리지 않는다."""
-    st.markdown(f'<div class="vpp-gauge-label">{text}</div>', unsafe_allow_html=True)
+def _pct_change(a: float, b: float) -> float:
+    """b 대비 a 의 변화율 (%)."""
+    return (a - b) / b * 100 if b else 0.0
 
 
-# ── 화면 섹션 ────────────────────────────────────────────────────────────
-def render_header() -> None:
-    st.markdown(
-        '<div class="vpp-header">'
-        '<div class="vpp-deco"></div>'
-        '<div class="vpp-title">VPP 통합 관제 대시보드</div>'
-        '<div class="vpp-deco"></div>'
-        "</div>"
-        '<div class="vpp-subtitle">'
-        "실시간 수급 현황 · MERIT ORDER · 최적화 결과 · 탄소 배출량 · 위기 시나리오<br>"
-        '<span class="vpp-mock-tag">'
-        "⚠ 더미 데이터 기반 목업 (forecast_api / dispatch_api 미연동)"
-        "</span></div>",
-        unsafe_allow_html=True,
-    )
-
-
-def render_status_banner(reserve_pct: float) -> None:
-    label, css_class = reserve_status(reserve_pct)
-    detail = {
-        "critical": f"예비율 {reserve_pct:.1f}% — 기준 5% 미만, 즉시 조치 필요",
-        "warn": f"예비율 {reserve_pct:.1f}% — 기준 7% 미만, 주의 감시",
-        "ok": f"예비율 {reserve_pct:.1f}% — 정상 범위",
-    }[css_class]
-    icon = {"critical": "■", "warn": "▲", "ok": "●"}[css_class]
-    st.markdown(
-        f'<div class="vpp-alarm {css_class}">{icon} <b>{label}</b> &nbsp;|&nbsp; {detail}</div>',
-        unsafe_allow_html=True,
-    )
+def _delta(value: float, unit: str = "%") -> str:
+    """전 시간 대비 변화 HTML (↑ 초록 / ↓ 빨강)."""
+    direction = "up" if value >= 0 else "down"
+    return f'<span class="vpp-kpi-delta {direction}">{abs(value):.1f}{unit}</span>'
 
 
 def _gauge_figure(
     value: float, value_max: float, suffix: str = "",
     steps: list[dict] | None = None, value_min: float = 0.0,
+    show_number: bool = True, height: int = 215, bar_color: str = C_GREEN,
 ) -> go.Figure:
     """게이지 도형만 그린다.
 
     라벨을 plotly title로 넣으면 패널 폭이 넓어질 때(사이드바 접힘 등) 아크가
-    커지면서 상단 여백 밖으로 밀려 잘린다. 라벨은 gauge_label()로 따로 붙인다.
+    커지면서 상단 여백 밖으로 밀려 잘린다. 라벨은 HTML 로 따로 붙인다.
     """
     fig = go.Figure(
         go.Indicator(
-            mode="gauge+number",
+            mode="gauge+number" if show_number else "gauge",
             value=value,
             number={"suffix": suffix, "font": {"color": C_BRIGHT, "size": 26}},
             gauge={
                 "axis": {
                     "range": [value_min, value_max],
-                    "tickcolor": "#5b7f9b",
-                    "tickfont": {"size": 9, "color": "#7fa8c4"},
+                    "tickvals": [value_min, value_max],
+                    "showticklabels": show_number,  # 작은 게이지는 폭이 좁아 눈금 숫자가 잘린다
+                    "tickcolor": "rgba(0,0,0,0)",
+                    "tickfont": {"size": 9, "color": C_TEXT},
                 },
-                "bar": {"color": C_CYAN, "thickness": 0.72},
-                "bgcolor": "rgba(255,255,255,.03)",
+                "bar": {"color": bar_color, "thickness": 0.42},
+                "bgcolor": "rgba(255,255,255,.06)",
                 "borderwidth": 0,
                 "steps": steps or [],
             },
         )
     )
-    fig = style_dark(fig, height=215)
-    fig.update_layout(margin=dict(l=18, r=18, t=14, b=8))
+    fig = style_dark(fig, height=height)
+    fig.update_layout(margin=dict(l=24, r=24, t=10, b=4))
     return fig
 
 
-def render_supply_gauges(row: pd.Series) -> None:
-    total_supply = (
-        row.nuclear_mw + row.hydro_mw + row.solar_mw + row.wind_mw
-        + row.coal_mw + row.lng_mw + row.ess_discharge_mw
-    )
-    reserve_steps = [
-        {"range": [0, RESERVE_CRITICAL_PCT], "color": "rgba(244,63,94,.28)"},
-        {"range": [RESERVE_CRITICAL_PCT, RESERVE_WARNING_PCT], "color": "rgba(251,191,36,.25)"},
-        {"range": [RESERVE_WARNING_PCT, 30], "color": "rgba(74,222,128,.18)"},
+def _reserve_steps(settings: Settings, value_min: float = 0.0) -> list[dict]:
+    """예비율 게이지 색 구간 (Critical / Warning / Normal)."""
+    crit, warn = settings.reserve_critical_pct, settings.reserve_warning_pct
+    return [
+        {"range": [value_min, crit], "color": "rgba(248,113,113,.30)"},
+        {"range": [crit, warn], "color": "rgba(250,204,21,.28)"},
+        {"range": [warn, 30], "color": "rgba(163,230,53,.16)"},
     ]
+
+
+def _melt_by_fuel(settings: Settings, df: pd.DataFrame) -> pd.DataFrame:
+    """시간 x 발전원 긴 표 (hour, 발전원, mw)."""
+    names = {f"{f.code}_mw": f.name for f in settings.fleet}
+    melted = df.melt(id_vars=["hour"], value_vars=list(names), var_name="g", value_name="mw")
+    melted["발전원"] = melted["g"].map(names)
+    return melted
+
+
+def _compact_chart(fig: go.Figure, height: int) -> go.Figure:
+    """한 화면용 작은 차트: 범례는 위 오른쪽, 축 제목 없음, 여백 최소."""
+    fig = style_dark(fig, height=height)
+    fig.update_layout(
+        margin=dict(l=4, r=4, t=22, b=4),
+        legend=dict(orientation="h", x=1, xanchor="right", y=1.12, font=dict(size=10)),
+    )
+    fig.update_xaxes(title=None, tickfont=dict(size=10))
+    fig.update_yaxes(title=None, tickfont=dict(size=10))
+    return fig
+
+
+# ── 사이드바 (모든 관제 페이지 공용) ─────────────────────────────────────────
+
+
+def _adjust_defaults(settings: Settings) -> dict[str, float]:
+    """조정 위젯 key → 기본값. 되돌리기 버튼이 이 값으로 되돌린다."""
+    ess = settings.ess
+    return {
+        "adj_demand": 100, "adj_solar": 100, "adj_wind": 100, "adj_outage": 0,
+        "adj_ess_power": int(ess.power_mw), "adj_ess_energy": int(ess.energy_mwh),
+        "adj_ess_rte": int(round(ess.round_trip_efficiency * 100)),
+    }
+
+
+def _changed_adjust(settings: Settings) -> list[str]:
+    """기본값과 다른 조정 위젯 key 목록."""
+    defaults = _adjust_defaults(settings)
+    return [k for k, v in defaults.items() if st.session_state.get(k, v) != v]
+
+
+def _reset_adjust(defaults: dict[str, float]) -> None:
+    """되돌리기 버튼 콜백."""
+    for key, value in defaults.items():
+        st.session_state[key] = value
+
+
+def render_adjust_controls(settings: Settings) -> logic.Adjust:
+    """사이드바 what-if 조정 위젯. 모든 패널이 이 값으로 다시 계산된다."""
+    defaults = _adjust_defaults(settings)
+    for key, value in defaults.items():
+        st.session_state.setdefault(key, value)
+
+    panel_title("시뮬레이션 조정")
+    st.slider("수요 (%)", 80, 120, step=1, key="adj_demand",
+              help="시간대별 수요 전체에 곱한다. 폭염 시나리오는 115%.")
+    st.slider("태양광 출력 (%)", 0, 150, step=5, key="adj_solar")
+    st.slider("풍력 출력 (%)", 0, 150, step=5, key="adj_wind")
+    st.slider("원자력 탈락 (MW)", 0, 6000, step=200, key="adj_outage",
+              help="원자력 설비에서 빼고, 빠진 만큼 석탄·LNG가 대신 급전한다.")
+    with st.expander("ESS 사양", expanded=False):
+        st.slider("출력 (MW)", 0, 10000, step=250, key="adj_ess_power")
+        st.slider("용량 (MWh)", 0, 40000, step=1000, key="adj_ess_energy")
+        st.slider("왕복효율 (%)", 60, 100, step=1, key="adj_ess_rte")
+
+    changed = _changed_adjust(settings)
+    st.button(
+        f"기본값으로 되돌리기 ({len(changed)}개 변경)" if changed else "기본값 그대로",
+        on_click=_reset_adjust, args=(defaults,), disabled=not changed, width="stretch",
+    )
+
+    ss = st.session_state
+    return logic.Adjust(
+        demand_pct=ss.adj_demand, solar_pct=ss.adj_solar, wind_pct=ss.adj_wind,
+        outage_mw=ss.adj_outage, ess_power_mw=ss.adj_ess_power,
+        ess_energy_mwh=ss.adj_ess_energy, ess_rte=ss.adj_ess_rte / 100,
+    )
+
+
+def render_period_input() -> tuple[date, date]:
+    """탄소·ESS 분석 기간 (최종 결과물 3: 대시보드에서 분석 기간 선택)."""
+    today = date.today()
+    picked = st.date_input(
+        "분석 기간 (탄소 · ESS)", value=(today, today), key="period",
+        min_value=today - timedelta(days=365), max_value=today, format="YYYY-MM-DD",
+        help=f"시작·끝 날짜를 차례로 고른다. 최대 {logic.MAX_PERIOD_DAYS}일 "
+             "(넘으면 끝 날짜 기준으로 자른다).",
+    )
+    # 범위를 고르는 도중에는 날짜가 하나만 온다
+    days = list(picked) if isinstance(picked, (tuple, list)) else [picked]
+    if not days:
+        return today, today
+    return logic.clamp_period(days[0], days[-1])
+
+
+def render_sidebar(
+    settings: Settings, health: dict[str, ApiResult]
+) -> tuple[int, tuple[date, date], logic.Adjust]:
+    """관측 시각·분석 기간·보기 설정·조정 위젯·서비스 상태. (시각, 기간, 조정값)을 돌려준다."""
+    with st.sidebar:
+        panel_title("관측 설정")
+        hour = st.slider("관측 시각 (시)", 0, 23, 19)
+        period = render_period_input()
+        st.toggle("큰 단위로 보기 (GW · 억원 · 천t)", value=True, key="compact_units")
+
+        adjust = render_adjust_controls(settings)
+
+        panel_title("서비스 연결 (REST /health)")
+        html("".join(
+            badge(f"{name} · {res.latency_s:.2f}s" if res.ok else f"{name} · {res.error}",
+                  "ok" if res.ok else "critical")
+            for name, res in health.items()
+        ))
+        if st.button("다시 불러오기", width="stretch"):
+            st.cache_data.clear()
+            st.rerun()
+
+        st.caption(
+            f"알람 기준: 예비율 {settings.reserve_warning_pct:g}% 미만 Warning, "
+            f"{settings.reserve_critical_pct:g}% 미만 Critical (config/dashboard.yaml)"
+        )
+    return hour, period, adjust
+
+
+def build_context() -> Context:
+    """설정·서비스 상태·사이드바 입력을 모아 시계열을 계산한다."""
+    settings = get_settings()
+    urls = logic.service_urls()
+    health = {name: fetch_health(url) for name, url in urls.items()}
+    hour, (start, end), adjust = render_sidebar(settings, health)
+    today = date.today()
+    df = logic.sample_day(settings, today, adjust)
+    period = (
+        df if start == end == today else logic.sample_period(settings, start, end, adjust)
+    )
+    return Context(
+        settings=settings, urls=urls, health=health, hour=hour, adjust=adjust,
+        base=logic.sample_day(settings, today), df=df,
+        now=df.loc[df.hour == hour].iloc[0], period=period, start=start, end=end,
+    )
+
+
+def _ctx() -> Context:
+    """main 에서 만든 Context."""
+    return st.session_state["vpp_ctx"]
+
+
+# ── 통합 관제 (한 화면) ──────────────────────────────────────────────────────
+
+
+def render_adjust_notice(ctx: Context) -> None:
+    """조정값이 기본값과 다르면 적용 중인 항목과 비교표(접힘)를 보여준다."""
+    changed = _changed_adjust(ctx.settings)
+    if not changed:
+        return
+    ss = st.session_state
+    labels = {
+        "adj_demand": f"수요 {ss.adj_demand}%", "adj_solar": f"태양광 {ss.adj_solar}%",
+        "adj_wind": f"풍력 {ss.adj_wind}%", "adj_outage": f"원자력 탈락 {ss.adj_outage:,}MW",
+        "adj_ess_power": f"ESS 출력 {ss.adj_ess_power:,}MW",
+        "adj_ess_energy": f"ESS 용량 {ss.adj_ess_energy:,}MWh",
+        "adj_ess_rte": f"ESS 효율 {ss.adj_ess_rte}%",
+    }
+    shed = ctx.df.shed_mw.sum()
+    parts = [labels[k] for k in changed]
+    if shed > 0:
+        parts.append(f"⚠ 공급 부족 {logic.fmt_energy(shed, compact())}")
+    # 한 줄로 접어 둔다 — 펼치면 기본값 대비 비교표
+    with st.expander(f"**조정 적용 중** · {' · '.join(parts)} — 기본값 대비 비교"):
+        render_compare_table(ctx)
+
+
+def render_compare_table(ctx: Context) -> None:
+    """조정 결과 vs 기본값 비교표."""
+    table = logic.compare_table(ctx.settings, ctx.base, ctx.df, compact())
+
+    def color_verdict(v: str) -> str:
+        if v.startswith("✓"):
+            return "color:#a3e635;font-weight:600"
+        if v.startswith("✗"):
+            return "color:#f87171;font-weight:600"
+        return ""
+
+    st.dataframe(
+        table.style.map(color_verdict, subset=["판정"]), hide_index=True, width="stretch"
+    )
+
+
+def card() -> DeltaGenerator:
+    """한 화면용 카드. 같은 줄의 카드끼리 높이를 맞춘다."""
+    return st.container(border=True, height="stretch")
+
+
+def _gauge_card(
+    title: str, value: str, unit: str, delta_html: str, sub: str, fig: go.Figure, key: str,
+    value_color: str = C_GREEN,
+) -> None:
+    """수급 게이지 카드: 왼쪽 큰 값·변화, 오른쪽 게이지."""
+    with card():
+        html(f'<div class="vpp-kpi-head">{title}<small>실시간</small></div>')
+        left, right = st.columns([1, 1.15], vertical_alignment="center")
+        with left:
+            html(
+                f'<div class="vpp-kpi-value" style="color:{value_color}">{value}'
+                f'<span class="u">{unit}</span></div>'
+                f'<div class="vpp-kpi-line">{delta_html}</div>'
+                f'<div class="vpp-kpi-sub">{sub}</div>'
+            )
+        with right:
+            st.plotly_chart(fig, width="stretch", key=key, config=NO_BAR)
+
+
+def render_supply_gauges(ctx: Context) -> None:
+    """수요·공급·예비율 게이지 (기능 요구 10: 게이지로 표시)."""
+    s, df, now, prev = ctx.settings, ctx.df, ctx.now, ctx.prev
+    supply = sum(df[f"{f.code}_mw"] for f in s.fleet) + df.ess_discharge_mw
+    sup_now, sup_prev = float(supply[now.name]), float(supply[prev.name])
+    scale = 1000 if compact() else 1
+    gmax = 110000 / scale
+
     c1, c2, c3 = st.columns(3)
-    with c1, st.container(border=True):
-        panel_title("수요 (MW)")
-        st.plotly_chart(_gauge_figure(row.demand_mw, 100000), width="stretch", key="g_demand")
-    with c2, st.container(border=True):
-        panel_title("공급 (MW)")
-        st.plotly_chart(_gauge_figure(total_supply, 100000), width="stretch", key="g_supply")
-    with c3, st.container(border=True):
-        panel_title("예비율 (%)")
-        st.plotly_chart(
-            _gauge_figure(row.reserve_pct, 30, suffix="%", steps=reserve_steps),
-            width="stretch", key="g_reserve",
-        )
-
-
-def render_generator_cards(row: pd.Series) -> None:
-    """발전원 6종을 아이콘 카드로 분리해 현재 출력·이용률·탄소량을 보여준다."""
-    panel_title("발전원별 현황")
-    outputs = {
-        "원자력": row.nuclear_mw, "수력": row.hydro_mw, "태양광": row.solar_mw,
-        "풍력": row.wind_mw, "석탄": row.coal_mw, "LNG": row.lng_mw,
-    }
-    for col, name in zip(st.columns(6), GENERATOR_ORDER):
-        mw = outputs[name]
-        color = GENERATOR_COLOR[name]
-        r, g, b = _hex_to_rgb(color)
-        usage = min(mw / CAPACITY_MW[name] * 100, 100.0)
-        co2 = mw * CO2_TON_PER_MWH[name]
-        col.markdown(
-            f'<div class="vpp-gen-card" style="'
-            f"background:linear-gradient(180deg,rgba({r},{g},{b},.15),rgba({r},{g},{b},.03));"
-            f"border-color:rgba({r},{g},{b},.30);border-left-color:{color}\">"
-            f'<div class="vpp-gen-head">{gen_icon(name)}'
-            f'<span class="vpp-gen-name" style="color:{color}">{name}</span></div>'
-            f'<div class="vpp-gen-value">{mw:,.0f}<span class="vpp-gen-unit">MW</span></div>'
-            f'<div class="vpp-gen-bar">'
-            f'<span style="width:{usage:.1f}%;background:{color}"></span></div>'
-            f'<div class="vpp-gen-foot"><span>이용률 {usage:.0f}%</span>'
-            f"<span>{co2:,.0f} tCO2</span></div></div>",
-            unsafe_allow_html=True,
-        )
-
-
-def render_merit_order(df: pd.DataFrame) -> None:
-    panel_title("Merit Order 스택 차트 (시간대별 급전 구성)")
-    label_map = {
-        "nuclear_mw": "원자력", "hydro_mw": "수력", "solar_mw": "태양광",
-        "wind_mw": "풍력", "coal_mw": "석탄", "lng_mw": "LNG",
-    }
-    melted = df.melt(
-        id_vars=["hour"], value_vars=list(label_map),
-        var_name="generator", value_name="mw",
-    )
-    melted["generator"] = melted["generator"].map(label_map)
-
-    fig = px.bar(
-        melted, x="hour", y="mw", color="generator",
-        category_orders={"generator": GENERATOR_ORDER},
-        color_discrete_map=GENERATOR_COLOR,
-        labels={"hour": "시간", "mw": "출력 (MW)", "generator": "발전원"},
-    )
-    fig.add_scatter(
-        x=df["hour"], y=df["demand_mw"], mode="lines", name="수요",
-        line=dict(color=C_YELLOW, width=2, dash="dot"),
-    )
-    fig.update_traces(marker_line_width=0, selector=dict(type="bar"))
-    fig.update_layout(barmode="stack", legend=dict(orientation="h", y=-0.18))
-    st.plotly_chart(style_dark(fig, height=360), width="stretch", key="c_merit")
-
-
-def render_dispatch_summary(df: pd.DataFrame) -> None:
-    panel_title("최적화 결과 (MILP)")
-    mock_saving_pct = 12.4
-    r1c1, r1c2 = st.columns(2)
-    r1c1.metric("총 비용 (일간)", "43.1억원")
-    r1c2.metric("절감률", f"{mock_saving_pct:.1f}%", delta="목표 10%↑")
-    r2c1, r2c2 = st.columns(2)
-    r2c1.metric("API 응답", "3.2초", delta="목표 10초↓")
-    r2c2.metric("시나리오", "12개", delta="목표 10개↑")
-
-    constraints = [
-        "수급균형", "예비율≥10%", "출력 상하한",
-        "램프율", "최소기동정지", "수력저수율<30%",
-    ]
-    mock_pass = [True, True, True, True, True, True]
-    st.markdown(
-        "".join(
-            badge(f"{i + 1}. {name} ✓" if ok else f"{i + 1}. {name} ✗", "ok" if ok else "critical")
-            for i, (name, ok) in enumerate(zip(constraints, mock_pass))
-        ),
-        unsafe_allow_html=True,
-    )
-
-
-def render_carbon(df: pd.DataFrame) -> None:
-    panel_title("탄소 배출량 추이")
-    fig = px.area(df, x="hour", y="carbon_ton", labels={"hour": "시간", "carbon_ton": "tCO2"})
-    fig.update_traces(line_color=C_PINK, fillcolor="rgba(244,114,182,.18)")
-    st.plotly_chart(style_dark(fig, height=290), width="stretch", key="c_carbon")
-    st.metric("일간 누적 배출량", f"{df['carbon_ton'].sum():,.0f} tCO2")
-
-
-def render_ess(df: pd.DataFrame) -> None:
-    panel_title("ESS 충/방전 · SoC")
-    fig = make_subplots(specs=[[{"secondary_y": True}]])
-    fig.add_bar(x=df["hour"], y=df["ess_discharge_mw"], name="방전", marker_color=C_VIOLET)
-    fig.add_bar(x=df["hour"], y=-df["ess_charge_mw"], name="충전", marker_color="#4f46e5")
-    fig.add_scatter(
-        x=df["hour"], y=df["ess_soc_pct"], name="SoC (%)",
-        line=dict(color=C_YELLOW, width=2), secondary_y=True,
-    )
-    fig.update_traces(marker_line_width=0, selector=dict(type="bar"))
-    fig.update_layout(barmode="relative", legend=dict(orientation="h", y=-0.18))
-    fig.update_yaxes(title_text="MW", secondary_y=False)
-    fig.update_yaxes(
-        title_text="SoC (%)", range=[0, 100], secondary_y=True,
-        gridcolor="rgba(0,0,0,0)", linecolor="rgba(34,211,238,.20)",
-    )
-    st.plotly_chart(style_dark(fig, height=290), width="stretch", key="c_ess")
-
-    peak_before = df["demand_mw"].max()
-    peak_after = (df["demand_mw"] - df["ess_discharge_mw"] + df["ess_charge_mw"]).max()
-    peak_cut_pct = (peak_before - peak_after) / peak_before * 100
-    st.metric("피크 감소율", f"{peak_cut_pct:.1f}%", delta="목표 5%↑")
-
-
-def render_crisis_simulator(df: pd.DataFrame, hour: int) -> None:
-    panel_title("위기 시나리오 시뮬레이터")
-    scenario = st.selectbox("시나리오", list(CRISIS_SCENARIOS), key="crisis_scenario")
-
-    row = df.loc[df.hour == hour].iloc[0]
-    new_demand, new_capacity = apply_scenario(row, scenario)
-    new_reserve = (new_capacity - new_demand) / new_demand * 100
-
-    steps = [
-        {"range": [-30, RESERVE_CRITICAL_PCT], "color": "rgba(244,63,94,.28)"},
-        {"range": [RESERVE_CRITICAL_PCT, RESERVE_WARNING_PCT], "color": "rgba(251,191,36,.25)"},
-        {"range": [RESERVE_WARNING_PCT, 30], "color": "rgba(74,222,128,.18)"},
-    ]
-    # 두 게이지는 눈금 범위를 반드시 동일하게 둔다 — 다르면 같은 값도 바늘 위치가
-    # 달라 보여 before/after 비교가 왜곡된다.
-    c1, c2 = st.columns(2)
     with c1:
-        gauge_label(f"{hour}시 평시 (%)")
-        st.plotly_chart(
-            _gauge_figure(row.reserve_pct, 30, suffix="%", steps=steps, value_min=-30),
-            width="stretch", key="g_crisis_base",
+        value, unit = pw(now.demand_mw).split(" ")
+        _gauge_card(
+            "전력 수요", value, unit, _delta(_pct_change(now.demand_mw, prev.demand_mw)),
+            f"일 피크 {pw(df.demand_mw.max())}",
+            _gauge_figure(now.demand_mw / scale, gmax, show_number=False, height=H_GAUGE),
+            "g_demand",
         )
     with c2:
-        gauge_label(f"{hour}시 · {scenario} (%)")
-        st.plotly_chart(
-            _gauge_figure(new_reserve, 30, suffix="%", steps=steps, value_min=-30),
-            width="stretch", key="g_crisis_after",
+        value, unit = pw(sup_now).split(" ")
+        _gauge_card(
+            "공급 능력", value, unit, _delta(_pct_change(sup_now, sup_prev)),
+            f"ESS 방전 {pw(now.ess_discharge_mw)} 포함",
+            _gauge_figure(sup_now / scale, gmax, show_number=False, height=H_GAUGE,
+                          bar_color=C_YELLOW),
+            "g_supply",
+        )
+    with c3:
+        label, css_class = logic.reserve_status(s, now.reserve_pct)
+        color = STATUS_COLOR[css_class]
+        _gauge_card(
+            "예비율", f"{now.reserve_pct:.1f}", "%",
+            _delta(now.reserve_pct - prev.reserve_pct, "%p")
+            + f'<span class="vpp-alarm">{badge(label, css_class)}</span>',
+            f'<span class="nw">Warning &lt;{s.reserve_warning_pct:g}%</span> · '
+            f'<span class="nw">Critical &lt;{s.reserve_critical_pct:g}%</span>',
+            _gauge_figure(now.reserve_pct, 30, steps=_reserve_steps(s), show_number=False,
+                          height=H_GAUGE, bar_color=color),
+            "g_reserve", value_color=color,
         )
 
-    label, css_class = reserve_status(new_reserve)
-    ok = new_reserve >= RESERVE_CRITICAL_PCT
-    verdict = "유지 ✓" if ok else "위반 ✗"
-    st.markdown(
-        badge(f"{label} — 예비율 5% 이상 {verdict}", "ok" if ok else "critical"),
-        unsafe_allow_html=True,
+
+def render_realtime_card(ctx: Context) -> None:
+    """collector 실측 최신값 (수요·SMP)."""
+    demand = fetch_collector(ctx.urls["collector"], "power_demand", 1)
+    smp = fetch_collector(ctx.urls["collector"], "smp", 1)
+    with card():
+        html(f'<div class="vpp-kpi-head">KPX 실측{source_tag(demand.ok, demand.latency_s)}'
+             "</div>")
+        last_demand = logic.latest_row(demand) if demand.ok else None
+        last_smp = logic.latest_row(smp) if smp.ok else None
+        if not last_demand:
+            html(f'<div class="vpp-kpi-sub vpp-empty">collector 응답 없음<br>'
+                 f'{demand.error or "데이터 없음"}</div>')
+            return
+        rows = [("수요", pw(last_demand["demand_mw"]), last_demand["ts"])]
+        if last_smp and last_smp.get("smp_won_per_kwh") is not None:
+            rows.append(("SMP", f"{last_smp['smp_won_per_kwh']:,.1f} 원/kWh", last_smp["ts"]))
+        html("".join(
+            f'<div class="vpp-stat"><span>{k}</span><b>{v}</b><small>{ts}</small></div>'
+            for k, v, ts in rows
+        ))
+
+
+def render_merit_order(ctx: Context) -> None:
+    """시간대별 발전원 스택 (연료비 순) + 수요선."""
+    s, df = ctx.settings, ctx.df
+    fleet = sorted(s.fleet, key=lambda f: f.fuel_cost_won_per_kwh)
+    with card():
+        html('<div class="vpp-kpi-head">Merit Order 스택'
+             f'<small>{" < ".join(f.name for f in fleet)} (연료비 순)</small></div>')
+        fig = px.bar(
+            _melt_by_fuel(s, df), x="hour", y="mw", color="발전원",
+            category_orders={"발전원": [f.name for f in fleet]},
+            color_discrete_map={f.name: FUEL_COLOR[f.code] for f in s.fleet},
+            labels={"hour": "시간", "mw": "MW", "발전원": ""},
+        )
+        fig.add_scatter(
+            x=df["hour"], y=df["demand_mw"], mode="lines", name="수요",
+            line=dict(color=C_BRIGHT, width=2, dash="dot"),
+        )
+        fig.add_vline(x=ctx.hour, line=dict(color="rgba(255,255,255,.35)", width=1))
+        fig.update_traces(marker_line_width=0, selector=dict(type="bar"))
+        fig.update_layout(barmode="stack", bargap=0.22)
+        st.plotly_chart(_compact_chart(fig, H_MERIT), width="stretch", key="c_merit",
+                        config=NO_BAR)
+
+
+def render_optimization(ctx: Context) -> None:
+    """최적화 결과 — MILP 절감률·비용·응답·제약 6종 + Two-Stage VSS."""
+    s = ctx.settings
+    milp = logic.sample_dispatch_summary(ctx.df)
+    vss, live, latency = stochastic_result(ctx)
+    ok_saving = logic.meets(s, "milp_saving_pct", milp["saving_pct"])
+    constraints = milp["constraints"]
+    n_ok = sum(constraints.values())
+    all_ok = n_ok == len(constraints)
+    tip_rows = "".join(
+        f'<span class="{"ok" if ok else "bad"}">{"✓" if ok else "✗"} {name}</span>'
+        for name, ok in constraints.items()
+    )
+    with card():
+        html(
+            '<div class="vpp-kpi-head">최적화 결과<small>MILP · Two-Stage</small></div>'
+            '<div class="vpp-kpi-row">'
+            f'<span class="vpp-kpi-value" style="color:{C_GREEN if ok_saving else C_RED}">'
+            f'{milp["saving_pct"]:.1f}<span class="u">%</span></span>'
+            f'<span class="vpp-kpi-sub">Rule-based 대비 절감 '
+            f'({logic.target_text(s, "milp_saving_pct")})</span></div>'
+            f'<div class="vpp-stat"><span>MILP 연료비</span><b>{won(milp["milp_cost_won"])}</b>'
+            f'<small>Rule {won(milp["rule_cost_won"])}</small></div>'
+            f'<div class="vpp-stat"><span>API 응답</span><b>{milp["latency_s"]:.1f}초</b>'
+            f'<small>{logic.target_text(s, "milp_latency_s")}</small></div>'
+            f'<div class="vpp-stat"><span>VSS{source_tag(live, latency)}</span>'
+            f'<b>{vss["vss_pct"]:.1f}%</b>'
+            f'<small>{logic.target_text(s, "vss_pct")} · {vss["n_scenarios"]}개 시나리오</small>'
+            "</div>"
+        )
+        html(
+            f'<div class="vpp-checktip {"ok" if all_ok else "bad"}" tabindex="0">'
+            f'<span class="ic">{"✓" if all_ok else "✗"}</span>'
+            f"<span>제약 조건 {n_ok}/{len(constraints)}</span>"
+            f'<div class="tip"><b>MILP 제약 조건</b>{tip_rows}</div></div>'
+        )
+
+
+def _scenario_reserve(row: pd.Series, scenario: logic.CrisisScenario) -> float:
+    """시나리오 반영 예비율 (%)."""
+    demand, capacity = logic.apply_scenario(row, scenario)
+    return (capacity - demand) / demand * 100
+
+
+def render_crisis_card(ctx: Context) -> None:
+    """위기 시나리오 시뮬레이션 — 선택 시나리오 적용 결과 + 3종 하루 최저 예비율."""
+    s = ctx.settings
+    names = [sc.name for sc in s.crisis]
+    with card():
+        # 바로 아래가 위젯이라 Streamlit 마크다운의 음수 하단 여백(-1rem)을 메운다
+        html('<div class="vpp-kpi-head" style="margin-bottom:1rem">위기 시나리오'
+             "<small>예비율 ≥ 5% 유지</small></div>")
+        choice = st.selectbox("시나리오", ["없음", *names], key="crisis_scenario",
+                              label_visibility="collapsed")
+        base = ctx.now.reserve_pct
+        new = base if choice == "없음" else _scenario_reserve(
+            ctx.now, s.crisis[names.index(choice)]
+        )
+        label, css_class = logic.reserve_status(s, new)
+        html(
+            '<div class="vpp-kpi-row">'
+            f'<span class="vpp-kpi-sub">{ctx.hour}시 평시 {base:.1f}% →</span>'
+            f'<span class="vpp-kpi-value" style="color:{STATUS_COLOR[css_class]}">'
+            f'{new:.1f}<span class="u">%</span></span>{badge(label, css_class)}</div>'
+        )
+
+        lo, hi, crit = -10.0, 30.0, s.targets["crisis_reserve_pct"]
+
+        def pos(v: float) -> float:
+            return min(max((v - lo) / (hi - lo), 0.0), 1.0) * 100
+
+        rows = []
+        for _, r in logic.crisis_table(ctx.df, s).iterrows():
+            v, ok = r["최저 예비율(%)"], bool(r["5% 유지"])
+            color = C_GREEN if ok else C_RED
+            rows.append(
+                f'<div class="vpp-crisis-row"><span class="n">{r["시나리오"]}</span>'
+                f'<span class="bar"><i style="width:{pos(v):.1f}%;background:{color}"></i>'
+                f'<em style="left:{pos(crit):.1f}%"></em></span>'
+                f'<b style="color:{color}">{v:.1f}%</b></div>'
+            )
+        html('<div class="vpp-crisis-cap">하루 중 최저 예비율 (세로선 = 5%)</div>'
+             + "".join(rows))
+
+
+def _period_x(ctx: Context) -> pd.Series:
+    """기간 차트 x축: 하루면 시(0~23), 여러 날이면 시각."""
+    return ctx.period.hour if ctx.days == 1 else ctx.period.ts
+
+
+def _period_axis(fig: go.Figure, ctx: Context) -> go.Figure:
+    """여러 날이면 x축을 날짜 눈금으로."""
+    if ctx.days > 1:
+        fig.update_xaxes(tickformat="%m/%d", dtick=86400000 * max(1, ctx.days // 7))
+    return fig
+
+
+def render_carbon(ctx: Context) -> None:
+    """분석 기간의 시간대별 탄소 배출량 (ESS 반영 전/후)."""
+    df, x = ctx.period, _period_x(ctx)
+    total, base = df.carbon_ton.sum(), df.carbon_no_ess_ton.sum()
+    diff = total - base
+    with card():
+        html(
+            f'<div class="vpp-kpi-head">탄소 배출량 추이<small>{ctx.period_label}</small></div>'
+            '<div class="vpp-kpi-row">'
+            f'<span class="vpp-kpi-value sm">{ton(total)}</span>'
+            f'<span class="vpp-kpi-sub">{"일간" if ctx.days == 1 else "기간 합계"} · ESS 연계 '
+            f'<b style="color:{C_RED if diff > 0 else C_GREEN}">'
+            f'{"+" if diff > 0 else ""}{diff / base * 100:.2f}%</b></span></div>'
+        )
+        fig = go.Figure()
+        fig.add_scatter(
+            x=x, y=df.carbon_ton, mode="lines", name="ESS 연계", fill="tozeroy",
+            line=dict(color=C_ORANGE, width=2.5, shape="spline"),
+            fillgradient=dict(type="vertical", colorscale=[[0, "rgba(251,146,60,0)"],
+                                                           [1, "rgba(251,146,60,.35)"]]),
+        )
+        fig.add_scatter(
+            x=x, y=df.carbon_no_ess_ton, mode="lines", name="ESS 없음",
+            line=dict(color=C_TEXT, width=1.4, dash="dot", shape="spline"),
+        )
+        st.plotly_chart(_period_axis(_compact_chart(fig, H_SMALL), ctx), width="stretch",
+                        key="c_carbon", config=NO_BAR)
+
+
+def render_ess(ctx: Context) -> None:
+    """분석 기간의 ESS 충/방전·SoC 와 피크 감소율 (기간 최대 피크 기준)."""
+    s, df, x = ctx.settings, ctx.period, _period_x(ctx)
+    before, after, cut_pct = logic.peak_reduction(df)
+    ok = logic.meets(s, "ess_peak_cut_pct", cut_pct)
+    with card():
+        html(
+            '<div class="vpp-kpi-head">ESS 충/방전 · SoC'
+            f'<small>{ctx.period_label} · {logic.target_text(s, "ess_peak_cut_pct")}</small></div>'
+            '<div class="vpp-kpi-row">'
+            f'<span class="vpp-kpi-value sm" style="color:{C_GREEN if ok else C_RED}">'
+            f'{cut_pct:.1f}%</span>'
+            f'<span class="vpp-kpi-sub">피크 감소 {pw(before)} → {pw(after)}</span></div>'
+        )
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+        fig.add_bar(x=x, y=df["ess_discharge_mw"], name="방전", marker_color=C_GREEN)
+        fig.add_bar(x=x, y=-df["ess_charge_mw"], name="충전", marker_color=C_ORANGE)
+        fig.add_scatter(
+            x=x, y=df["ess_soc_pct"], name="SoC",
+            line=dict(color=C_YELLOW, width=2, shape="spline"), secondary_y=True,
+        )
+        fig.update_traces(marker_line_width=0, marker_cornerradius=3, selector=dict(type="bar"))
+        fig.update_layout(barmode="relative", bargap=0.2 if ctx.days == 1 else 0)
+        fig = _period_axis(_compact_chart(fig, H_SMALL), ctx)
+        fig.update_yaxes(range=[0, 100], secondary_y=True, gridcolor="rgba(0,0,0,0)",
+                         showticklabels=False)
+        st.plotly_chart(fig, width="stretch", key="c_ess", config=NO_BAR)
+
+
+def render_generators(ctx: Context) -> None:
+    """발전원 6종 — 현재 출력과 이용률 (목록형)."""
+    rows = []
+    for fuel in ctx.settings.fleet:
+        mw = ctx.now[f"{fuel.code}_mw"]
+        color = FUEL_COLOR[fuel.code]
+        usage = min(mw / fuel.capacity_mw * 100, 100.0)
+        rows.append(
+            f'<div class="vpp-gen-row">{gen_icon(fuel.code, 18)}'
+            f'<span class="n">{fuel.name}</span><b>{pw(mw)}</b>'
+            f'<span class="bar"><i style="width:{usage:.1f}%;background:{color}"></i></span>'
+            f'<small>{usage:.0f}%</small></div>'
+        )
+    with card():
+        html(f'<div class="vpp-kpi-head">발전원별 출력<small>{ctx.hour}시 · 이용률</small></div>'
+             + "".join(rows))
+
+
+def page_overview() -> None:
+    """통합 관제 — 필수 항목을 스크롤 없이 한 화면에 둔다."""
+    ctx = _ctx()
+    render_adjust_notice(ctx)
+
+    g, r = st.columns([3, 1])
+    with g:
+        render_supply_gauges(ctx)
+    with r:
+        render_realtime_card(ctx)
+
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        render_merit_order(ctx)
+    with c2:
+        render_optimization(ctx)
+    with c3:
+        render_crisis_card(ctx)
+
+    c4, c5, c6 = st.columns([1.15, 1.15, 0.9])
+    with c4:
+        render_carbon(ctx)
+    with c5:
+        render_ess(ctx)
+    with c6:
+        render_generators(ctx)
+
+
+# ── 분석 상세 ────────────────────────────────────────────────────────────────
+
+
+def render_forecast(settings: Settings) -> None:
+    """168h 수요 예측 + 90% PI 와 예측 성능 지표."""
+    fc = logic.sample_forecast(settings)
+    metrics = logic.forecast_metrics(fc, settings)
+    panel_title("수요 예측 · 90% 예측구간 (168h)")
+
+    fig = go.Figure()
+    fig.add_scatter(
+        x=fc.hour, y=fc.demand_hi_mw, mode="lines", line=dict(width=0),
+        showlegend=False, hoverinfo="skip",
+    )
+    fig.add_scatter(
+        x=fc.hour, y=fc.demand_lo_mw, mode="lines", line=dict(width=0), fill="tonexty",
+        fillcolor="rgba(163,230,53,.12)", name="90% PI",
+    )
+    fig.add_scatter(x=fc.hour, y=fc.demand_fc_mw, mode="lines", name="예측",
+                    line=dict(color=C_GREEN, width=2.5, shape="spline"))
+    fig.add_scatter(x=fc.hour, y=fc.demand_actual_mw, mode="lines", name="실측",
+                    line=dict(color=C_ORANGE, width=1.6, shape="spline"))
+    fig.add_vline(x=23.5, line=dict(color="rgba(255,255,255,.35)", dash="dash"))
+    fig.update_layout(legend=dict(orientation="h", y=-0.2),
+                      xaxis_title="예측 시점 (h ahead)", yaxis_title="MW")
+    st.plotly_chart(style_dark(fig, height=300), width="stretch", key="c_forecast")
+
+    html(
+        kpi_badge(settings, "mape_24h_pct", "MAPE 24h", metrics["mape_24h_pct"])
+        + kpi_badge(settings, "mape_168h_pct", "MAPE 168h", metrics["mape_168h_pct"])
+        + kpi_badge(settings, "pi_coverage_pct", "PI Coverage", metrics["pi_coverage_pct"])
+        + kpi_badge(settings, "nmae_solar_pct", "태양광 nMAE", metrics["nmae_solar_pct"])
+        + kpi_badge(settings, "nmae_wind_pct", "풍력 nMAE", metrics["nmae_wind_pct"])
+    )
+    st.caption("nMAE 는 설비용량 기준 정규화. 점선 왼쪽이 24h ahead 구간.")
+
+
+def render_optimization_detail(ctx: Context) -> None:
+    """MILP 비용·제약과 Two-Stage RP/EV/EEV."""
+    s = ctx.settings
+    milp = logic.sample_dispatch_summary(ctx.df)
+    vss, live, latency = stochastic_result(ctx)
+    panel_title("최적화 상세 (MILP · Two-Stage)", source_tag(live, latency))
+    c1, c2, c3 = st.columns(3)
+    c1.metric("MILP 연료비 (일간)", won(milp["milp_cost_won"]))
+    c2.metric("Rule-based 연료비", won(milp["rule_cost_won"]))
+    c3.metric("불확실성 시나리오", f"{milp['n_scenarios']}개")
+    c4, c5, c6 = st.columns(3)
+    c4.metric("EV", won(vss["ev_won"]))
+    c5.metric("EEV", won(vss["eev_won"]))
+    c6.metric("RP", won(vss["rp_won"]))
+    html(
+        kpi_badge(s, "milp_saving_pct", "절감률", milp["saving_pct"])
+        + kpi_badge(s, "milp_latency_s", "응답", milp["latency_s"])
+        + kpi_badge(s, "vss_pct", "VSS", vss["vss_pct"])
+    )
+    st.caption(
+        "VSS = EEV − RP, VSS% = VSS / EEV. EEV 는 평균 시나리오(EV) 해의 1단계를 고정하고 "
+        "전 시나리오로 평가한 기대비용 (docs/formulation.md 9절)."
     )
 
 
-def render_stochastic_panel() -> None:
-    panel_title("확률론적 최적화 (선택 A · Two-Stage)")
-    st.metric("VSS", "4.8%", delta="목표 3%↑")
-    c1, c2 = st.columns(2)
-    c1.metric("시나리오 수", "10개")
-    c2.metric("Recourse 비용", "2.1억원")
-    st.caption("VSS = (평균값 문제 기대비용) − (2단계 확률계획 비용). Pyomo 결과 연동 예정.")
+def render_crisis_detail(ctx: Context) -> None:
+    """시나리오 3종을 관측 시각에 적용한 게이지 + 하루 최저 예비율 표."""
+    s = ctx.settings
+    panel_title(f"위기 시나리오 상세 ({ctx.hour}시 적용)")
+    # 게이지 눈금 범위는 모두 같게 둔다 — 다르면 같은 값도 바늘 위치가 달라 보인다.
+    steps = _reserve_steps(s, value_min=-30)
+    cols = st.columns(len(s.crisis) + 1)
+    items = [("평시", ctx.now.reserve_pct)] + [
+        (sc.name, _scenario_reserve(ctx.now, sc)) for sc in s.crisis
+    ]
+    for i, (col, (name, value)) in enumerate(zip(cols, items, strict=True)):
+        with col:
+            gauge_label(name)
+            st.plotly_chart(
+                _gauge_figure(value, 30, suffix="%", steps=steps, value_min=-30,
+                              bar_color=STATUS_COLOR[logic.reserve_status(s, value)[1]]),
+                width="stretch", key=f"g_crisis_{i}",
+            )
+    st.dataframe(logic.crisis_table(ctx.df, s), hide_index=True, width="stretch")
 
 
-def render_generation_heatmap(df: pd.DataFrame) -> None:
+def render_carbon_detail(ctx: Context) -> None:
+    """분석 기간의 발전원별 배출 내역·일별 요약과 Trade-off 설명."""
+    panel_title(f"탄소 · ESS 분석 ({ctx.period_label})")
+    st.dataframe(logic.carbon_by_fuel(ctx.period, ctx.settings), hide_index=True,
+                 width="stretch")
+    if ctx.days > 1:
+        st.dataframe(
+            logic.daily_summary(ctx.period), hide_index=True, width="stretch",
+            column_config={"날짜": st.column_config.DateColumn(format="MM/DD (ddd)")},
+        )
+    ess = ctx.adjust.ess_spec(ctx.settings.ess)
+    st.caption(
+        "야간 충전분을 석탄(0.91)이 대고 저녁 방전이 LNG(0.45)를 대체하면 "
+        "피크는 줄어도 배출은 늘 수 있다 — 비용·탄소 Trade-off 의 한 예. "
+        f"ESS {pw(ess.power_mw)} / {logic.fmt_energy(ess.energy_mwh, compact())}, "
+        f"왕복효율 {ess.round_trip_efficiency:.0%} (가정값)."
+    )
+
+
+def page_analysis() -> None:
+    """분석 상세 — 예측 성능, 최적화 수치, 위기 시나리오 게이지, 배출 내역."""
+    ctx = _ctx()
+    html('<div class="vpp-topbar"><div class="vpp-title">분석 상세</div>'
+         '<div class="vpp-subtitle">예측 · 최적화 · 위기 시나리오 · 탄소</div></div>')
+    with st.container(border=True):
+        render_forecast(ctx.settings)
+    c1, c2 = st.columns([1, 1])
+    with c1, st.container(border=True):
+        render_optimization_detail(ctx)
+    with c2, st.container(border=True):
+        render_carbon_detail(ctx)
+    with st.container(border=True):
+        render_crisis_detail(ctx)
+
+
+# ── 시간대 데이터 ────────────────────────────────────────────────────────────
+
+
+def render_realtime_mix(collector_url: str) -> None:
+    """collector 최신 발전원별 출력."""
+    mix = fetch_collector(collector_url, "generation_by_fuel", 20)
+    panel_title("KPX 발전원별 실측 출력 (collector)", source_tag(mix.ok, mix.latency_s))
+    fuel_mw = logic.latest_mix(mix) if mix.ok else {}
+    if not fuel_mw:
+        st.caption(f"collector 응답 없음 ({mix.error or '데이터 없음'})")
+        return
+    mix_df = pd.DataFrame(
+        {"발전원": [COLLECTOR_FUEL_KO.get(k, k) for k in fuel_mw], "MW": list(fuel_mw.values())}
+    ).sort_values("MW")
+    fig = px.bar(mix_df, x="MW", y="발전원", orientation="h")
+    fig.update_traces(marker_color=C_GREEN, marker_line_width=0, marker_cornerradius=6)
+    fig.update_yaxes(title=None)
+    st.plotly_chart(style_dark(fig, height=260), width="stretch", key="c_mix")
+
+
+def render_generation_heatmap(settings: Settings, df: pd.DataFrame) -> None:
+    """발전원 x 시간 출력 히트맵."""
     panel_title("발전원별 시간대 출력 히트맵")
-    label_map = {
-        "nuclear_mw": "원자력", "hydro_mw": "수력", "solar_mw": "태양광",
-        "wind_mw": "풍력", "coal_mw": "석탄", "lng_mw": "LNG",
-    }
-    melted = df.melt(id_vars=["hour"], value_vars=list(label_map), var_name="g", value_name="mw")
-    melted["g"] = melted["g"].map(label_map)
-    pivot = melted.pivot(index="g", columns="hour", values="mw").reindex(GENERATOR_ORDER[::-1])
-
+    order = [f.name for f in settings.fleet][::-1]
+    pivot = _melt_by_fuel(settings, df).pivot(index="발전원", columns="hour", values="mw")
     fig = px.imshow(
-        pivot, aspect="auto", color_continuous_scale=HEAT_SCALE,
+        pivot.reindex(order), aspect="auto", color_continuous_scale=HEAT_SCALE,
         labels={"x": "시간", "y": "발전원", "color": "MW"},
     )
     fig.update_coloraxes(colorbar=dict(outlinewidth=0, tickfont=dict(color=C_TEXT, size=9)))
     st.plotly_chart(style_dark(fig, height=260), width="stretch", key="c_heatmap")
 
 
+def render_hourly_table(settings: Settings, df: pd.DataFrame) -> None:
+    """시간대 상세표와 CSV 내려받기."""
+    panel_title("시간대 상세표")
+    table = logic.hourly_table(settings, df)
+    crit, warn = settings.reserve_critical_pct, settings.reserve_warning_pct
+
+    def color_reserve(v: float) -> str:
+        if v < crit:
+            return "background-color:rgba(248,113,113,.25)"
+        if v < warn:
+            return "background-color:rgba(250,204,21,.22)"
+        return ""
+
+    styled = (
+        table.style.map(color_reserve, subset=["예비율(%)"])
+        .format("{:,.0f}", subset=[c for c in table.columns if c.endswith("(MW)")
+                                   or c in ("배출(tCO2)", "ESS(MW, +방전)")])
+        .format("{:.1f}", subset=["SoC(%)", "예비율(%)"])
+        .format("{:,.2f}", subset=["연료비(억원)"])
+    )
+    st.dataframe(styled, hide_index=True, width="stretch", height=420)
+    st.download_button(
+        "CSV 내려받기", table.to_csv(index=False).encode("utf-8-sig"),
+        file_name="dispatch_hourly.csv", mime="text/csv",
+    )
+
+
+def page_data() -> None:
+    """시간대 데이터 — 실측, 히트맵, 상세표."""
+    ctx = _ctx()
+    html('<div class="vpp-topbar"><div class="vpp-title">시간대 데이터</div>'
+         '<div class="vpp-subtitle">KPX 실측 · 발전원별 출력 · 24시간 상세표</div></div>')
+    c1, c2 = st.columns([1, 1.6])
+    with c1, st.container(border=True):
+        render_realtime_mix(ctx.urls["collector"])
+    with c2, st.container(border=True):
+        render_generation_heatmap(ctx.settings, ctx.df)
+    with st.container(border=True):
+        render_hourly_table(ctx.settings, ctx.df)
+
+
 def main() -> None:
+    """페이지 설정·테마를 한 번 적용하고 페이지를 띄운다."""
     st.set_page_config(page_title="VPP 통합 관제 대시보드", page_icon="⚡", layout="wide")
     inject_custom_css()
-
-    df = mock_timeseries()
-
-    with st.sidebar:
-        st.markdown('<div class="vpp-section-title">관측 설정</div>', unsafe_allow_html=True)
-        hour = st.slider("관측 시각 (시)", 0, 23, 19)
-        st.markdown(
-            badge("DATA SOURCE : MOCK", "warn")
-            + '<div class="vpp-mock-tag">forecast_api / dispatch_api 미연동</div>',
-            unsafe_allow_html=True,
-        )
-
-    now = df.loc[df.hour == hour].iloc[0]
-
-    render_header()
-    render_status_banner(now.reserve_pct)
-    render_supply_gauges(now)
-
-    with st.container(border=True):
-        render_generator_cards(now)
-
-    left, right = st.columns([2, 1])
-    with left, st.container(border=True):
-        render_merit_order(df)
-    with right, st.container(border=True):
-        render_dispatch_summary(df)
-
-    c1, c2 = st.columns(2)
-    with c1, st.container(border=True):
-        render_carbon(df)
-    with c2, st.container(border=True):
-        render_ess(df)
-
-    c3, c4 = st.columns([2, 1])
-    with c3, st.container(border=True):
-        render_crisis_simulator(df, hour)
-    with c4, st.container(border=True):
-        render_stochastic_panel()
-
-    with st.container(border=True):
-        render_generation_heatmap(df)
+    nav = st.navigation([
+        st.Page(page_overview, title="통합 관제", icon=":material/monitoring:", default=True),
+        st.Page(page_analysis, title="분석 상세", icon=":material/analytics:",
+                url_path="analysis"),
+        st.Page(page_data, title="시간대 데이터", icon=":material/table_chart:",
+                url_path="data"),
+        st.Page(
+            page_scenarios.render, title="시나리오 생성기",
+            icon=":material/stacked_line_chart:", url_path="scenarios",
+        ),
+    ])
+    # 사이드바 조정은 페이지 밖(여기)에서 그려야 페이지를 옮겨도 값이 유지된다.
+    if nav.url_path != "scenarios":
+        st.session_state["vpp_ctx"] = build_context()
+    nav.run()
 
 
 if __name__ == "__main__":

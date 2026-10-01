@@ -2,9 +2,11 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir "streamlit>=1.35" "pandas>=2.2" "plotly>=5.20"
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py .
+# app.py 가 같은 폴더의 logic.py 를 가져다 쓴다. 설정은 compose 가 /app/config 로 마운트.
+COPY *.py .
 
 EXPOSE 8501
 

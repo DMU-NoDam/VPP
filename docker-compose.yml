@@ -12,7 +12,9 @@ services:
     env_file: .env
 
   dispatch_api:
-    build: ./services/dispatch_api
+    build:
+      context: .   # shared/ 스키마를 이미지에 넣으려고 레포 루트를 컨텍스트로 쓴다
+      dockerfile: services/dispatch_api/Dockerfile
     ports: ["8002:8002"]
     volumes: ["./data:/app/data", "./config:/app/config"]
     env_file: .env
@@ -20,8 +22,9 @@ services:
   dashboard:
     build: ./services/dashboard
     ports: ["8501:8501"]
-    volumes: ["./.streamlit:/app/.streamlit"]
+    volumes: ["./.streamlit:/app/.streamlit", "./config:/app/config:ro"]
     environment:
+      COLLECTOR_URL: http://collector:8000
       FORECAST_URL: http://forecast_api:8001
       DISPATCH_URL: http://dispatch_api:8002
-    depends_on: [forecast_api, dispatch_api]
+    depends_on: [collector, forecast_api, dispatch_api]

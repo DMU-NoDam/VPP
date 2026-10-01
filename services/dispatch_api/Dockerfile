@@ -2,9 +2,12 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir "fastapi>=0.110" "uvicorn[standard]>=0.29"
+# 빌드 컨텍스트는 레포 루트다 (shared/ 스키마를 같이 넣기 위해). docker-compose.yml 참고.
+COPY services/dispatch_api/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py .
+COPY shared/ shared/
+COPY services/dispatch_api/*.py .
 
 EXPOSE 8002
 
