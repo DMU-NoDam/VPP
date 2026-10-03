@@ -177,9 +177,9 @@ class Tables:
         return df
 
     def add(self, name: str, rows) -> int:
-        """행을 넣는다. key 가 같은 행이 이미 있으면 새 행으로 덮는다.
+        """행을 넣는다. key 가 같은 행이 이미 있으면 새 행은 버리고 기존 행을 둔다.
 
-        반환값은 이번 호출로 늘어난 행 수 (덮어쓴 건 세지 않는다).
+        반환값은 이번 호출로 늘어난 행 수.
         """
         ds = DATASET_BY_NAME[name]
         if not rows:
@@ -190,7 +190,7 @@ class Tables:
 
         new = pd.DataFrame(rows).reindex(columns=list(ds.columns))
         merged = new if before == 0 else pd.concat([old, new], ignore_index=True)
-        merged = merged.drop_duplicates(subset=list(ds.key), keep="last")
+        merged = merged.drop_duplicates(subset=list(ds.key), keep="first")  # 기존 행이 이긴다
         merged = merged.sort_values(list(ds.key), kind="stable").reset_index(drop=True)
 
         # 읽는 쪽(data_api)이 락 없이 일관된 상태를 보도록 표를 통째로 갈아끼운다.

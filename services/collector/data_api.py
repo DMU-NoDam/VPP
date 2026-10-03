@@ -19,6 +19,7 @@ def create_app(tables: Tables) -> FastAPI:
 
     @app.get("/datasets")
     def datasets() -> list[dict]:
+        frames = tables.frames  # 한 번만 꺼낸다. 도는 중에 교체돼도 같은 시점을 본다
         return [
             {
                 "name": d.name,
@@ -26,7 +27,7 @@ def create_app(tables: Tables) -> FastAPI:
                 "key": list(d.key),
                 "time_column": d.time_column,
                 "interval_sec": d.interval_sec,
-                "rows": len(tables.frames.get(d.name, [])),
+                "rows": len(frames.get(d.name, [])),
             }
             for d in DATASETS
         ]
