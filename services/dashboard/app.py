@@ -75,8 +75,10 @@ COLLECTOR_FUEL_KO = {
     "oil": "유류", "hydro": "수력", "pumped": "양수", "solar": "태양광", "renewable": "신재생",
 }
 STATUS_COLOR = {"ok": C_GREEN, "warn": C_YELLOW, "critical": C_RED}
+# collector 수집 주기 (services/collector/main.py INTERVAL_SEC=300). 바꾸면 같이 바꾼다.
+COLLECTOR_INTERVAL_MIN = 5
 # 한 화면 배치를 위한 차트 높이 (1080p 기준 스크롤 없음)
-H_MERIT, H_SMALL, H_GAUGE = 282, 188, 116
+H_MERIT, H_SMALL = 282, 188
 NO_BAR = {"displayModeBar": False}
 
 
@@ -453,86 +455,127 @@ def card() -> DeltaGenerator:
     return st.container(border=True, height="stretch")
 
 
-def _gauge_card(
-    title: str, value: str, unit: str, delta_html: str, sub: str, fig: go.Figure, key: str,
+def _bullet(
+    value: float, vmax: float, color: str, ticks: list[float],
+    zones: list[tuple[float, float, str]] | None = None,
+    marker: float | None = None, vmin: float = 0.0, stripe_from: float | None = None,
+) -> str:
+    """가로 불릿 게이지 HTML.
+
+    배경 구간(zones) 위에 현재값 막대를 채우고, 비교값(marker)을 세로선으로 표시한다.
+    stripe_from 을 주면 그 값부터 막대 끝까지를 줄무늬로 칠한다 (공급능력의 예비력 구간).
+    범위를 벗어난 값은 양 끝에 붙인다 (숫자는 카드 큰 값으로 따로 보인다).
+    """
+
+    def pos(v: float) -> float:
+        return min(max((v - vmin) / (vmax - vmin), 0.0), 1.0) * 100
+
+    bands = "".join(
+        f'<i class="zone" style="left:{pos(a):.2f}%;width:{pos(b) - pos(a):.2f}%;'
+        f'background:{c}"></i>'
+        for a, b, c in zones or []
+    )
+    fill = (f'<i class="fill" style="width:{pos(value):.2f}%;'
+            f'background:linear-gradient(90deg,{color}55,{color})"></i>')
+    if stripe_from is not None and value > stripe_from:
+        fill += (f'<i class="stripe" style="left:{pos(stripe_from):.2f}%;'
+                 f'width:{pos(value) - pos(stripe_from):.2f}%"></i>')
+    mark = f'<b class="mark" style="left:{pos(marker):.2f}%"></b>' if marker is not None else ""
+    tick = "".join(f'<span style="left:{pos(t):.2f}%">{t:g}</span>' for t in ticks)
+    return (f'<div class="vpp-bullet"><div class="track">{bands}{fill}{mark}</div>'
+            f'<div class="ticks">{tick}</div></div>')
+
+
+def _bullet_card(
+    title: str, value: str, unit: str, delta_html: str, bullet: str, sub: str,
     value_color: str = C_GREEN,
 ) -> None:
-    """수급 게이지 카드: 왼쪽 큰 값·변화, 오른쪽 게이지."""
+    """수급 게이지 카드: 큰 값·변화 한 줄, 그 아래 카드 폭 전체를 쓰는 불릿 게이지."""
     with card():
-        html(f'<div class="vpp-kpi-head">{title}<small>실시간</small></div>')
-        left, right = st.columns([1, 1.15], vertical_alignment="center")
-        with left:
-            html(
-                f'<div class="vpp-kpi-value" style="color:{value_color}">{value}'
-                f'<span class="u">{unit}</span></div>'
-                f'<div class="vpp-kpi-line">{delta_html}</div>'
-                f'<div class="vpp-kpi-sub">{sub}</div>'
-            )
-        with right:
-            st.plotly_chart(fig, width="stretch", key=key, config=NO_BAR)
+        html(
+            f'<div class="vpp-kpi-head">{title}<small>실시간</small></div>'
+            '<div class="vpp-kpi-row">'
+            f'<span class="vpp-kpi-value" style="color:{value_color}">{value}'
+            f'<span class="u">{unit}</span></span>{delta_html}</div>'
+            f"{bullet}"
+            + (f'<div class="vpp-bullet-sub">{sub}</div>' if sub else "")
+        )
 
 
 def render_supply_gauges(ctx: Context) -> None:
-    """수요·공급·예비율 게이지 (기능 요구 10: 게이지로 표시)."""
-    s, df, now, prev = ctx.settings, ctx.df, ctx.now, ctx.prev
-    supply = sum(df[f"{f.code}_mw"] for f in s.fleet) + df.ess_discharge_mw
-    sup_now, sup_prev = float(supply[now.name]), float(supply[prev.name])
+    """수요·공급능력·예비율 불릿 게이지 (기능 요구 10: 게이지로 표시).
+
+    공급능력 = 가용 설비 + 재생 + ESS 출력 (KPX 정의: 예비력 = 공급능력 − 수요).
+    """
+    s, now, prev = ctx.settings, ctx.now, ctx.prev
     scale = 1000 if compact() else 1
     gmax = 110000 / scale
+    ticks = [0, 55000 / scale, gmax]
 
     c1, c2, c3 = st.columns(3)
     with c1:
         value, unit = pw(now.demand_mw).split(" ")
-        _gauge_card(
+        _bullet_card(
             "전력 수요", value, unit, _delta(_pct_change(now.demand_mw, prev.demand_mw)),
-            f"일 피크 {pw(df.demand_mw.max())}",
-            _gauge_figure(now.demand_mw / scale, gmax, show_number=False, height=H_GAUGE),
-            "g_demand",
+            _bullet(now.demand_mw / scale, gmax, C_GREEN, ticks), "",
         )
     with c2:
-        value, unit = pw(sup_now).split(" ")
-        _gauge_card(
-            "공급 능력", value, unit, _delta(_pct_change(sup_now, sup_prev)),
-            f"ESS 방전 {pw(now.ess_discharge_mw)} 포함",
-            _gauge_figure(sup_now / scale, gmax, show_number=False, height=H_GAUGE,
-                          bar_color=C_YELLOW),
-            "g_supply",
+        cap, cap_prev = now.available_capacity_mw, prev.available_capacity_mw
+        value, unit = pw(cap).split(" ")
+        _bullet_card(
+            "공급 능력", value, unit, _delta(_pct_change(cap, cap_prev)),
+            _bullet(cap / scale, gmax, C_YELLOW, ticks, marker=now.demand_mw / scale,
+                    stripe_from=now.demand_mw / scale),
+            f'<span class="vpp-key stripe"></span>예비력 <b>{pw(cap - now.demand_mw)}</b>',
+            value_color=C_YELLOW,
         )
     with c3:
         label, css_class = logic.reserve_status(s, now.reserve_pct)
         color = STATUS_COLOR[css_class]
-        _gauge_card(
+        # 0–20%: 30% 까지 두면 5·7% 눈금이 붙어 읽기 어렵다 (넘는 값은 오른쪽 끝)
+        crit, warn, top = s.reserve_critical_pct, s.reserve_warning_pct, 20.0
+        zones = [
+            (0, crit, "rgba(248,113,113,.30)"),
+            (crit, warn, "rgba(250,204,21,.30)"),
+            (warn, top, "rgba(163,230,53,.12)"),
+        ]
+        _bullet_card(
             "예비율", f"{now.reserve_pct:.1f}", "%",
             _delta(now.reserve_pct - prev.reserve_pct, "%p")
             + f'<span class="vpp-alarm">{badge(label, css_class)}</span>',
-            f'<span class="nw">Warning &lt;{s.reserve_warning_pct:g}%</span> · '
-            f'<span class="nw">Critical &lt;{s.reserve_critical_pct:g}%</span>',
-            _gauge_figure(now.reserve_pct, 30, steps=_reserve_steps(s), show_number=False,
-                          height=H_GAUGE, bar_color=color),
-            "g_reserve", value_color=color,
+            _bullet(now.reserve_pct, top, color, [0, crit, warn, top], zones=zones),
+            '<span class="vpp-legend">'
+            f'<span><i style="background:{C_RED}"></i>Critical &lt;{crit:g}%</span>'
+            f'<span><i style="background:{C_YELLOW}"></i>Warning &lt;{warn:g}%</span></span>',
+            value_color=color,
         )
 
 
 def render_realtime_card(ctx: Context) -> None:
-    """collector 실측 최신값 (수요·SMP)."""
+    """collector 실측 최신값 (수요·SMP). 값을 큰 타일로, 연결 상태는 갱신 주기 태그로."""
     demand = fetch_collector(ctx.urls["collector"], "power_demand", 1)
     smp = fetch_collector(ctx.urls["collector"], "smp", 1)
+    status = (
+        f'<span class="vpp-sync ok">{COLLECTOR_INTERVAL_MIN}분 갱신</span>' if demand.ok
+        else '<span class="vpp-sync off">연결 끊김</span>'
+    )
     with card():
-        html(f'<div class="vpp-kpi-head">KPX 실측{source_tag(demand.ok, demand.latency_s)}'
-             "</div>")
+        html(f'<div class="vpp-kpi-head">KPX 실측{status}</div>')
         last_demand = logic.latest_row(demand) if demand.ok else None
         last_smp = logic.latest_row(smp) if smp.ok else None
         if not last_demand:
             html(f'<div class="vpp-kpi-sub vpp-empty">collector 응답 없음<br>'
                  f'{demand.error or "데이터 없음"}</div>')
             return
-        rows = [("수요", pw(last_demand["demand_mw"]), last_demand["ts"])]
+        value, unit = pw(last_demand["demand_mw"]).split(" ")
+        tiles = [("수요", value, unit, C_GREEN)]
         if last_smp and last_smp.get("smp_won_per_kwh") is not None:
-            rows.append(("SMP", f"{last_smp['smp_won_per_kwh']:,.1f} 원/kWh", last_smp["ts"]))
-        html("".join(
-            f'<div class="vpp-stat"><span>{k}</span><b>{v}</b><small>{ts}</small></div>'
-            for k, v, ts in rows
-        ))
+            tiles.append(("SMP", f"{last_smp['smp_won_per_kwh']:,.1f}", "원/kWh", C_ORANGE))
+        html('<div class="vpp-stats-fill">' + "".join(
+            f'<div class="vpp-tile"><span>{label}</span>'
+            f'<b style="color:{color}">{v}<small>{u}</small></b></div>'
+            for label, v, u, color in tiles
+        ) + "</div>")
 
 
 def render_merit_order(ctx: Context) -> None:
@@ -572,22 +615,33 @@ def render_optimization(ctx: Context) -> None:
         f'<span class="{"ok" if ok else "bad"}">{"✓" if ok else "✗"} {name}</span>'
         for name, ok in constraints.items()
     )
+    def chip(key: str, value: float) -> str:
+        """기준 충족 칩 (초록 ✓ / 빨강 ✗)."""
+        ok = logic.meets(s, key, value)
+        return (f'<em class="vpp-chk {"ok" if ok else "bad"}">'
+                f'{logic.target_text(s, key)} {"✓" if ok else "✗"}</em>')
+
+    def tile(label: str, value: str, sub: str, key: str | None = None, raw: float = 0) -> str:
+        badge_html = chip(key, raw) if key else ""
+        return (f'<div class="vpp-tile opt"><div><span>{label}</span><small>{sub}</small></div>'
+                f"<div><b>{value}</b>{badge_html}</div></div>")
+
     with card():
         html(
             '<div class="vpp-kpi-head">최적화 결과<small>MILP · Two-Stage</small></div>'
             '<div class="vpp-kpi-row">'
             f'<span class="vpp-kpi-value" style="color:{C_GREEN if ok_saving else C_RED}">'
             f'{milp["saving_pct"]:.1f}<span class="u">%</span></span>'
-            f'<span class="vpp-kpi-sub">Rule-based 대비 절감 '
-            f'({logic.target_text(s, "milp_saving_pct")})</span></div>'
-            f'<div class="vpp-stat"><span>MILP 연료비</span><b>{won(milp["milp_cost_won"])}</b>'
-            f'<small>Rule {won(milp["rule_cost_won"])}</small></div>'
-            f'<div class="vpp-stat"><span>API 응답</span><b>{milp["latency_s"]:.1f}초</b>'
-            f'<small>{logic.target_text(s, "milp_latency_s")}</small></div>'
-            f'<div class="vpp-stat"><span>VSS{source_tag(live, latency)}</span>'
-            f'<b>{vss["vss_pct"]:.1f}%</b>'
-            f'<small>{logic.target_text(s, "vss_pct")} · {vss["n_scenarios"]}개 시나리오</small>'
-            "</div>"
+            '<span class="vpp-hero-sub">비용 절감'
+            f'{chip("milp_saving_pct", milp["saving_pct"])}</span></div>'
+            '<div class="vpp-tiles">'
+            + tile("MILP 연료비", won(milp["milp_cost_won"]),
+                   f'Rule-based {won(milp["rule_cost_won"])}')
+            + tile("API 응답", f'{milp["latency_s"]:.1f}초', "MILP 풀이 시간",
+                   "milp_latency_s", milp["latency_s"])
+            + tile(f"VSS{source_tag(live, latency)}", f'{vss["vss_pct"]:.1f}%',
+                   f'Two-Stage · 시나리오 {vss["n_scenarios"]}개', "vss_pct", vss["vss_pct"])
+            + "</div>"
         )
         html(
             f'<div class="vpp-checktip {"ok" if all_ok else "bad"}" tabindex="0">'
@@ -609,7 +663,7 @@ def render_crisis_card(ctx: Context) -> None:
     names = [sc.name for sc in s.crisis]
     with card():
         # 바로 아래가 위젯이라 Streamlit 마크다운의 음수 하단 여백(-1rem)을 메운다
-        html('<div class="vpp-kpi-head" style="margin-bottom:1rem">위기 시나리오'
+        html('<div class="vpp-kpi-head" style="margin-bottom:1.65rem">위기 시나리오'
              "<small>예비율 ≥ 5% 유지</small></div>")
         choice = st.selectbox("시나리오", ["없음", *names], key="crisis_scenario",
                               label_visibility="collapsed")

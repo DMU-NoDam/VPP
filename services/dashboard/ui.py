@@ -65,8 +65,11 @@ def inject_custom_css() -> None:
 
         /* 한 화면 배치: 위 여백·카드 간격을 줄인다 */
         .block-container { padding: 1.4rem 1.6rem 1rem; max-width: 1680px; }
-        div[data-testid="stMainBlockContainer"] div[data-testid="stVerticalBlock"] { gap: .75rem; }
-        div[data-testid="stHorizontalBlock"] { gap: .75rem; }
+        /* 카드 사이 간격 (가로·세로) — 카드 안쪽 배치 간격은 아래에서 따로 좁게 둔다 */
+        div[data-testid="stMainBlockContainer"] div[data-testid="stVerticalBlock"] { gap: 1.1rem; }
+        div[data-testid="stHorizontalBlock"] { gap: 1.1rem; }
+        div[data-testid="stLayoutWrapper"] > div[data-testid="stVerticalBlock"]
+            div[data-testid="stHorizontalBlock"] { gap: .75rem; }
 
         /* 사이드바: 둥근 카드형 */
         section[data-testid="stSidebar"] {
@@ -135,6 +138,7 @@ def inject_custom_css() -> None:
         .vpp-kpi-head {
             display: flex; justify-content: space-between; align-items: center; gap: .5rem;
             font-size: .95rem; font-weight: 600; color: var(--vpp-text);
+            margin-bottom: .65rem;  /* 제목과 내용 사이 */
         }
         .vpp-kpi-head small {
             font-size: .7rem; color: var(--vpp-muted); font-weight: 500; text-align: right;
@@ -156,6 +160,93 @@ def inject_custom_css() -> None:
         .nw { white-space: nowrap; }
         .vpp-empty { margin-top: .8rem; line-height: 1.6; }
 
+        /* 가로 불릿 게이지 (수요·공급능력·예비율) */
+        .vpp-bullet { margin: .85rem 0 .1rem; }
+        .vpp-bullet .track {
+            position: relative; height: 14px; border-radius: 999px; overflow: hidden;
+            background: rgba(255,255,255,.07);
+        }
+        .vpp-bullet .zone { position: absolute; top: 0; bottom: 0; }
+        .vpp-bullet .fill {
+            position: absolute; left: 0; top: 3px; bottom: 3px; border-radius: 999px;
+        }
+        .vpp-bullet .mark {
+            position: absolute; top: 0; bottom: 0; width: 3px; border-radius: 2px;
+            background: var(--vpp-text); transform: translateX(-50%);
+        }
+        .vpp-bullet .stripe {
+            position: absolute; top: 3px; bottom: 3px; border-radius: 0 999px 999px 0;
+            background: repeating-linear-gradient(135deg,
+                rgba(23,24,28,.55) 0 3px, transparent 3px 6px);
+        }
+        .vpp-bullet .ticks {
+            position: relative; height: 1.1rem; margin-top: .3rem;
+            font-size: .74rem; color: #c3c5ca;
+        }
+        .vpp-bullet .ticks span { position: absolute; transform: translateX(-50%); }
+        .vpp-bullet .ticks span:first-child { transform: none; }
+        .vpp-bullet .ticks span:last-child { transform: translateX(-100%); }
+        /* 불릿 게이지 아래 설명 (예비력 · 예비율 기준 범례) */
+        .vpp-bullet-sub {
+            margin: .35rem 0 .7rem; font-size: .82rem; color: var(--vpp-text);
+        }
+        .vpp-bullet-sub b { color: var(--vpp-yellow); font-weight: 700; }
+        .vpp-key {
+            display: inline-block; width: 22px; height: 10px; margin-right: .45rem;
+            border-radius: 999px; vertical-align: -1px;
+        }
+        .vpp-key.stripe {
+            background: repeating-linear-gradient(135deg,
+                rgba(23,24,28,.55) 0 3px, transparent 3px 6px), var(--vpp-yellow);
+        }
+        .vpp-legend { display: flex; flex-wrap: wrap; gap: .25rem .9rem; }
+        .vpp-legend span { white-space: nowrap; }
+        .vpp-legend i {
+            display: inline-block; width: 9px; height: 9px; margin-right: .35rem;
+            border-radius: 50%; vertical-align: 0;
+        }
+
+        /* KPX 실측: 값 타일 + 갱신 주기 태그 */
+        .vpp-tile {
+            display: flex; justify-content: space-between; align-items: baseline;
+            padding: .55rem .8rem; border-radius: 12px; background: var(--vpp-card-2);
+        }
+        .vpp-tile + .vpp-tile { margin-top: .45rem; }
+        .vpp-tile span { font-size: .84rem; color: var(--vpp-muted); font-weight: 600; }
+        .vpp-tile b { font-size: 1.45rem; font-weight: 700; line-height: 1.1; }
+        .vpp-tile b small {
+            font-size: .78rem; margin-left: .25rem; color: var(--vpp-muted); font-weight: 600;
+        }
+        .vpp-sync {
+            display: inline-flex; align-items: center; gap: .35rem;
+            font-size: .7rem; font-weight: 600; padding: .12rem .55rem; border-radius: 999px;
+        }
+        .vpp-sync::before {
+            content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor;
+        }
+        .vpp-sync.ok { color: var(--vpp-green); background: rgba(163,230,53,.12); }
+        .vpp-sync.ok::before { animation: vpp-blink 1.6s ease-in-out infinite; }
+        .vpp-sync.off { color: var(--vpp-red); background: rgba(248,113,113,.14); }
+
+        /* 최적화 결과: 큰 절감률 + 기준 칩 + 값 타일 */
+        .vpp-hero-sub {
+            display: inline-flex; align-items: center; gap: .45rem; flex-wrap: wrap;
+            font-size: .8rem; color: var(--vpp-text);
+        }
+        .vpp-tiles { margin-top: .5rem; }
+        .vpp-tiles .vpp-tile + .vpp-tile { margin-top: .65rem; }  /* 타일 사이 간격 */
+        .vpp-tile.opt { align-items: center; padding: .45rem .75rem; }
+        .vpp-tile.opt > div { display: flex; flex-direction: column; gap: .05rem; }
+        .vpp-tile.opt > div:last-child { align-items: flex-end; }
+        .vpp-tile.opt small { font-size: .7rem; color: var(--vpp-muted); }
+        .vpp-tile.opt b { font-size: 1.15rem; color: var(--vpp-text); }
+        .vpp-chk {
+            font-style: normal; font-size: .68rem; font-weight: 700; white-space: nowrap;
+            padding: .08rem .5rem; border-radius: 999px;
+        }
+        .vpp-chk.ok { color: var(--vpp-green); background: rgba(163,230,53,.14); }
+        .vpp-chk.bad { color: var(--vpp-red); background: rgba(248,113,113,.15); }
+
         /* 이름 · 값 · 보조 한 줄 */
         .vpp-stat {
             display: grid; grid-template-columns: auto 1fr; align-items: baseline;
@@ -168,6 +259,16 @@ def inject_custom_css() -> None:
             grid-column: 1 / -1; color: var(--vpp-muted); font-size: .68rem; text-align: right;
         }
         .vpp-kpi-head + .vpp-stat { margin-top: .5rem; }
+        /* 남은 카드 높이를 채우고 항목을 고르게 배치 (KPX 실측) */
+        div[data-testid="stElementContainer"]:has(.vpp-stats-fill) {
+            flex: 1 1 auto !important; padding-bottom: 1rem;  /* 마크다운 음수 여백 보정 */
+        }
+        div[data-testid="stElementContainer"]:has(.vpp-stats-fill) div:has(.vpp-stats-fill) {
+            height: 100%;
+        }
+        .vpp-stats-fill {
+            height: 100%; display: flex; flex-direction: column; justify-content: space-around;
+        }
 
         /* MILP 제약 6종: 카드 왼쪽 아래 체크 아이콘, 마우스를 올리면 목록 */
         div[data-testid="stElementContainer"]:has(.vpp-checktip) {
