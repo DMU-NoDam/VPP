@@ -168,12 +168,42 @@ def render_summary(data: dict, res: ApiResult) -> None:
         )
 
 
+def _visible_key(ids: list[str]) -> str:
+    """표시 선택 위젯 key. 시나리오 수가 바뀌면 새 위젯으로 (이전 선택은 버린다)."""
+    return f"scn_visible_{len(ids)}"
+
+
+def _set_visible(key: str, ids: list[str]) -> None:
+    """전체 표시 / 모두 숨기기 버튼 콜백."""
+    st.session_state[key] = ids
+
+
+def render_visible_picker(data: dict) -> list[str]:
+    """그래프에 그릴 시나리오를 고른다 (기본 전체). 고른 ID 목록을 돌려준다."""
+    ids = [sc["scenario_id"] for sc in data["scenarios"]]
+    key = _visible_key(ids)
+    picked = st.pills(
+        "표시할 시나리오", ids, selection_mode="multi", default=ids, key=key,
+        help="눌러서 켜고 끈다. 기준 예측과 표본 P5–P95 띠는 항상 보인다.",
+    )
+    c1, c2, _ = st.columns([1, 1, 6])
+    c1.button("전체 표시", on_click=_set_visible, args=(key, ids), width="stretch",
+              disabled=len(picked) == len(ids))
+    c2.button("모두 숨기기", on_click=_set_visible, args=(key, []), width="stretch",
+              disabled=not picked)
+    return [i for i in ids if i in picked]  # 생성 순서 유지
+
+
 def render_fan_chart(data: dict, selected: str) -> None:
-    """시나리오 경로 묶음. 선 굵기 = 확률, 선택한 시나리오는 노랑으로 강조."""
+    """시나리오 경로 묶음. 선 굵기 = 확률, 선택한 시나리오는 노랑으로 강조.
+
+    표시할 시나리오는 사용자가 고른다 (render_visible_picker).
+    """
     panel_title("시나리오 경로 (선 굵기 = 확률)")
     name = st.radio("변수", list(VARIABLES), horizontal=True, key="scn_var",
                     label_visibility="collapsed")
     key, desc = VARIABLES[name]
+    visible = set(render_visible_picker(data))
     hours = list(range(data["horizon_h"]))
 
     fig = go.Figure()
@@ -185,6 +215,8 @@ def render_fan_chart(data: dict, selected: str) -> None:
                         fillcolor="rgba(163,230,53,.10)", name="표본 P5–P95")
 
     for sc in data["scenarios"]:
+        if sc["scenario_id"] not in visible:
+            continue
         is_sel = sc["scenario_id"] == selected
         fig.add_scatter(
             x=hours, y=series(sc, key), mode="lines",
@@ -202,7 +234,10 @@ def render_fan_chart(data: dict, selected: str) -> None:
                     line=dict(color="#f4f5f6", width=2, dash="dash"))
     fig.update_layout(legend=dict(orientation="h", y=-0.18), xaxis_title="시간", yaxis_title="MW")
     st.plotly_chart(style_dark(fig, height=380), width="stretch", key="c_fan")
-    st.caption(desc)
+    shown = f"{len(visible)}/{len(data['scenarios'])}개 표시"
+    if selected not in visible:
+        shown += f" · 표에서 선택한 {selected} 는 숨김 상태"
+    st.caption(f"{desc} · {shown}")
 
 
 def render_table(data: dict) -> str:

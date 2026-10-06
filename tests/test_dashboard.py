@@ -484,6 +484,33 @@ def test_scenario_page_renders_and_regenerates(monkeypatch) -> None:
     assert at.session_state.scn_params["n_scenarios"] == 10
 
 
+def test_scenario_visible_picker(monkeypatch) -> None:
+    """시나리오 경로 그래프에 그릴 시나리오를 고를 수 있다 (기본 전체)."""
+    from streamlit.testing.v1 import AppTest
+
+    _fake_dispatch(monkeypatch)
+    monkeypatch.syspath_prepend(str(DASHBOARD_DIR))
+
+    def shown() -> str:
+        return next(c.value for c in at.caption if "개 표시" in c.value)
+
+    at = AppTest.from_function(_scenario_page_script, default_timeout=60).run()
+    assert "10/10개 표시" in shown()
+
+    next(b for b in at.button if b.label == "모두 숨기기").click().run()
+    assert not at.exception
+    assert "0/10개 표시" in shown()
+    assert at.session_state.scn_visible_10 == []
+
+    at.session_state.scn_visible_10 = ["S02", "S05"]
+    at.run()
+    assert "2/10개 표시" in shown()
+    assert "S01 는 숨김" in shown()  # 표에서 선택된 기본값 S01 이 숨겨졌음을 알린다
+
+    next(b for b in at.button if b.label == "전체 표시").click().run()
+    assert "10/10개 표시" in shown()
+
+
 def test_scenario_page_shows_error_when_dispatch_down(monkeypatch) -> None:
     import streamlit as st
     from streamlit.testing.v1 import AppTest
