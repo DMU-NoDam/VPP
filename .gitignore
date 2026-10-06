@@ -18,3 +18,10 @@ venv/
 data/*.parquet
 !data/snapshot/
 !data/snapshot/**
+
+# claude
+CLAUDE.*
+.claude/
+
+#docs
+docs/VPP_PROJECT_CONTEXT.md
