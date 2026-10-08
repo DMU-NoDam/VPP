@@ -138,7 +138,7 @@ generators:
     min_down_h: 24
     startup_cost_krw: 500000000
     co2_ton_per_mwh: 0.00575
-    u_init: 1
+    u_init: 0
     init_state_h: 24
 
   - id: nuclear_2
@@ -151,7 +151,7 @@ generators:
     min_down_h: 24
     startup_cost_krw: 500000000
     co2_ton_per_mwh: 0.00575
-    u_init: 1
+    u_init: 0
     init_state_h: 24
 
   - id: nuclear_3
@@ -164,7 +164,7 @@ generators:
     min_down_h: 24
     startup_cost_krw: 500000000
     co2_ton_per_mwh: 0.00575
-    u_init: 1
+    u_init: 0
     init_state_h: 24
 
   - id: nuclear_4
@@ -177,7 +177,7 @@ generators:
     min_down_h: 24
     startup_cost_krw: 500000000
     co2_ton_per_mwh: 0.00575
-    u_init: 1
+    u_init: 0
     init_state_h: 24
 
   # ── 유연탄: 중간부하 6기 ───────────────────────────────────────────────────
@@ -192,7 +192,7 @@ generators:
     min_down_h: 6
     startup_cost_krw: 120000000
     co2_ton_per_mwh: 0.923
-    u_init: 1
+    u_init: 0
     init_state_h: 12
 
   - id: coal_2
@@ -205,7 +205,7 @@ generators:
     min_down_h: 6
     startup_cost_krw: 120000000
     co2_ton_per_mwh: 0.923
-    u_init: 1
+    u_init: 0
     init_state_h: 12
 
   - id: coal_3
@@ -218,7 +218,7 @@ generators:
     min_down_h: 6
     startup_cost_krw: 120000000
     co2_ton_per_mwh: 0.923
-    u_init: 1
+    u_init: 0
     init_state_h: 12
 
   - id: coal_4
@@ -231,7 +231,7 @@ generators:
     min_down_h: 6
     startup_cost_krw: 120000000
     co2_ton_per_mwh: 0.923
-    u_init: 1
+    u_init: 0
     init_state_h: 12
 
   - id: coal_5
@@ -272,7 +272,7 @@ generators:
     min_down_h: 6
     startup_cost_krw: 8000000
     co2_ton_per_mwh: 0.95
-    u_init: 1
+    u_init: 0
     init_state_h: 12
 
   # ── LNG: 첨두/부하추종 10기 ────────────────────────────────────────────────
@@ -287,7 +287,7 @@ generators:
     min_down_h: 2
     startup_cost_krw: 40000000
     co2_ton_per_mwh: 0.458
-    u_init: 1
+    u_init: 0
     init_state_h: 4
 
   - id: lng_2
@@ -300,7 +300,7 @@ generators:
     min_down_h: 2
     startup_cost_krw: 40000000
     co2_ton_per_mwh: 0.458
-    u_init: 1
+    u_init: 0
     init_state_h: 4
 
   - id: lng_3
@@ -313,7 +313,7 @@ generators:
     min_down_h: 2
     startup_cost_krw: 40000000
     co2_ton_per_mwh: 0.458
-    u_init: 1
+    u_init: 0
     init_state_h: 4
 
   - id: lng_4
@@ -326,7 +326,7 @@ generators:
     min_down_h: 2
     startup_cost_krw: 40000000
     co2_ton_per_mwh: 0.458
-    u_init: 1
+    u_init: 0
     init_state_h: 4
 
   - id: lng_5
@@ -339,7 +339,7 @@ generators:
     min_down_h: 2
     startup_cost_krw: 40000000
     co2_ton_per_mwh: 0.458
-    u_init: 1
+    u_init: 0
     init_state_h: 4
 
   - id: lng_6
@@ -451,29 +451,29 @@ generators:
   - id: hydro_1
     fuel: hydro
     # fuel_cost 데이터셋에 hydro 가 없다. 수력은 연료비 0 이므로 명시적으로 덮어쓴다.
-    fuel_cost_krw_per_mwh: 0
+    fuel_cost_krw_per_mwh: None
     p_max_mw: 525
-    p_min_mw: 0
+    p_min_mw: None
     ramp_up_mw_per_h: 525
     ramp_down_mw_per_h: 525
     min_up_h: 1
     min_down_h: 1
-    startup_cost_krw: 0
+    startup_cost_krw: None
     co2_ton_per_mwh: 0.0765
-    u_init: 1
+    u_init: 0
     init_state_h: 4
 
   - id: hydro_2
     fuel: hydro
     # fuel_cost 데이터셋에 hydro 가 없다. 수력은 연료비 0 이므로 명시적으로 덮어쓴다.
-    fuel_cost_krw_per_mwh: 0
+    fuel_cost_krw_per_mwh: None
     p_max_mw: 525
-    p_min_mw: 0
+    p_min_mw: None
     ramp_up_mw_per_h: 525
     ramp_down_mw_per_h: 525
     min_up_h: 1
     min_down_h: 1
-    startup_cost_krw: 0
+    startup_cost_krw: None
     co2_ton_per_mwh: 0.0765
-    u_init: 1
+    u_init: 0
     init_state_h: 4

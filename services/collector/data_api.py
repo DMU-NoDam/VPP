@@ -6,7 +6,7 @@ import math
 
 from fastapi import FastAPI, HTTPException
 
-from domain import DATASET_BY_NAME, DATASETS, Tables
+from domain import DATASET_BY_NAME, DATASETS, MISSING, Tables
 
 
 def create_app(tables: Tables) -> FastAPI:
@@ -52,8 +52,10 @@ def create_app(tables: Tables) -> FastAPI:
 
 
 def _clean(row: dict) -> dict:
-    """NaN 은 JSON 으로 못 내보내므로 None 으로 바꾼다."""
-    return {
-        k: (None if isinstance(v, float) and math.isnan(v) else v)
-        for k, v in row.items()
-    }
+    """값이 없는 칸은 MISSING 으로 바꾼다. NaN 은 JSON 으로 못 내보내기도 한다."""
+    return {k: (MISSING if _is_missing(v) else v) for k, v in row.items()}
+
+
+def _is_missing(value) -> bool:
+    # 방금 수집한 행은 None, CSV 에서 읽은 행은 NaN 으로 들어 있다.
+    return value is None or (isinstance(value, float) and math.isnan(value))
