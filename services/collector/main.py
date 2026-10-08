@@ -13,6 +13,7 @@ DB 는 쓰지 않는다. 데이터는 data/csv 의 CSV 로 보관하고 기동 �
   6. 주기적으로 2~4 를 다시 돌기 (실시간 수집 = 구간이 짧은 백필)
 
 1~4 는 동기다. 다 끝난 뒤에 5, 6 이 올라간다.
+COLLECT_ENABLED=false 면 2~4, 6 을 건너뛰고 1, 5 만 한다.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ import store
 
 CSV_DIR = Path(os.getenv("CSV_DIR", "data/csv"))
 INTERVAL_SEC = int(os.getenv("INTERVAL_SEC", "300"))  # 수집 주기, 원본이 5분 간격
+COLLECT_ENABLED = os.getenv("COLLECT_ENABLED", "false") == "true"  # true / false 만 쓴다
 API_HOST = os.getenv("API_HOST", "0.0.0.0")
 API_PORT = int(os.getenv("API_PORT", "8000"))
 
@@ -51,6 +53,10 @@ def bootstrap() -> domain.Tables:
     """
     tables = store.load(CSV_DIR)
     logger.info("CSV 적재 완료: %s", tables.summary())
+
+    if not COLLECT_ENABLED:
+        logger.info("COLLECT_ENABLED=false — 백필을 건너뛴다")
+        return tables
 
     collect(tables, datetime.now())
     logger.info("백필 완료: %s", tables.summary())
@@ -112,15 +118,20 @@ def run() -> None:
     tables = bootstrap()  # 1~4단계. 여기가 끝나야 아래로 넘어간다
 
     stop = threading.Event()
-    worker = threading.Thread(target=collect_loop, args=(tables, stop), daemon=True)
-    worker.start()  # 6단계. 첫 동작이 INTERVAL_SEC 대기라 실제 수집은 서버가 뜬 뒤다
+    worker = None
+    if COLLECT_ENABLED:
+        worker = threading.Thread(target=collect_loop, args=(tables, stop), daemon=True)
+        worker.start()  # 6단계. 첫 동작이 INTERVAL_SEC 대기라 실제 수집은 서버가 뜬 뒤다
+        logger.info("data_api %s:%d, 수집 주기 %ds", API_HOST, API_PORT, INTERVAL_SEC)
+    else:
+        logger.info("data_api %s:%d, 수집 꺼짐", API_HOST, API_PORT)
 
-    logger.info("data_api %s:%d, 수집 주기 %ds", API_HOST, API_PORT, INTERVAL_SEC)
     try:
         serve_api(tables, stop)  # 5단계. 메인 스레드에서 돌아야 종료 신호를 받는다
     finally:
         stop.set()
-        worker.join(timeout=10)
+        if worker is not None:
+            worker.join(timeout=10)
         logger.info("종료")
 
 
