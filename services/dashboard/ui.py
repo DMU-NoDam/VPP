@@ -62,6 +62,8 @@ def inject_custom_css() -> None:
         header[data-testid="stHeader"] { background: transparent !important; }
         div[data-testid="stDecoration"] { display: none; }
         div[data-testid="stToolbar"] { right: .6rem; }
+        /* 우상단 ⋮ 메뉴 숨김 (테마는 config.toml 로 고정) */
+        div[data-testid="stMainMenu"], #MainMenu { display: none !important; }
 
         /* 한 화면 배치: 위 여백·카드 간격을 줄인다 */
         .block-container { padding: 1.4rem 1.6rem 1rem; max-width: 1680px; }

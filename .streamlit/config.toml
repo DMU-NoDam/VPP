@@ -8,3 +8,6 @@ baseRadius = "10px"
 
 [server]
 headless = true
+
+[client]
+toolbarMode = "viewer"

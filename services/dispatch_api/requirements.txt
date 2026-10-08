@@ -1,4 +1,7 @@
-fastapi>=0.110
-uvicorn[standard]>=0.29
-pydantic>=2.6
-numpy>=1.26
+# 버전을 고정한다 — 범위(>=)만 두면 빌드 시점의 PyPI 최신판 조합에 따라
+# pip 의존성 해석이 실패할 수 있다 (2026-10-02 실제 발생). 올릴 때는 함께 검증한다.
+fastapi==0.142.2
+starlette==1.7.0
+uvicorn[standard]==0.54.0
+pydantic==2.13.5
+numpy==2.4.6
