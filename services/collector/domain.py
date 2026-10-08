@@ -18,27 +18,24 @@ import pandas as pd
 class Fuel:
     """발전원 1종."""
 
-    code: str       # 저장에 쓰는 코드값
-    name_ko: str    # 사람이 읽는 이름
-    api_field: str  # getPwrAmountByGen 응답 필드명
+    code: str     # 저장에 쓰는 코드값
+    name_ko: str  # 사람이 읽는 이름
 
 
-# getPwrAmountByGen (계통기준) 기준 9종.
-# 가스=lng, 국내탄=anthracite 로 둬서 fuel_cost 의 연료명과 맞물리게 했다.
+# 저장하는 발전원 10종. 원본 연료원이 이보다 많은데, 여기 없는 것은 버린다.
+# 원본 연료원명 -> 코드 매칭은 source 가 갖는다 (sources/kpx_trading_by_fuel.py).
 FUELS: tuple[Fuel, ...] = (
-    Fuel("hydro",           "수력",   "fuelPwr1"),
-    Fuel("oil",             "유류",   "fuelPwr2"),
-    Fuel("bituminous_coal", "유연탄", "fuelPwr3"),
-    Fuel("nuclear",         "원자력", "fuelPwr4"),
-    Fuel("pumped",          "양수",   "fuelPwr5"),  # 펌핑 중에는 음수
-    Fuel("lng",             "가스",   "fuelPwr6"),
-    Fuel("anthracite",      "국내탄", "fuelPwr7"),
-    Fuel("renewable",       "신재생", "fuelPwr8"),
-    Fuel("solar",           "태양광", "fuelPwr9"),
+    Fuel("hydro",           "수력"),
+    Fuel("oil",             "유류"),
+    Fuel("bituminous_coal", "유연탄"),
+    Fuel("nuclear",         "원자력"),
+    Fuel("pumped",          "양수"),
+    Fuel("lng",             "LNG"),
+    Fuel("anthracite",      "무연탄"),
+    Fuel("renewable",       "신재생"),
+    Fuel("solar",           "태양광"),
+    Fuel("wind",            "풍력"),
 )
-
-# API 응답 필드 -> 코드값. 응답 파싱할 때 쓴다.
-FUEL_BY_API_FIELD: dict[str, str] = {f.api_field: f.code for f in FUELS}
 
 # 코드값 목록. 값 검증에 쓴다.
 FUEL_CODES: tuple[str, ...] = tuple(f.code for f in FUELS)
@@ -73,12 +70,12 @@ POWER_DEMAND = Dataset(
     interval_sec=5 * MINUTE,
 )
 
-GENERATION_BY_FUEL = Dataset(
-    name="generation_by_fuel",
-    columns=("ts", "fuel", "mw"),
+TRADING_BY_FUEL = Dataset(
+    name="trading_by_fuel",
+    columns=("ts", "fuel", "capacity_mw", "trade_mwh"),
     key=("ts", "fuel"),
     time_column="ts",
-    interval_sec=5 * MINUTE,
+    interval_sec=HOUR,
 )
 
 SMP = Dataset(
@@ -131,7 +128,7 @@ DAM_STATUS = Dataset(
 # store.load() 가 이 순서대로 읽는다.
 DATASETS: tuple[Dataset, ...] = (
     POWER_DEMAND,
-    GENERATION_BY_FUEL,
+    TRADING_BY_FUEL,
     SMP,
     FUEL_COST,
     WEATHER,
@@ -177,9 +174,9 @@ class Tables:
         return df
 
     def add(self, name: str, rows) -> int:
-        """행을 넣는다. key 가 같은 행이 이미 있으면 새 행으로 덮는다.
+        """행을 넣는다. key 가 같은 행이 이미 있으면 새 행은 버리고 기존 행을 둔다.
 
-        반환값은 이번 호출로 늘어난 행 수 (덮어쓴 건 세지 않는다).
+        반환값은 이번 호출로 늘어난 행 수.
         """
         ds = DATASET_BY_NAME[name]
         if not rows:
@@ -190,7 +187,7 @@ class Tables:
 
         new = pd.DataFrame(rows).reindex(columns=list(ds.columns))
         merged = new if before == 0 else pd.concat([old, new], ignore_index=True)
-        merged = merged.drop_duplicates(subset=list(ds.key), keep="last")
+        merged = merged.drop_duplicates(subset=list(ds.key), keep="first")  # 기존 행이 이긴다
         merged = merged.sort_values(list(ds.key), kind="stable").reset_index(drop=True)
 
         # 읽는 쪽(data_api)이 락 없이 일관된 상태를 보도록 표를 통째로 갈아끼운다.
@@ -225,6 +222,9 @@ class Tables:
 
 TS_FORMAT = "%Y-%m-%d %H:%M:%S"  # ts, observed_at
 MONTH_FORMAT = "%Y-%m"           # fuel_cost.month
+
+# 값이 없는 칸의 표기. CSV 에도 data_api 응답에도 이 글자로 나간다. 0 은 실제 값 0 이다.
+MISSING = "None"
 
 # 기상청 응답의 결측 표기. 읽을 때 None 으로 바꾼다.
 # 기온(TA)도 같은 표기를 쓰기 때문에 실제 -9.0 C 관측값은 결측으로 버려진다. 서울(108)
