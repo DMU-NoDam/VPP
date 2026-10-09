@@ -4,14 +4,8 @@ version = "0.1.0"
 requires-python = ">=3.10,<3.13"
 dependencies = [
   "fastapi>=0.110", "uvicorn[standard]>=0.29", "pandas>=2.2",
-  "pydantic>=2.6", "requests>=2.31", "streamlit>=1.35",
-  # PuLP 4.0은 Rust 코어로 전면 재작성되어 LpVariable.dicts 등 기존 API가 제거됨.
-  # UC 모델의 u[g,t] 인덱싱 관용구를 유지하기 위해 3.x 계열로 핀한다.
-  "pulp>=2.8,<4",
-  # config 로딩 (config/*.yaml)
-  "pyyaml>=6.0",
-  # MILP solver: PuLP 기본 CBC 외에 HiGHS 사용 (C 담당 성능 KPI 10초)
-  "highspy>=1.7",
+  "pydantic>=2.6", "pulp>=2.8", "requests>=2.31", "streamlit>=1.35",
+  "plotly>=5.20",
 ]
 
 [project.optional-dependencies]

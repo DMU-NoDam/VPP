@@ -1,19 +1,479 @@
-# TODO: EPSIS 실측값으로 교체 필요 (현재는 미션 문서 예시값)
+# 발전기 제원 (UC + Dispatch MILP 입력)
+#
+# 담당: C (최적화 코어)
+# 단위 규칙: 전력 MW, 에너지 MWh, 램프 MW/h, 배출 tCO2/MWh, 비용 원(KRW).
+#            time step = 1시간.
+#
+# ── 이 파일에 없는 것 ────────────────────────────────────────────────────────
+# 1) 연료비. 월별로 변하는 값이라 하드코딩하지 않는다.
+#    data_api 의 `fuel_cost` 데이터셋(month, fuel, cost_won_per_kwh)을 로더가
+#    `fuel` 코드로 조인하고, 원/kWh → 원/MWh 변환(x1000)을 로더 한 곳에서만 한다.
+#    단 fuel_cost 는 열원 5종(nuclear, bituminous_coal, anthracite, oil, lng)만
+#    담는다. 수력은 연료비가 없으므로 아래 수력 유닛에 fuel_cost_krw_per_mwh: 0
+#    을 명시했다. 로더는 이 필드가 있으면 조인 대신 그 값을 쓴다 (조용한 기본값
+#    0 으로 처리하면 단위 버그가 숨는다).
+# 2) solar / renewable. 비급전(must-take)이므로 발전기가 아니라 예측 시계열로
+#    들어온다. 수급 균형식에서는 순수요 = 수요 - (solar + renewable) 로 다룬다.
+# 3) pumped(양수). 펌핑 중 음수 출력이라 성격이 ESS와 같다. config/ess.yaml 에서
+#    다루고 여기서는 제외한다. [미정] ESS와 양수의 경계는 팀 결정 필요.
+#
+# ── fuel 코드값 ──────────────────────────────────────────────────────────────
+# services/collector/domain.py 의 FUELS 9종과 반드시 일치해야 한다 (fuel_cost
+# 조인 키). CLAUDE.md 필수 규칙상 domain.py 를 import 할 수 없으므로 값으로 맞춘다.
+#   hydro oil bituminous_coal nuclear pumped lng anthracite renewable solar
+# [미정] 이 코드값을 shared/constants.py 로 올릴지 팀 결정 필요.
+
+meta:
+  version: 1
+  updated: 2026-09-29
+
+  # p_max_mw 산정 근거
+  # ---------------------------------------------------------------------------
+  # data/csv/generation_by_fuel.csv (2026-09-19 ~ 09-22, 5분 간격, 863행) 의
+  # 발전원별 실측 최대를 앵커로 쓰되, 그대로는 쓰지 않는다. 실측 최대 합계는
+  # 73,275 MW 인데 순수요 피크 73,842 MW 의 110% 예비율 요건은 81,226 MW 라서
+  # 실측 최대를 p_max 로 쓰면 예비율 제약이 infeasible 이 된다.
+  #
+  # 그래서 실측 최대에 가동률 보정계수 약 1.174 를 곱해 급전가능 설비 합계를
+  # 85,570 MW 로 잡았다. 이 값은 docs/data_sources.md 의 과거 CSV 에 있는
+  # 공급능력 98,790 MW 에서 피크 시점 비급전(solar+renewable) 12,850 MW 를 뺀
+  # 약 85,900 MW 와 맞춘 것이다.
+  #
+  # [미정] 발전원별 실제 설비용량은 레포에 없다. EPSIS 설비용량 자료를 확보하면
+  #        이 보정계수를 걷어내고 실측 설비용량으로 교체해야 한다.
+  capacity_basis: observed_max_x1.174
+  capacity_total_mw: 85570
+  capacity_source: data/csv/generation_by_fuel.csv + docs/data_sources.md 공급능력
+
+  # p_min_mw 산정 근거
+  # ---------------------------------------------------------------------------
+  # 기술별 최소출력 비율을 실측 최소 발전량과 맞추어 역산했다. 전 유닛 가동 시
+  # 최소출력 합계가 실측 최소와 비슷해지도록 잡아서, 과잉발전(Pmin 초과)으로
+  # infeasible 이 나지 않게 했다.
+  #   nuclear  4기 x 8500 x 0.55 = 18,700 MW  (실측 최소 18,654 MW)
+  #   coal     6기 x 5000 x 0.40 = 12,000 MW  (실측 최소 15,361 MW)
+  #   lng     10기 x 2000 x 0.40 =  8,000 MW  (실측 최소 10,406 MW)
+  # 전 유닛 가동 시 최소출력 합계 38,836 MW < 순수요 최소 50,880 MW 이므로
+  # 과잉발전 여지가 없다.
+  # [미정] 기술별 최소출력 비율의 공식 출처는 없다. 위는 실측 정합성 기반 가정이다.
+
+  # 블록 수
+  # ---------------------------------------------------------------------------
+  # 총 25기. CLAUDE.local.md 권장 범위(대표유닛 20~40기) 안이다.
+  # [미정] "발전기 블록 수"는 CLAUDE.md 미정 목록 항목이다. 아래는 제안이며,
+  #        팀 확정 시 유닛 수만 조정하면 된다 (로더·MILP는 유닛 수 무관).
+  unit_count: 25
+
+  # 배출계수 출처
+  # ---------------------------------------------------------------------------
+  # IAEA "Climate Change and Nuclear Power 2022", 전과정(life cycle) 기준,
+  # 원자료 UNECE 2022. 원 단위는 gCO2eq/kWh 이고 tCO2/MWh 로 바꿀 때 x0.001.
+  # docs/data_sources.md 에 정리된 범위의 중간값을 대표값으로 썼다.
+  #   원자력 5.1~6.4 / 석탄 751~1095 / 천연가스(복합) 403~513 / 수력 6.0~147
+  # [미정] 범위의 중간값을 쓴 것은 내 선택이다. 그리고 유류 0.70 · 무연탄 0.95 는
+  #        IAEA 표에 해당 항목이 없어 출처가 전혀 없는 내가 만든 숫자다.
+  # 정식 대안: IPCC 2006 가이드라인의 연료별 기본배출계수(tCO2/TJ)에 발전효율을
+  #            적용해 tCO2/MWh 로 환산하면 출처 있는 값이 된다. 국내 고유계수는
+  #            온실가스종합정보센터 국가 인벤토리 자료를 확인할 것.
+  emission_source: IAEA CCNP 2022 (life cycle, gCO2eq/kWh x0.001)
+
+  # 램프율
+  # ---------------------------------------------------------------------------
+  # [미정] 출처 없음. 기술별 유연성 순서(LNG > 석탄 > 원자력)만 반영한 가정이다.
+  # p_max 대비 비율로 잡았다: nuclear 10%/h, coal 60%/h, lng 100%/h,
+  # hydro 100%/h, oil 100%/h, anthracite 60%/h.
+  # 1시간 time step 에서는 램프 제약이 거의 binding 되지 않으므로, 이 값이 틀려도
+  # 해가 크게 바뀌지 않는다. 다만 위기 시나리오(solar ramp-down)에서는 영향이 있다.
+  ramp_basis: assumption_technology_flexibility_order_only
+
+  # 최소 가동/정지 시간
+  # ---------------------------------------------------------------------------
+  # [미정] 출처 없음. CLAUDE.md 미정 목록의 "일부 min up/down 값" 항목이다.
+  # coal 6h / lng 2h 는 v0 generators.yaml 값을 이어받았는데, 그 v0 자체가
+  # "미션 문서 예시값"이고 CLAUDE.md 정보 우선순위에서 과제 문서의 결과 예시는
+  # 정답이나 타깃 값이 아니다(5순위). nuclear 24h, oil 1h, hydro 1h 와 모든
+  # min_down_h 는 출처 없는 내 가정이다 (v0 에는 min_down_h 가 아예 없었다).
+  min_up_down_basis: assumption_v0_carryover_and_guess
+
+  # 기동비
+  # ---------------------------------------------------------------------------
+  # [미정] 출처 없음. CLAUDE.md 미정 목록의 "startup cost" 항목이다.
+  # 아래 값은 기술별 상대 크기(원자력 >> 석탄 > LNG > 유류 > 수력)만 반영한
+  # placeholder 다. 목적함수 = 연료비 + 기동비 이므로 절감률 KPI에 직접 영향을
+  # 주니, 팀 확정 전까지는 민감도 분석 대상으로 둔다.
+  # 대안: startup_fuel_mwh_per_mw 를 두고 fuel_cost 와 곱해 산출하면 월별 연료비
+  #       변동이 기동비에도 반영된다. 파라미터가 하나 더 늘어 일단 보류.
+  startup_cost_basis: placeholder_relative_magnitude_only
+
+# ── 발전기 목록 ──────────────────────────────────────────────────────────────
+# 필드 정의
+#   id                  유닛 식별자
+#   fuel                domain.py FUEL_CODES 준수. fuel_cost 조인 키
+#   p_max_mw            최대 출력
+#   p_min_mw            최소 출력 (가동 시). p_min_mw <= p <= p_max_mw when u=1
+#   ramp_up_mw_per_h    시간당 출력 증가 한계
+#   ramp_down_mw_per_h  시간당 출력 감소 한계
+#   min_up_h            기동 후 최소 가동 시간
+#   min_down_h          정지 후 최소 정지 시간
+#   startup_cost_krw    1회 기동 비용
+#   co2_ton_per_mwh     배출계수
+#   u_init              초기 가동 상태 (0/1)
+#   init_state_h        초기 상태가 지속된 시간. min up/down 초기 조건에 쓴다
+#
+# [미정] u_init / init_state_h 는 CLAUDE.md 미정 목록의 "초기 commitment 상태"다.
+#        아래는 기저부하 가동 / 첨두 정지라는 합리적 기본안이다.
+
 generators:
+
+  # ── 원자력: 기저부하 4기 ───────────────────────────────────────────────────
+  # 램프 10%/h, min up/down 24h 로 사실상 상시 가동. 전과정 기준이라 배출계수는
+  # 0이 아니다 (IAEA 5.1~6.4 gCO2eq/kWh).
   - id: nuclear_1
-    fuel_cost_won_per_kwh: 6.5
-    capacity_mw: 24000
-    ramp_mw_per_h: 100
-    co2_ton_per_mwh: 0.0
+    fuel: nuclear
+    p_max_mw: 8500
+    p_min_mw: 4675
+    ramp_up_mw_per_h: 850
+    ramp_down_mw_per_h: 850
+    min_up_h: 24
+    min_down_h: 24
+    startup_cost_krw: 500000000
+    co2_ton_per_mwh: 0.00575
+    u_init: 0
+    init_state_h: 24
+
+  - id: nuclear_2
+    fuel: nuclear
+    p_max_mw: 8500
+    p_min_mw: 4675
+    ramp_up_mw_per_h: 850
+    ramp_down_mw_per_h: 850
+    min_up_h: 24
+    min_down_h: 24
+    startup_cost_krw: 500000000
+    co2_ton_per_mwh: 0.00575
+    u_init: 0
+    init_state_h: 24
+
+  - id: nuclear_3
+    fuel: nuclear
+    p_max_mw: 8500
+    p_min_mw: 4675
+    ramp_up_mw_per_h: 850
+    ramp_down_mw_per_h: 850
+    min_up_h: 24
+    min_down_h: 24
+    startup_cost_krw: 500000000
+    co2_ton_per_mwh: 0.00575
+    u_init: 0
+    init_state_h: 24
+
+  - id: nuclear_4
+    fuel: nuclear
+    p_max_mw: 8500
+    p_min_mw: 4675
+    ramp_up_mw_per_h: 850
+    ramp_down_mw_per_h: 850
+    min_up_h: 24
+    min_down_h: 24
+    startup_cost_krw: 500000000
+    co2_ton_per_mwh: 0.00575
+    u_init: 0
+    init_state_h: 24
+
+  # ── 유연탄: 중간부하 6기 ───────────────────────────────────────────────────
+  # min up/down 6h (기존 v0 의 min_up_h: 6 유지). 램프 60%/h.
   - id: coal_1
-    fuel_cost_won_per_kwh: 45.2
-    capacity_mw: 28000
-    ramp_mw_per_h: 300
+    fuel: bituminous_coal
+    p_max_mw: 5000
+    p_min_mw: 2000
+    ramp_up_mw_per_h: 3000
+    ramp_down_mw_per_h: 3000
     min_up_h: 6
-    co2_ton_per_mwh: 0.91
+    min_down_h: 6
+    startup_cost_krw: 120000000
+    co2_ton_per_mwh: 0.923
+    u_init: 0
+    init_state_h: 12
+
+  - id: coal_2
+    fuel: bituminous_coal
+    p_max_mw: 5000
+    p_min_mw: 2000
+    ramp_up_mw_per_h: 3000
+    ramp_down_mw_per_h: 3000
+    min_up_h: 6
+    min_down_h: 6
+    startup_cost_krw: 120000000
+    co2_ton_per_mwh: 0.923
+    u_init: 0
+    init_state_h: 12
+
+  - id: coal_3
+    fuel: bituminous_coal
+    p_max_mw: 5000
+    p_min_mw: 2000
+    ramp_up_mw_per_h: 3000
+    ramp_down_mw_per_h: 3000
+    min_up_h: 6
+    min_down_h: 6
+    startup_cost_krw: 120000000
+    co2_ton_per_mwh: 0.923
+    u_init: 0
+    init_state_h: 12
+
+  - id: coal_4
+    fuel: bituminous_coal
+    p_max_mw: 5000
+    p_min_mw: 2000
+    ramp_up_mw_per_h: 3000
+    ramp_down_mw_per_h: 3000
+    min_up_h: 6
+    min_down_h: 6
+    startup_cost_krw: 120000000
+    co2_ton_per_mwh: 0.923
+    u_init: 0
+    init_state_h: 12
+
+  - id: coal_5
+    fuel: bituminous_coal
+    p_max_mw: 5000
+    p_min_mw: 2000
+    ramp_up_mw_per_h: 3000
+    ramp_down_mw_per_h: 3000
+    min_up_h: 6
+    min_down_h: 6
+    startup_cost_krw: 120000000
+    co2_ton_per_mwh: 0.923
+    u_init: 0
+    init_state_h: 6
+
+  - id: coal_6
+    fuel: bituminous_coal
+    p_max_mw: 5000
+    p_min_mw: 2000
+    ramp_up_mw_per_h: 3000
+    ramp_down_mw_per_h: 3000
+    min_up_h: 6
+    min_down_h: 6
+    startup_cost_krw: 120000000
+    co2_ton_per_mwh: 0.923
+    u_init: 0
+    init_state_h: 6
+
+  # ── 무연탄(국내탄): 1기 ────────────────────────────────────────────────────
+  # 실측 최대 134 MW 로 규모가 매우 작다. [미정] 배출계수 출처 없음.
+  - id: anthracite_1
+    fuel: anthracite
+    p_max_mw: 160
+    p_min_mw: 64
+    ramp_up_mw_per_h: 96
+    ramp_down_mw_per_h: 96
+    min_up_h: 6
+    min_down_h: 6
+    startup_cost_krw: 8000000
+    co2_ton_per_mwh: 0.95
+    u_init: 0
+    init_state_h: 12
+
+  # ── LNG: 첨두/부하추종 10기 ────────────────────────────────────────────────
+  # min up/down 2h (기존 v0 의 min_up_h: 2 유지). 램프 100%/h 로 가장 유연.
   - id: lng_1
-    fuel_cost_won_per_kwh: 125.8
-    capacity_mw: 32000
-    ramp_mw_per_h: 500
+    fuel: lng
+    p_max_mw: 2000
+    p_min_mw: 800
+    ramp_up_mw_per_h: 2000
+    ramp_down_mw_per_h: 2000
     min_up_h: 2
-    co2_ton_per_mwh: 0.45
+    min_down_h: 2
+    startup_cost_krw: 40000000
+    co2_ton_per_mwh: 0.458
+    u_init: 0
+    init_state_h: 4
+
+  - id: lng_2
+    fuel: lng
+    p_max_mw: 2000
+    p_min_mw: 800
+    ramp_up_mw_per_h: 2000
+    ramp_down_mw_per_h: 2000
+    min_up_h: 2
+    min_down_h: 2
+    startup_cost_krw: 40000000
+    co2_ton_per_mwh: 0.458
+    u_init: 0
+    init_state_h: 4
+
+  - id: lng_3
+    fuel: lng
+    p_max_mw: 2000
+    p_min_mw: 800
+    ramp_up_mw_per_h: 2000
+    ramp_down_mw_per_h: 2000
+    min_up_h: 2
+    min_down_h: 2
+    startup_cost_krw: 40000000
+    co2_ton_per_mwh: 0.458
+    u_init: 0
+    init_state_h: 4
+
+  - id: lng_4
+    fuel: lng
+    p_max_mw: 2000
+    p_min_mw: 800
+    ramp_up_mw_per_h: 2000
+    ramp_down_mw_per_h: 2000
+    min_up_h: 2
+    min_down_h: 2
+    startup_cost_krw: 40000000
+    co2_ton_per_mwh: 0.458
+    u_init: 0
+    init_state_h: 4
+
+  - id: lng_5
+    fuel: lng
+    p_max_mw: 2000
+    p_min_mw: 800
+    ramp_up_mw_per_h: 2000
+    ramp_down_mw_per_h: 2000
+    min_up_h: 2
+    min_down_h: 2
+    startup_cost_krw: 40000000
+    co2_ton_per_mwh: 0.458
+    u_init: 0
+    init_state_h: 4
+
+  - id: lng_6
+    fuel: lng
+    p_max_mw: 2000
+    p_min_mw: 800
+    ramp_up_mw_per_h: 2000
+    ramp_down_mw_per_h: 2000
+    min_up_h: 2
+    min_down_h: 2
+    startup_cost_krw: 40000000
+    co2_ton_per_mwh: 0.458
+    u_init: 0
+    init_state_h: 2
+
+  - id: lng_7
+    fuel: lng
+    p_max_mw: 2000
+    p_min_mw: 800
+    ramp_up_mw_per_h: 2000
+    ramp_down_mw_per_h: 2000
+    min_up_h: 2
+    min_down_h: 2
+    startup_cost_krw: 40000000
+    co2_ton_per_mwh: 0.458
+    u_init: 0
+    init_state_h: 2
+
+  - id: lng_8
+    fuel: lng
+    p_max_mw: 2000
+    p_min_mw: 800
+    ramp_up_mw_per_h: 2000
+    ramp_down_mw_per_h: 2000
+    min_up_h: 2
+    min_down_h: 2
+    startup_cost_krw: 40000000
+    co2_ton_per_mwh: 0.458
+    u_init: 0
+    init_state_h: 2
+
+  - id: lng_9
+    fuel: lng
+    p_max_mw: 2000
+    p_min_mw: 800
+    ramp_up_mw_per_h: 2000
+    ramp_down_mw_per_h: 2000
+    min_up_h: 2
+    min_down_h: 2
+    startup_cost_krw: 40000000
+    co2_ton_per_mwh: 0.458
+    u_init: 0
+    init_state_h: 2
+
+  - id: lng_10
+    fuel: lng
+    p_max_mw: 2000
+    p_min_mw: 800
+    ramp_up_mw_per_h: 2000
+    ramp_down_mw_per_h: 2000
+    min_up_h: 2
+    min_down_h: 2
+    startup_cost_krw: 40000000
+    co2_ton_per_mwh: 0.458
+    u_init: 0
+    init_state_h: 2
+
+  # ── 유류: 첨두 2기 ─────────────────────────────────────────────────────────
+  # 연료비가 가장 비싸 merit order 최후순위. [미정] 배출계수 출처 없음.
+  - id: oil_1
+    fuel: oil
+    p_max_mw: 180
+    p_min_mw: 36
+    ramp_up_mw_per_h: 180
+    ramp_down_mw_per_h: 180
+    min_up_h: 1
+    min_down_h: 1
+    startup_cost_krw: 5000000
+    co2_ton_per_mwh: 0.70
+    u_init: 0
+    init_state_h: 1
+
+  - id: oil_2
+    fuel: oil
+    p_max_mw: 180
+    p_min_mw: 36
+    ramp_up_mw_per_h: 180
+    ramp_down_mw_per_h: 180
+    min_up_h: 1
+    min_down_h: 1
+    startup_cost_krw: 5000000
+    co2_ton_per_mwh: 0.70
+    u_init: 0
+    init_state_h: 1
+
+  # ── 수력: 2기 ──────────────────────────────────────────────────────────────
+  # 저수율 제약 대상. dam_status.storage_rate_pct < 30% 이면 출력을 제한한다.
+  # 제한 강도는 [미정] 이므로 config/settings.yaml 이 아니라 별도 확정 필요.
+  # p_min_mw 0: 즉시 정지 가능.
+  #
+  # [미정 — 팀 결정 대기] 수력 총용량이 자료마다 크게 다르다.
+  #   (a) 현재 설정           2기 x 525 =  1,050 MW   (실측 최대 896 MW 기반)
+  #   (b) 과제 예시표 §5.2                  6,500 MW   (램프율 1,000 MW/h, 기동시간 0.1h)
+  # 약 6배 차이다. 수력은 연료비 0 이라 merit order 최상위이므로, 용량이 커지면
+  # 항상 full 출력으로 돌고 저수율 30% 제약이 전요단에 미치는 영향도 그만큼 커진다.
+  # 즉 이 값은 비용 절감률과 수력 제약의 시연성에 동시에 영향을 준다.
+  # 로더와 MILP 는 수력 용량에 무관하게 동작하므로, 팀 확정 후 아래 2기의
+  # p_max_mw / ramp 만 교체하거나 블록 수를 늘리면 된다.
+  - id: hydro_1
+    fuel: hydro
+    # fuel_cost 데이터셋에 hydro 가 없다. 수력은 연료비 0 이므로 명시적으로 덮어쓴다.
+    fuel_cost_krw_per_mwh: None
+    p_max_mw: 525
+    p_min_mw: None
+    ramp_up_mw_per_h: 525
+    ramp_down_mw_per_h: 525
+    min_up_h: 1
+    min_down_h: 1
+    startup_cost_krw: None
+    co2_ton_per_mwh: 0.0765
+    u_init: 0
+    init_state_h: 4
+
+  - id: hydro_2
+    fuel: hydro
+    # fuel_cost 데이터셋에 hydro 가 없다. 수력은 연료비 0 이므로 명시적으로 덮어쓴다.
+    fuel_cost_krw_per_mwh: None
+    p_max_mw: 525
+    p_min_mw: None
+    ramp_up_mw_per_h: 525
+    ramp_down_mw_per_h: 525
+    min_up_h: 1
+    min_down_h: 1
+    startup_cost_krw: None
+    co2_ton_per_mwh: 0.0765
+    u_init: 0
+    init_state_h: 4
