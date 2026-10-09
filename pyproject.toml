@@ -24,7 +24,12 @@ select = ["E", "F", "I", "N", "UP"]
 
 [tool.ruff.lint.isort]
 # collector 는 패키지 없이 평평한 모듈로 돌아간다 (main.py 가 같은 폴더에서 import).
-known-first-party = ["shared", "collector", "data_api", "domain", "sources", "store"]
+# dispatch_api 도 같은 관례를 따른다 (constants, models, loaders).
+known-first-party = [
+  "shared",
+  "collector", "data_api", "domain", "sources", "store",
+  "constants", "models", "loaders",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -17,3 +17,19 @@ solver_mip_gap: 0.0
 
 # 예비율. [미정] 산식은 팀 확정 필요 (CLAUDE.md 결정 로그 참조).
 reserve_margin_ratio: 0.10
+
+# ── 로더 ────────────────────────────────────────────────────────────────────
+# 5분 원본 -> 1시간 집계 규칙. mean | instant
+# [확정 2026-10-01] mean (시간평균). 1시간 에너지 균형과 의미가 맞다.
+#   주의: B 의 수요 예측도 같은 규칙이어야 비교·통합이 성립한다.
+resample: mean
+
+# 순수요 계산식. subtract_solar_renewable | subtract_renewable_only | demand_only
+# [미정] power_demand(= fuelPwrTot)가 태양광(fuelPwr9)을 포함하지 않는 것으로
+#        측정됐다 (태양광 제외 합산 시 잔차가 상수 7,240 MW, corr -0.069).
+#        포함 관계가 확정되면 기본값을 재검토한다.
+net_demand_mode: subtract_solar_renewable
+
+# 연료비를 가져올 월. latest | YYYY-MM
+# 지정한 월이 데이터에 없으면 최신 월로 대체하고 경고를 남긴다.
+fuel_cost_month: latest
