@@ -12,6 +12,7 @@ dependencies = [
   "pyyaml>=6.0",
   # MILP solver: PuLP 기본 CBC 외에 HiGHS 사용 (C 담당 성능 KPI 10초)
   "highspy>=1.7",
+  "plotly>=5.20",
 ]
 
 [project.optional-dependencies]

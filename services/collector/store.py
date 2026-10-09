@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from domain import DATASETS, Dataset, Tables
+from domain import DATASETS, MISSING, Dataset, Tables
 
 TAIL_BYTES = 4096  # 마지막 줄을 읽으려고 파일 끝에서 떼어보는 크기
 
@@ -30,7 +30,8 @@ def save(csv_dir: Path, tables: Tables) -> None:
     """메모리에는 있고 파일에는 없는 행을 append 한다.
 
     파일은 시간순 append 전용이라 마지막 줄의 시간이 곧 어디까지 썼는지다.
-    그보다 뒤인 행만 새로 적는다.
+    그보다 뒤인 행만 새로 적는다. 값이 없는 칸은 MISSING 으로 적고, read_csv 가 그걸
+    결측으로 읽는다.
     """
     for ds in DATASETS:
         path = csv_dir / ds.filename
@@ -42,7 +43,8 @@ def save(csv_dir: Path, tables: Tables) -> None:
             continue
 
         with path.open("a", newline="", encoding="utf-8") as f:
-            fresh.to_csv(f, header=False, index=False, columns=list(ds.columns))
+            fresh.to_csv(f, header=False, index=False, columns=list(ds.columns),
+                         na_rep=MISSING)
 
 
 def _last_time(path: Path, ds: Dataset) -> str:

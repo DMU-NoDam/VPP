@@ -20,6 +20,7 @@ services:
   dashboard:
     build: ./services/dashboard
     ports: ["8501:8501"]
+    volumes: ["./.streamlit:/app/.streamlit"]
     environment:
       FORECAST_URL: http://forecast_api:8001
       DISPATCH_URL: http://dispatch_api:8002
