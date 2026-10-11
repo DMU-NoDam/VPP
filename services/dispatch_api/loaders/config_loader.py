@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 from typing import Any
 
@@ -177,6 +178,21 @@ def _integer(entry: dict[str, Any], key: str, where: str) -> int:
 # ── 연료비 결합 ──────────────────────────────────────────────────────────────
 
 
+def _is_missing(value: Any) -> bool:
+    """data API 의 결측 표기인지. "행은 있는데 값이 없다"는 뜻이다.
+
+    collector 는 None/NaN 을 문자열 "None" 으로 바꿔 내보내고(domain.py MISSING,
+    docs/api_spec.md 결측치 규약), 같은 CSV 를 pandas 로 읽으면 NaN 으로 들어온다.
+    어느 쪽이든 "이 연료는 조인 대상이 아니다"로 읽는다 — 0 으로 읽으면 그 발전기가
+    공짜가 되어 merit order 최상위로 올라간다.
+    """
+    if value is None:
+        return True
+    if isinstance(value, float) and math.isnan(value):
+        return True
+    return isinstance(value, str) and value.strip() in constants.MISSING_MARKERS
+
+
 def select_fuel_cost_month(rows: list[dict[str, Any]], requested: str = "latest") -> str:
     """사용할 월을 고른다.
 
@@ -214,6 +230,10 @@ def resolve_fuel_costs(
     yaml 에 `fuel_cost_krw_per_mwh` override 가 있으면 조인하지 않고 그 값을 쓴다
     (수력처럼 fuel_cost 데이터셋에 항목이 없는 발전원).
 
+    데이터셋 쪽에 행은 있으나 값이 결측 표기("None")인 연료는 조인 대상에서 빼고
+    override 를 요구한다. 두 규약이 서로 다른 파일에 있으므로(데이터셋은 "None",
+    generators.yaml 은 숫자) 해석을 여기 한 곳에 모은다.
+
     조인에 실패한 연료가 있으면 예외를 낸다. 0 으로 채우면 그 발전기가 공짜가 되어
     merit order 최상위로 올라가고, 결과가 그럴듯해 보이면서 완전히 틀린다.
     """
@@ -224,7 +244,7 @@ def resolve_fuel_costs(
         if str(row.get("month")) != month:
             continue
         raw = row.get("cost_won_per_kwh")
-        if raw is None:
+        if _is_missing(raw):
             continue
         cost_krw_per_mwh[str(row["fuel"])] = (
             float(raw) * constants.KRW_PER_KWH_TO_KRW_PER_MWH

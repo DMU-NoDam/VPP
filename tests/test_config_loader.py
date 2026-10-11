@@ -84,6 +84,34 @@ def test_missing_fuel_cost_raises_instead_of_defaulting_to_zero(tmp_path):
         resolve_fuel_costs(specs, FUEL_COST_ROWS, "2026-09")
 
 
+@pytest.mark.parametrize("marker", ["None", "null", "", float("nan"), None])
+def test_missing_marker_is_not_read_as_zero(tmp_path, marker):
+    """data API 결측 표기("None" 등)를 0 으로 읽으면 안 된다.
+
+    docs/api_spec.md 규약상 데이터셋의 0 은 실제 값이고 "None" 은 값이 없다는 뜻이다.
+    결측을 0 으로 읽으면 그 발전기가 공짜가 되어 merit order 가 뒤집힌다.
+    override 가 없으면 ValueError 가 아니라 ConfigError 로 원인이 드러나야 한다.
+    """
+    rows = [*FUEL_COST_ROWS, {"month": "2026-09", "fuel": "hydro", "cost_won_per_kwh": marker}]
+    hydro = valid_generator(id="hydro_1", fuel="hydro", p_min_mw=0)
+    specs = load_generator_specs(write_generators(tmp_path, hydro))
+
+    with pytest.raises(ConfigError, match="hydro"):
+        resolve_fuel_costs(specs, rows, "2026-09")
+
+
+def test_missing_marker_falls_back_to_override(tmp_path):
+    """결측 표기가 섞여 있어도 override 가 있으면 그 값으로 통과한다 (수력 0)."""
+    rows = [*FUEL_COST_ROWS, {"month": "2026-09", "fuel": "hydro", "cost_won_per_kwh": "None"}]
+    hydro = valid_generator(
+        id="hydro_1", fuel="hydro", p_min_mw=0, fuel_cost_krw_per_mwh=0,
+    )
+    specs = load_generator_specs(write_generators(tmp_path, hydro))
+
+    gens = resolve_fuel_costs(specs, rows, "2026-09")
+    assert gens[0].fuel_cost_krw_per_mwh == 0.0
+
+
 def test_month_selection_and_fallback():
     assert select_fuel_cost_month(FUEL_COST_ROWS, "latest") == "2026-09"
     assert select_fuel_cost_month(FUEL_COST_ROWS, "2026-08") == "2026-08"

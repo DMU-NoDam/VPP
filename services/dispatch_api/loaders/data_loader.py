@@ -9,8 +9,14 @@ CSV 를 기본으로 두고, 외부 API 장애 시에도 최소 실행이 가능
 
 시간 처리
   - 원본 시각은 naive 문자열("2026-09-22 15:55:00") 이다. Asia/Seoul 로 localize 한다
-  - power_demand / generation_by_fuel 은 5분 간격이라 1시간으로 집계한다
+  - power_demand 는 5분 간격, trading_by_fuel 은 1시간 간격이라 기대 샘플 수가 다르다
+    (`to_hourly(source_interval_min=...)`). 섞으면 한쪽이 전부 불완전으로 걸러진다
   - 불완전한 시간(샘플이 모자란 시간)은 버린다. 평균이 왜곡되기 때문이다
+  - 두 데이터셋의 수집 구간이 다르므로 겹치는 구간만 쓴다 (`_common_index`)
+
+단위
+  - trading_by_fuel 의 값은 거래량(MWh)이다. time step 이 1시간이므로 수치상 MW 와
+    같아 그대로 쓰지만, time step 을 바꾸면 이 가정이 깨진다 (CLAUDE.md 단위 규칙)
 """
 
 from __future__ import annotations
@@ -28,6 +34,12 @@ from models import DispatchInput, Generator, Settings
 logger = logging.getLogger(__name__)
 
 HTTP_TIMEOUT_SEC = 10
+
+# 원본 수집 간격. collector domain.py 의 Dataset.interval_sec 와 일치해야 한다
+# (POWER_DEMAND 300s, TRADING_BY_FUEL 3600s). 1시간당 기대 샘플 수를 여기서 정하므로
+# 틀리면 그 데이터셋의 모든 시간이 "불완전"으로 걸러져 조용히 빈 결과가 된다.
+DEMAND_INTERVAL_MIN = 5
+TRADING_INTERVAL_MIN = 60
 
 
 class DataError(ValueError):
@@ -142,18 +154,25 @@ def to_hourly(
 
 def build_net_demand(
     demand_hourly: pd.DataFrame,
-    generation_hourly: pd.DataFrame,
+    trading_hourly: pd.DataFrame,
     mode: str = "subtract_solar_renewable",
 ) -> pd.Series:
-    """순수요 = 수요 - 비급전 발전량.
+    """순수요 = 수요 - 비급전 거래량.
 
-    `mode` 가 설정으로 빠져 있는 이유:
-    power_demand(= getPwrAmountByGen 의 fuelPwrTot)가 fuelPwr9(태양광)를 포함하지
-    않는 것으로 측정됐다. 태양광을 제외하고 합산하면 잔차가 평균 7,240 MW 상수로
-    떨어지고 태양광과의 상관이 사라진다(-0.069). 포함 관계가 확정되기 전까지
-    차감 방식을 바꿔 끼울 수 있게 둔다. [미정 — 팀 확인 대기]
+    power_demand 가 태양광을 포함하는지가 한동안 [미정] 이었다. 1년치(4,416h)로
+    재측정해 포함하는 것으로 확정했다 [2026-10-09]:
+      - solar 포함 합산 -> 잔차와 solar 의 상관 -0.193 (무상관)
+      - solar 제외 합산 -> 잔차와 solar 의 상관 +0.830 (강한 상관)
+    즉 수요에서 태양광을 빼지 않으면 태양광만큼이 잔차로 남는다. 3일 샘플로는
+    반대 결론(-0.069)이 나왔는데 표본이 모자랐던 것이다.
+    남는 잔차 평균 2,818 MW 는 corr(pumped)=0.45 로 양수 펌핑 부하 쪽이다.
+
+    solar / wind / renewable 은 서로 겹치지 않는다 (corr(renewable, wind) -0.049,
+    renewable 은 1,836~2,680 MW 로 거의 상수인 기저 신재생). 셋 다 차감한다.
 
     pumped(양수)는 차감하지 않는다. 비급전이 아니라 ESS 성격이라 별도 모델링한다.
+
+    `mode` 는 포함 관계가 다시 바뀔 때 갈아끼울 수 있도록 남겨둔다.
     """
     demand = demand_hourly["demand_mw"]
 
@@ -165,19 +184,20 @@ def build_net_demand(
     else:
         subtract_fuels = list(constants.MUST_TAKE_FUELS)
 
-    available = [f for f in subtract_fuels if f in generation_hourly.columns]
+    available = [f for f in subtract_fuels if f in trading_hourly.columns]
     missing = sorted(set(subtract_fuels) - set(available))
     if missing:
         raise DataError(
             f"순수요 계산에 필요한 발전원이 없다: {missing} "
-            f"(있는 컬럼: {list(generation_hourly.columns)})"
+            f"(있는 컬럼: {list(trading_hourly.columns)})"
         )
 
-    aligned = generation_hourly[available].reindex(demand.index)
+    aligned = trading_hourly[available].reindex(demand.index)
     if aligned.isna().any().any():
         gaps = aligned[aligned.isna().any(axis=1)].index[:3]
         raise DataError(
-            f"수요와 발전량의 시각이 맞지 않는다 (예: {[str(g) for g in gaps]})"
+            f"수요와 거래량의 시각이 맞지 않는다 (예: {[str(g) for g in gaps]}). "
+            "구간이 다른 두 데이터셋이면 _common_index 로 먼저 잘라야 한다"
         )
 
     net = demand - aligned.sum(axis=1)
@@ -193,22 +213,59 @@ def build_net_demand(
 # ── 조립 ─────────────────────────────────────────────────────────────────────
 
 
-def wide_generation(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """generation_by_fuel 의 세로형(ts, fuel, mw)을 가로형(ts, <fuel>...)으로."""
-    df = pd.DataFrame(rows)
-    for column in ("ts", "fuel", "mw"):
-        if column not in df.columns:
-            raise DataError(f"generation_by_fuel 에 '{column}' 컬럼이 없다")
+TRADING_VALUE_COLUMN = "trade_mwh"
 
-    wide = df.pivot_table(index="ts", columns="fuel", values="mw", aggfunc="last")
+
+def wide_trading(
+    rows: list[dict[str, Any]], value_column: str = TRADING_VALUE_COLUMN
+) -> list[dict[str, Any]]:
+    """trading_by_fuel 의 세로형(ts, fuel, <value>)을 가로형(ts, <fuel>...)으로.
+
+    `value_column` 기본값은 거래량(`trade_mwh`)이다. 같은 데이터셋에 발전원별
+    공급능력(`capacity_mw`)도 있어서, 예비율·설비용량 쪽에서 같은 함수를 재사용한다.
+    """
+    df = pd.DataFrame(rows)
+    for column in ("ts", "fuel", value_column):
+        if column not in df.columns:
+            raise DataError(
+                f"trading_by_fuel 에 '{column}' 컬럼이 없다 (있는 컬럼: {list(df.columns)})"
+            )
+
+    wide = df.pivot_table(index="ts", columns="fuel", values=value_column, aggfunc="last")
     return wide.reset_index().to_dict("records")
+
+
+def _common_index(*frames: pd.DataFrame) -> pd.DatetimeIndex:
+    """여러 데이터셋에 공통으로 있는 시각. 수집 구간이 다를 때 쓴다.
+
+    power_demand 와 trading_by_fuel 은 수집 구간이 다르다 (2026-10-09 기준 수요는
+    2026-10 까지, 거래량은 2025-12 까지). 한쪽 기준으로 reindex 하면 반대쪽이 전부
+    결측이 되므로, 겹치는 구간만 남긴다. 얼마나 잘렸는지는 로그로 남긴다 —
+    조용히 10개월을 버리면 KPI 측정 기간을 착각한다.
+    """
+    index = frames[0].index
+    for frame in frames[1:]:
+        index = index.intersection(frame.index)
+    if index.empty:
+        raise DataError(
+            "데이터셋 간 겹치는 시각이 없다 "
+            + " / ".join(f"{f.index.min()}~{f.index.max()} ({len(f)}h)" for f in frames)
+        )
+
+    dropped = [len(f) - len(index) for f in frames]
+    if any(dropped):
+        logger.info(
+            "겹치는 구간만 사용: %s ~ %s (%d시간). 데이터셋별 제외 %s",
+            index.min(), index.max(), len(index), dropped,
+        )
+    return index
 
 
 def build_dispatch_input(
     generators: list[Generator],
     settings: Settings,
     demand_rows: list[dict[str, Any]],
-    generation_rows: list[dict[str, Any]],
+    trading_rows: list[dict[str, Any]],
     dam_rows: list[dict[str, Any]] | None = None,
     horizon_h: int | None = None,
 ) -> DispatchInput:
@@ -218,17 +275,23 @@ def build_dispatch_input(
     demand_hourly = to_hourly(
         demand_rows, "ts", ["demand_mw"],
         timezone=settings.timezone, resample=settings.resample,
+        source_interval_min=DEMAND_INTERVAL_MIN,
     )
 
-    wide_rows = wide_generation(generation_rows)
+    wide_rows = wide_trading(trading_rows)
     fuel_columns = [c for c in constants.FUEL_CODES
                     if any(c in row for row in wide_rows[:1])]
-    generation_hourly = to_hourly(
+    trading_hourly = to_hourly(
         wide_rows, "ts", fuel_columns,
         timezone=settings.timezone, resample=settings.resample,
+        source_interval_min=TRADING_INTERVAL_MIN,
     )
 
-    net = build_net_demand(demand_hourly, generation_hourly, settings.net_demand_mode)
+    # 두 데이터셋의 수집 구간이 다르다. 겹치는 구간으로 먼저 자른다.
+    index = _common_index(demand_hourly, trading_hourly)
+    net = build_net_demand(
+        demand_hourly.loc[index], trading_hourly.loc[index], settings.net_demand_mode
+    )
 
     if len(net) < horizon:
         raise DataError(

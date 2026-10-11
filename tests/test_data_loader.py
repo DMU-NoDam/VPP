@@ -19,7 +19,7 @@ from loaders.data_loader import (
     build_net_demand,
     read_csv_dataset,
     to_hourly,
-    wide_generation,
+    wide_trading,
 )
 from models import Generator, Settings
 
@@ -131,14 +131,34 @@ def test_empty_rows_rejected():
 # ── 순수요 ───────────────────────────────────────────────────────────────────
 
 
-def net_demand_frames(demand: float, solar: float, renewable: float):
+def net_demand_frames(demand: float, solar: float, renewable: float, wind: float = 0.0):
     index = pd.DatetimeIndex(
         [pd.Timestamp("2026-09-20 00:00:00", tz="Asia/Seoul")], name="ts"
     )
     return (
         pd.DataFrame({"demand_mw": [demand]}, index=index),
-        pd.DataFrame({"solar": [solar], "renewable": [renewable]}, index=index),
+        pd.DataFrame(
+            {"solar": [solar], "wind": [wind], "renewable": [renewable]}, index=index
+        ),
     )
+
+
+def test_net_demand_subtracts_wind():
+    """wind 는 trading_by_fuel 에서 분리된 발전원이라 must-take 로 함께 차감된다."""
+    demand, trading = net_demand_frames(70000, 5000, 4000, wind=1200)
+
+    net = build_net_demand(demand, trading, "subtract_solar_renewable")
+
+    assert net.iloc[0] == pytest.approx(59800.0)
+
+
+def test_net_demand_requires_wind_column():
+    """wind 컬럼이 없으면 조용히 빼먹지 않고 예외를 낸다."""
+    demand, trading = net_demand_frames(70000, 5000, 4000)
+
+    with pytest.raises(DataError, match="wind"):
+        build_net_demand(demand, trading.drop(columns=["wind"]),
+                         "subtract_solar_renewable")
 
 
 def test_net_demand_subtracts_must_take():
@@ -194,22 +214,35 @@ def test_missing_must_take_fuel_rejected():
 # ── 세로형 -> 가로형 ─────────────────────────────────────────────────────────
 
 
-def test_wide_generation_pivots_long_format():
+def test_wide_trading_pivots_long_format():
     rows = [
-        {"ts": "2026-09-20 00:00:00", "fuel": "solar", "mw": 100.0},
-        {"ts": "2026-09-20 00:00:00", "fuel": "nuclear", "mw": 20000.0},
+        {"ts": "2026-09-20 00:00:00", "fuel": "solar", "trade_mwh": 100.0},
+        {"ts": "2026-09-20 00:00:00", "fuel": "nuclear", "trade_mwh": 20000.0},
     ]
 
-    wide = wide_generation(rows)
+    wide = wide_trading(rows)
 
     assert len(wide) == 1
     assert wide[0]["solar"] == 100.0
     assert wide[0]["nuclear"] == 20000.0
 
 
-def test_wide_generation_requires_expected_columns():
+def test_wide_trading_requires_expected_columns():
     with pytest.raises(DataError, match="fuel"):
-        wide_generation([{"ts": "2026-09-20 00:00:00", "mw": 1.0}])
+        wide_trading([{"ts": "2026-09-20 00:00:00", "trade_mwh": 1.0}])
+
+
+def test_wide_trading_can_pivot_capacity():
+    """같은 데이터셋의 capacity_mw 도 같은 함수로 가로형이 된다 (예비율·설비용량용)."""
+    rows = [
+        {"ts": "2026-09-20 00:00:00", "fuel": "lng", "capacity_mw": 46202.0},
+        {"ts": "2026-09-20 00:00:00", "fuel": "nuclear", "capacity_mw": 26050.0},
+    ]
+
+    wide = wide_trading(rows, value_column="capacity_mw")
+
+    assert wide[0]["lng"] == 46202.0
+    assert wide[0]["nuclear"] == 26050.0
 
 
 # ── CSV 소스 ─────────────────────────────────────────────────────────────────
@@ -357,22 +390,29 @@ def _synthetic_settings(**overrides):
     return Settings(**base)
 
 
-def _synthetic_series(start: str, hours: int, demand, solar, renewable):
-    """3시간치 5분 간격 demand/generation 원시 행을 만든다."""
-    demand_rows_, gen_rows_ = [], []
+def _synthetic_series(start: str, hours: int, demand, solar, renewable, wind=None):
+    """원시 행을 만든다. 두 데이터셋의 수집 간격이 다른 점까지 재현한다.
+
+    power_demand    5분 간격 (시간당 12행)
+    trading_by_fuel 1시간 간격 (시간당 발전원별 1행)
+    """
+    wind = wind if wind is not None else [0.0] * hours
+    demand_rows_, trading_rows_ = [], []
     ts0 = pd.Timestamp(start)
     for h in range(hours):
         for i in range(12):  # 5분 x 12 = 1시간, 완전한 시간으로 맞춤
             ts = (ts0 + pd.Timedelta(hours=h, minutes=i * 5)).strftime("%Y-%m-%d %H:%M:%S")
             demand_rows_.append({"ts": ts, "demand_mw": demand[h]})
-            gen_rows_.append({"ts": ts, "fuel": "solar", "mw": solar[h]})
-            gen_rows_.append({"ts": ts, "fuel": "renewable", "mw": renewable[h]})
-    return demand_rows_, gen_rows_
+
+        hour_ts = (ts0 + pd.Timedelta(hours=h)).strftime("%Y-%m-%d %H:%M:%S")
+        for fuel, series in (("solar", solar), ("wind", wind), ("renewable", renewable)):
+            trading_rows_.append({"ts": hour_ts, "fuel": fuel, "trade_mwh": series[h]})
+    return demand_rows_, trading_rows_
 
 
 def test_build_dispatch_input_end_to_end():
     """로더 전체 경로: 원시 행 -> DispatchInput. MILP 가 받는 최종 모양을 검증한다."""
-    demand_rows_, gen_rows_ = _synthetic_series(
+    demand_rows_, trading_rows_ = _synthetic_series(
         "2026-09-20 00:00:00", hours=3,
         demand=[70000.0, 72000.0, 68000.0],
         solar=[1000.0, 2000.0, 500.0],
@@ -386,7 +426,7 @@ def test_build_dispatch_input_end_to_end():
     generators = [_synthetic_generator()]
 
     result = dl.build_dispatch_input(
-        generators, settings, demand_rows_, gen_rows_, dam_rows_,
+        generators, settings, demand_rows_, trading_rows_, dam_rows_,
     )
 
     assert result.horizon_h == 3
@@ -404,7 +444,7 @@ def test_build_dispatch_input_end_to_end():
 
 def test_build_dispatch_input_tail_truncates_to_horizon():
     """1시간 집계가 horizon 보다 많으면 끝(최신)에서 horizon 만큼만 쓴다."""
-    demand_rows_, gen_rows_ = _synthetic_series(
+    demand_rows_, trading_rows_ = _synthetic_series(
         "2026-09-20 00:00:00", hours=5,
         demand=[1.0, 2.0, 3.0, 4.0, 5.0],
         solar=[0.0] * 5, renewable=[0.0] * 5,
@@ -412,7 +452,7 @@ def test_build_dispatch_input_tail_truncates_to_horizon():
     settings = _synthetic_settings(horizon_h=2)
 
     result = dl.build_dispatch_input(
-        [_synthetic_generator()], settings, demand_rows_, gen_rows_,
+        [_synthetic_generator()], settings, demand_rows_, trading_rows_,
     )
 
     assert result.horizon_h == 2
@@ -421,25 +461,69 @@ def test_build_dispatch_input_tail_truncates_to_horizon():
 
 def test_build_dispatch_input_insufficient_history_rejected():
     """원본이 horizon 보다 짧으면 (조용히 패딩하지 않고) 예외를 낸다."""
-    demand_rows_, gen_rows_ = _synthetic_series(
+    demand_rows_, trading_rows_ = _synthetic_series(
         "2026-09-20 00:00:00", hours=2,
         demand=[1.0, 2.0], solar=[0.0, 0.0], renewable=[0.0, 0.0],
     )
     settings = _synthetic_settings(horizon_h=24)
 
     with pytest.raises(DataError, match="horizon"):
-        dl.build_dispatch_input([_synthetic_generator()], settings, demand_rows_, gen_rows_)
+        dl.build_dispatch_input([_synthetic_generator()], settings, demand_rows_, trading_rows_)
+
+
+def test_build_dispatch_input_disjoint_periods_rejected():
+    """수요와 거래량의 수집 구간이 전혀 겹치지 않으면 예외를 낸다.
+
+    두 데이터셋은 수집 구간이 다르다. 겹치는 부분만 쓰는데, 아예 안 겹치면
+    빈 결과가 되므로 구간을 메시지에 담아 바로 알 수 있게 한다.
+    """
+    demand_rows_, _ = _synthetic_series(
+        "2026-09-20 00:00:00", hours=2,
+        demand=[70000.0, 70000.0], solar=[0.0, 0.0], renewable=[0.0, 0.0],
+    )
+    _, trading_rows_ = _synthetic_series(
+        "2026-10-20 00:00:00", hours=2,   # 한 달 뒤 — 겹치는 시각 없음
+        demand=[0.0, 0.0], solar=[0.0, 0.0], renewable=[0.0, 0.0],
+    )
+    settings = _synthetic_settings(horizon_h=1)
+
+    with pytest.raises(DataError, match="겹치는 시각이 없다"):
+        dl.build_dispatch_input(
+            [_synthetic_generator()], settings, demand_rows_, trading_rows_,
+        )
+
+
+def test_build_dispatch_input_uses_overlap_of_differing_periods(caplog):
+    """구간이 일부만 겹치면 겹치는 쪽만 쓰고, 얼마나 잘렸는지 로그로 남긴다."""
+    demand_rows_, _ = _synthetic_series(
+        "2026-09-20 00:00:00", hours=5,
+        demand=[70000.0] * 5, solar=[0.0] * 5, renewable=[0.0] * 5,
+    )
+    _, trading_rows_ = _synthetic_series(
+        "2026-09-20 03:00:00", hours=2,   # 03:00, 04:00 만 겹친다
+        demand=[0.0, 0.0], solar=[1000.0, 2000.0], renewable=[0.0, 0.0],
+    )
+    settings = _synthetic_settings(horizon_h=2)
+
+    with caplog.at_level("INFO"):
+        result = dl.build_dispatch_input(
+            [_synthetic_generator()], settings, demand_rows_, trading_rows_,
+        )
+
+    assert result.horizon_h == 2
+    assert result.net_demand_mw == pytest.approx([69000.0, 68000.0])
+    assert "겹치는 구간만 사용" in caplog.text
 
 
 def test_build_dispatch_input_without_dam_rows_has_no_storage_rate():
-    demand_rows_, gen_rows_ = _synthetic_series(
+    demand_rows_, trading_rows_ = _synthetic_series(
         "2026-09-20 00:00:00", hours=1,
         demand=[70000.0], solar=[0.0], renewable=[0.0],
     )
     settings = _synthetic_settings(horizon_h=1)
 
     result = dl.build_dispatch_input(
-        [_synthetic_generator()], settings, demand_rows_, gen_rows_, dam_rows=None,
+        [_synthetic_generator()], settings, demand_rows_, trading_rows_, dam_rows=None,
     )
 
     assert result.storage_rate_pct is None
@@ -453,7 +537,7 @@ def test_build_dispatch_input_real_csv_data(csv_dir):
     result = dl.build_dispatch_input(
         generators, settings,
         dl.read_csv_dataset(csv_dir, "power_demand"),
-        dl.read_csv_dataset(csv_dir, "generation_by_fuel"),
+        dl.read_csv_dataset(csv_dir, "trading_by_fuel"),
         dl.read_csv_dataset(csv_dir, "dam_status"),
     )
 
