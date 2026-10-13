@@ -16,6 +16,9 @@ SERVICES_DIR = Path(__file__).resolve().parents[1] / "services"
 def load_app(service_name: str):
     module_name = f"{service_name}_main"
     path = SERVICES_DIR / service_name / "main.py"
+    # 컨테이너에서처럼 main.py 옆 모듈(예: dispatch_api/scenarios.py)을 평평하게 import 하게
+    if str(path.parent) not in sys.path:
+        sys.path.insert(0, str(path.parent))
     spec = importlib.util.spec_from_file_location(module_name, path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
