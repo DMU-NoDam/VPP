@@ -69,10 +69,11 @@ FUEL_COLOR = {
     "coal": "#6b7280",
     "lng": "#fb923c",
 }
-# collector generation_by_fuel 의 발전원 코드 → 표시 이름
+# collector trading_by_fuel 의 발전원 코드 → 표시 이름
 COLLECTOR_FUEL_KO = {
     "nuclear": "원자력", "bituminous_coal": "유연탄", "anthracite": "국내탄", "lng": "가스",
-    "oil": "유류", "hydro": "수력", "pumped": "양수", "solar": "태양광", "renewable": "신재생",
+    "oil": "유류", "hydro": "수력", "pumped": "양수", "solar": "태양광", "wind": "풍력",
+    "renewable": "신재생",
 }
 STATUS_COLOR = {"ok": C_GREEN, "warn": C_YELLOW, "critical": C_RED}
 # collector 수집 주기 (services/collector/main.py INTERVAL_SEC=300). 바꾸면 같이 바꾼다.
@@ -937,8 +938,8 @@ def page_analysis() -> None:
 
 def render_realtime_mix(collector_url: str) -> None:
     """collector 최신 발전원별 출력."""
-    mix = fetch_collector(collector_url, "generation_by_fuel", 20)
-    panel_title("KPX 발전원별 실측 출력 (collector)", source_tag(mix.ok, mix.latency_s))
+    mix = fetch_collector(collector_url, "trading_by_fuel", 20)
+    panel_title("KPX 발전원별 시간대 거래량 (collector)", source_tag(mix.ok, mix.latency_s))
     fuel_mw = logic.latest_mix(mix) if mix.ok else {}
     if not fuel_mw:
         st.caption(f"collector 응답 없음 ({mix.error or '데이터 없음'})")

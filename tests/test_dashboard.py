@@ -224,9 +224,10 @@ def test_latest_row_and_mix() -> None:
     assert logic.latest_row(logic.ApiResult(error="down")) is None
 
     mix = logic.ApiResult(data={"rows": [
-        {"ts": "a", "fuel": "lng", "mw": 5.0},
-        {"ts": "b", "fuel": "lng", "mw": 7.0},
-        {"ts": "b", "fuel": "solar", "mw": None},
+        {"ts": "a", "fuel": "lng", "capacity_mw": 9.0, "trade_mwh": 5.0},
+        {"ts": "b", "fuel": "lng", "capacity_mw": 9.0, "trade_mwh": 7.0},
+        {"ts": "b", "fuel": "solar", "capacity_mw": 9.0, "trade_mwh": None},
+        {"ts": "b", "fuel": "wind", "capacity_mw": 9.0, "trade_mwh": "None"},
     ]})
     assert logic.latest_mix(mix) == {"lng": 7.0}
     assert logic.latest_mix(logic.ApiResult(data={"rows": []})) == {}

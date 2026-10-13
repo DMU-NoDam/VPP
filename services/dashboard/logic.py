@@ -195,14 +195,22 @@ def latest_row(result: ApiResult) -> dict | None:
 
 
 def latest_mix(result: ApiResult) -> dict[str, float]:
-    """collector generation_by_fuel 응답에서 가장 최근 시각의 발전원별 MW."""
+    """collector trading_by_fuel 응답에서 가장 최근 시각의 발전원별 MW.
+
+    trade_mwh 는 1시간 거래량이라 그 시간의 평균 출력(MW)과 같은 값이다.
+    """
     if not result.ok or not result.data:
         return {}
     rows = result.data.get("rows") or []
     if not rows:
         return {}
     last_ts = max(r["ts"] for r in rows)
-    return {r["fuel"]: float(r["mw"]) for r in rows if r["ts"] == last_ts and r["mw"] is not None}
+    # collector 는 결측을 문자열 "None" 으로 내보낸다 (services/collector/domain.py MISSING)
+    return {
+        r["fuel"]: float(r["trade_mwh"])
+        for r in rows
+        if r["ts"] == last_ts and r["trade_mwh"] not in (None, "None")
+    }
 
 
 def parse_stochastic(data: dict) -> dict:
