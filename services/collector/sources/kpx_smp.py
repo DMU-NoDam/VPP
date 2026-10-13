@@ -34,9 +34,9 @@ def fetch(start: datetime, end: datetime) -> list[dict]:
                 continue
 
             hour = _parse_hour(item.get("hour"))
-            smp = common.num(str(item.get("smp", "")))
-            if hour is None or smp is None:
+            if hour is None:
                 continue
+            smp = common.num(str(item.get("smp", "")))  # 값이 없으면 None 으로 둔다
 
             ts = datetime(day.year, day.month, day.day) + timedelta(hours=hour - 1)
             if not (start <= ts <= end):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 from datetime import date, datetime, timedelta
@@ -124,6 +125,7 @@ def num(token: str) -> float | None:
     if not token or token in domain.KMA_MISSING:
         return None
     try:
-        return float(token)
+        value = float(token)
     except ValueError:
-        return None
+        return None  # "None", "null", "-" 같은 표기도 여기로 온다
+    return value if math.isfinite(value) else None  # "nan", "inf" 도 값이 없는 것으로 본다

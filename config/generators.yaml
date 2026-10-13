@@ -451,6 +451,9 @@ generators:
   - id: hydro_1
     fuel: hydro
     # fuel_cost 데이터셋에 hydro 가 없다. 수력은 연료비 0 이므로 명시적으로 덮어쓴다.
+    # 아래 0 들은 실제 값이다. 결측 표기(None/null)로 두면 안 된다. MILP 목적함수·
+    # 제약의 계수로 그대로 들어가므로 숫자여야 하고, 필드를 생략하면 로더가
+    # fuel_cost 조인을 시도해 실패한다 ("값 없음"은 생략으로만 표현한다).
     fuel_cost_krw_per_mwh: 0
     p_max_mw: 525
     p_min_mw: 0
@@ -466,6 +469,9 @@ generators:
   - id: hydro_2
     fuel: hydro
     # fuel_cost 데이터셋에 hydro 가 없다. 수력은 연료비 0 이므로 명시적으로 덮어쓴다.
+    # 아래 0 들은 실제 값이다. 결측 표기(None/null)로 두면 안 된다. MILP 목적함수·
+    # 제약의 계수로 그대로 들어가므로 숫자여야 하고, 필드를 생략하면 로더가
+    # fuel_cost 조인을 시도해 실패한다 ("값 없음"은 생략으로만 표현한다).
     fuel_cost_krw_per_mwh: 0
     p_max_mw: 525
     p_min_mw: 0

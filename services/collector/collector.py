@@ -11,9 +11,9 @@ from datetime import datetime
 
 from sources import (
     kma_weather,
-    kpx_generation_by_fuel,
     kpx_power_demand,
     kpx_smp,
+    kpx_trading_by_fuel,
     kwater_dam,
 )
 
@@ -21,18 +21,17 @@ logger = logging.getLogger(__name__)
 
 # 데이터셋 -> API 이름. 로그와 문서용이고, 실제 호출은 아래 source 모듈이 한다.
 API_BY_DATASET: dict[str, str] = {
-    "power_demand": "getPwrAmountByGen",
-    "generation_by_fuel": "getPwrAmountByGen",
+    "power_demand": "sukub.do",
+    "trading_by_fuel": "getPowerTradingResultInfo1",
     "smp": "getSmpWithForecastDemand",
     "weather": "kma_sfctm3",
     "dam_status": "sluicePresentCondition/mntlist",
 }
 
 # 데이터셋 -> source 모듈. 모듈마다 fetch(start, end) 를 갖는다.
-# getPwrAmountByGen 이 두 줄에 걸려 있어 한 틱에 같은 API 를 두 번 부른다 (나중에 수정).
 SOURCE_BY_DATASET = {
     "power_demand": kpx_power_demand,
-    "generation_by_fuel": kpx_generation_by_fuel,
+    "trading_by_fuel": kpx_trading_by_fuel,
     "smp": kpx_smp,
     "weather": kma_weather,
     "dam_status": kwater_dam,
