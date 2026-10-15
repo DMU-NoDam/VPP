@@ -1,0 +1,48 @@
+# 대시보드 설정. 최적화 파라미터 원본은 generators.yaml / ess.yaml 이고,
+# 여기에는 화면 판정 기준과 API 연동 전 목업용 값만 둔다.
+
+alarm:
+  reserve_warning_pct: 7.0
+  reserve_critical_pct: 5.0
+
+# 미션 성능 기준 — 각 패널의 달성/미달 배지를 이 값으로 판정한다.
+targets:
+  mape_24h_pct: 4.0        # 이하
+  mape_168h_pct: 7.0       # 이하
+  pi_coverage_pct: 85.0    # 이상
+  nmae_solar_pct: 12.0     # 이하
+  nmae_wind_pct: 15.0      # 이하
+  milp_saving_pct: 10.0    # 이상
+  milp_latency_s: 10.0     # 이하
+  vss_pct: 3.0             # 이상
+  ess_peak_cut_pct: 5.0    # 이상
+  crisis_reserve_pct: 5.0  # 이상
+
+api:
+  timeout_s: 12.0          # MILP 10초 기준 + 여유
+  cache_ttl_s: 60
+
+crisis_scenarios:
+  - name: 폭염 (수요 +15%)
+    demand_mult: 1.15
+  - name: 발전소 탈락 (-1,400MW)
+    capacity_delta_mw: -1400
+  - name: 재생에너지 램프다운 (태양광 -50%)
+    solar_mult: 0.5
+
+# --- 목업 전용 (dispatch_api 연동 후 제거) ---------------------------------------
+# 미션 문서 EPSIS 예시표. 순서 = 급전 우선순위.
+fleet:
+  - {code: nuclear, name: 원자력, capacity_mw: 24000, fuel_cost_won_per_kwh: 6.5, co2_t_per_mwh: 0.0}
+  - {code: hydro, name: 수력, capacity_mw: 6500, fuel_cost_won_per_kwh: 0.0, co2_t_per_mwh: 0.0}
+  - {code: solar, name: 태양광, capacity_mw: 12000, fuel_cost_won_per_kwh: 0.0, co2_t_per_mwh: 0.0}
+  - {code: wind, name: 풍력, capacity_mw: 3500, fuel_cost_won_per_kwh: 0.0, co2_t_per_mwh: 0.0}
+  - {code: coal, name: 석탄, capacity_mw: 28000, fuel_cost_won_per_kwh: 45.2, co2_t_per_mwh: 0.91}
+  - {code: lng, name: LNG, capacity_mw: 32000, fuel_cost_won_per_kwh: 125.8, co2_t_per_mwh: 0.45}
+
+# 피크 5% 감축은 방전 출력이 피크의 5% 이상이어야 나온다 (CLAUDE.md "ESS 규모" 참고).
+# ess.yaml 이 아직 0 이라 시연용 가정값을 둔다.
+ess:
+  power_mw: 5000
+  energy_mwh: 15000
+  round_trip_efficiency: 0.85
