@@ -13,6 +13,8 @@ dependencies = [
   "pyyaml>=6.0",
   # MILP solver: PuLP 기본 CBC 외에 HiGHS 사용 (C 담당 성능 KPI 10초)
   "highspy>=1.7",
+  # forecast_api (B 담당): LightGBM / LSTM 예측 모델
+  "lightgbm>=4.0", "torch>=2.2", "scikit-learn>=1.4",
 ]
 
 [project.optional-dependencies]

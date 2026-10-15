@@ -28,7 +28,64 @@
 - "null"
 조회 결과가 없는 값
 
-## TODO: POST /api/v1/forecast
+## POST /api/v1/forecast (forecast_api `:8001`)
+
+수요·태양광·풍력 시계열 예측. 향후 24~168시간의 예측값과 90% 예측구간(conformal)을 반환한다.
+학습 데이터는 collector CSV(`power_demand`, `trading_by_fuel`, `weather`)를 쓴다.
+
+요청:
+
+| 필드 | 타입 | 필수 | 설명 |
+|---|---|---|---|
+| `start_date` | string (YYYY-MM-DD) | O | 과거 데이터 시작일 |
+| `end_date` | string (YYYY-MM-DD) | O | 과거 데이터 종료일. 예측은 이 시점(데이터가 끝나는 시점) 다음 시간부터 |
+| `target` | `"demand"` \| `"solar"` \| `"wind"` \| `"all"` | O | `all`이면 세 개를 한 번에 반환 |
+| `horizon_hours` | integer (24~168) | O | 예측 시간 범위 |
+| `model` | `"auto"` \| `"lightgbm"` \| `"lstm"` | X (기본 `auto`) | `auto`는 lightgbm. `lstm`은 서빙 미구현(501) |
+| `pi_method` | `"conformal"` \| `"quantile"` | X (기본 `conformal`) | 현재 conformal만 구현 |
+
+```json
+{ "start_date": "2025-07-01", "end_date": "2026-10-12", "target": "all", "horizon_hours": 24 }
+```
+
+응답 (200, `points`는 앞부분만):
+
+```json
+{
+  "result_code": "00", "result_msg": "OK",
+  "generated_at": "2026-10-15T10:00:00", "horizon_hours": 24,
+  "forecasts": {
+    "demand": {
+      "model_used": "lightgbm", "pi_method": "conformal",
+      "metrics": { "mape": 0.87, "nmae": 0.85, "coverage": 90.0, "primary_value": 0.87 },
+      "points": [
+        { "datetime": "2026-10-12T01:00:00", "predicted": 51686.4,
+          "lower_bound": 50436.5, "upper_bound": 52936.3 }
+      ]
+    },
+    "solar": { "...": "demand와 동일 구조, primary_value = nMAE" },
+    "wind":  { "...": "demand와 동일 구조, primary_value = nMAE" }
+  }
+}
+```
+
+- `metrics`는 과거 데이터 마지막 15%(calibration 구간)로 계산한 값. `primary_value`는 스펙 판정 지표(수요=MAPE, 태양광/풍력=nMAE).
+- 단위: `demand`·`solar`·`wind` 모두 MW (발전량은 `trading_by_fuel.trade_mwh` 1시간 거래량 = 평균 MW).
+- `trading_by_fuel`이 2025-12-31까지만 있어서, 태양광/풍력 예측은 그 다음 시간부터 시작한다.
+- 미래 기상(일사량·풍속)은 예보 API가 없어서 해당 시각의 관측값을 대용으로 쓰고, 관측값도 없으면 과거 시간대별 평균을 쓴다.
+
+에러:
+
+| HTTP | result_code | result_msg | 상황 |
+|---|---|---|---|
+| 500 | `21` | `MODEL_LOAD_ERROR` | 모델 파일 없음 (`models/train_lgbm.py` 미실행) |
+| 501 | `21` | `MODEL_NOT_IMPLEMENTED` | `model: "lstm"` 요청 (서빙 미구현) |
+| 422 | - | - | 요청 검증 실패 (FastAPI 기본 형식) |
+
+```json
+{ "detail": { "result_code": "21", "result_msg": "MODEL_LOAD_ERROR",
+              "detail": ".../models/saved/demand_lgbm.txt 없음 — models/train_lgbm.py 먼저 실행 필요" } }
+```
 
 ## TODO: POST /api/v1/dispatch/milp
 

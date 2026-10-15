@@ -13,7 +13,7 @@ import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
-from data_client import get_mock_data
+from data_client import get_mock_data, get_weather
 from features import build_features
 from metrics import evaluate
 from models.train_lgbm import FEATURE_COLUMNS, TARGET_COLUMN
@@ -22,9 +22,8 @@ from pi import fit_conformal
 SAVED_DIR = Path(__file__).resolve().parent / "models" / "saved"
 
 # 미래 시점의 날씨(irradiance/wind_speed)는 원래 기상청 "예보"를 써야 하지만,
-# 지금은 A의 실데이터 연동 전이라 get_mock_data로 미래 구간의 합성 날씨를
-# 그대로 가져다 "예보값"처럼 사용한다. 실제 데이터 연동 시 이 부분을
-# 기상청 예보 조회로 바꿔치기하면 된다.
+# 예보 API가 아직 없어서 data_client.get_weather로 해당 시각의 "관측값"을
+# 예보값 대용으로 쓴다. 예보 API가 생기면 get_weather만 바꿔치기하면 된다.
 WEATHER_COLUMN = {"solar": "irradiance", "wind": "wind_speed"}
 
 
@@ -74,13 +73,13 @@ def _recursive_forecast(
     future_start = history["datetime"].max() + pd.Timedelta(hours=1)
 
     future_weather = None
+    hourly_profile = None
     if weather_col is not None:
-        # 미래 구간의 "예보값" 자리 — 지금은 목업으로 대체 (위 주석 참고)
-        future_weather = get_mock_data(
-            target,
-            start=str(future_start.date()),
-            end=str((future_start + pd.Timedelta(hours=horizon_hours + 24)).date()),
-        ).set_index("datetime")[weather_col]
+        # 미래 구간의 "예보값" 자리 — 예보 API가 없어서 해당 시각의 관측값을 대용으로 쓴다.
+        future_end = future_start + pd.Timedelta(hours=horizon_hours)
+        future_weather = get_weather(target, start=str(future_start), end=str(future_end))
+        # 관측값도 없는 시각(데이터 끝 이후)은 과거 데이터의 "시간대별 평균"으로 채운다.
+        hourly_profile = history.groupby(history["datetime"].dt.hour)[weather_col].mean()
 
     rows = []
     for step in range(horizon_hours):
@@ -95,7 +94,10 @@ def _recursive_forecast(
         row[f"{target_col}_roll_mean_24h"] = float(np.mean(recent_24))
 
         if weather_col is not None:
-            row[weather_col] = float(future_weather.get(ts, future_weather.mean()))
+            value = future_weather.get(ts, np.nan)
+            if pd.isna(value):
+                value = hourly_profile.get(ts.hour, 0.0)
+            row[weather_col] = float(value)
 
         X = pd.DataFrame([row])[feature_cols]
         pred = float(model.predict(X)[0])

@@ -1,46 +1,72 @@
 """
 데이터 접근 계층 (Data Access Layer)
 
-data 브랜치에서 가져온 실제 CSV 스냅샷(VPP/data/csv/*.csv)을 읽어서 쓴다.
-아직 3일치 정도로 기간이 짧아서(스펙은 1년 요구) 실전 학습엔 부족하지만,
-파이프라인 자체는 실제 데이터 스키마 그대로 동작하도록 맞춰뒀다.
-데이터가 더 쌓이면 이 파일은 손댈 필요 없이 자동으로 기간이 늘어난다.
+collector가 쌓아둔 실제 CSV(VPP/data/csv/*.csv)를 읽어서 쓴다.
 
 collector의 domain.py 기준 실제 컬럼:
-    power_demand.csv        : ts, demand_mw                (5분 간격)
-    generation_by_fuel.csv  : ts, fuel, mw                  (5분 간격, long format)
-    weather.csv              : observed_at, station_id, wind_speed_ms,
-                                temperature_c, humidity_pct, solar_radiation_mj (1시간 간격)
+    power_demand.csv    : ts, demand_mw                          (5분 간격)
+    trading_by_fuel.csv : ts, fuel, capacity_mw, trade_mwh        (1시간 간격, long format)
+    weather.csv         : observed_at, station_id, wind_speed_ms,
+                          temperature_c, humidity_pct, solar_radiation_mj (1시간 간격)
+    결측 표기는 문자열 "None" (domain.MISSING)
 
-target별로 반환되는 DataFrame은 항상 아래 형태를 따른다 (기존과 동일하게 유지).
+target별로 반환되는 DataFrame은 항상 아래 형태를 따른다.
 - demand : columns = ["datetime", "demand_mw"]
 - solar  : columns = ["datetime", "solar_mw", "irradiance"]
 - wind   : columns = ["datetime", "wind_mw", "wind_speed"]
 
-주의(팀 확인 필요): generation_by_fuel의 fuel 값 9종에 "wind"가 없다.
-지금은 "renewable"(신재생)을 풍력 값의 임시 대체로 쓰고 있는데, 이게 풍력만을
-가리키는지 다른 신재생까지 섞인 값인지 A에게 확인이 안 된 상태다 (WIND_FUEL_CODE
-주석 참고). sumperfuel5m 엔드포인트를 추가하면 진짜 풍력 필드(fuelPwr9)를 받을 수
-있다.
+단위 메모:
+- trade_mwh 는 1시간 거래량(MWh)이라 그 시간의 평균 출력(MW)과 수치가 같다 → solar_mw/wind_mw로 그대로 사용
+- irradiance 는 기상청 일사량(MJ/m², 시간합). 밤에는 "None"으로 들어와서 0으로 채운다
+- wind_speed 는 m/s
+
+데이터 보유 기간(2026-10 기준): 수요/기상은 2025-07 ~ 2026-10,
+발전원별 거래량은 2025-07 ~ 2025-12 까지만 있다 → 태양광/풍력은 그 기간으로만 학습 가능.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-DATA_DIR = Path(__file__).resolve().parents[2] / "data" / "csv"
+MISSING = "None"  # collector domain.MISSING 과 동일한 결측 표기
+
+
+def _find_data_dir() -> Path:
+    """로컬(VPP/data/csv)과 Docker(/app/data/csv, docker-compose 볼륨) 둘 다 지원.
+    FORECAST_DATA_DIR 환경변수가 있으면 그걸 우선 사용한다."""
+    env = os.getenv("FORECAST_DATA_DIR")
+    if env:
+        return Path(env)
+    here = Path(__file__).resolve().parent
+    candidates = [
+        here.parents[1] / "data" / "csv",  # 로컬: VPP/services/forecast_api -> VPP/data/csv
+        here / "data" / "csv",             # Docker: /app/data/csv
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    return candidates[0]
+
+
+DATA_DIR = _find_data_dir()
 
 # lag_168h(1주일 전 값) feature를 쓰려면 최소 168시간 + 여유분이 필요하다.
-# 이보다 적으면 실데이터가 있어도(0행은 아니어도) 학습에 못 쓰므로 목업으로 대체한다.
+# 이보다 적으면 학습에 못 쓰므로 목업으로 대체한다.
 MIN_HOURS_REQUIRED = 24 * 10  # 168h + 여유 72h
 
-# TODO(확인 필요): 진짜 풍력이 아니라 "신재생"으로 대체 중. A와 sumperfuel5m 논의 후 교체.
-WIND_FUEL_CODE = "renewable"
 SOLAR_FUEL_CODE = "solar"
+WIND_FUEL_CODE = "wind"
 WEATHER_STATION_ID = 108  # 서울, weather.csv에 있는 유일한 지점
+
+# target -> (발전원 코드, weather 원본 컬럼, 반환 컬럼명)
+_RENEWABLE = {
+    "solar": (SOLAR_FUEL_CODE, "solar_radiation_mj", "irradiance"),
+    "wind": (WIND_FUEL_CODE, "wind_speed_ms", "wind_speed"),
+}
 
 
 def _hourly_index(start: str, end: str) -> pd.DatetimeIndex:
@@ -66,135 +92,145 @@ def make_synthetic_solar(start: str = "2026-01-01", end: str = "2026-03-01") -> 
     hour = dates.hour
     n = len(dates)
     daylight = np.clip(np.sin((hour - 6) / 12 * np.pi), 0, None)
-    irradiance = np.clip(daylight * 850 + np.random.normal(0, 25, n), 0, None)
-    solar_mw = np.clip(irradiance * 12 + np.random.normal(0, 100, n), 0, None)
-    return pd.DataFrame({"datetime": dates, "solar_mw": solar_mw.round(1), "irradiance": irradiance.round(1)})
+    irradiance = np.clip(daylight * 3.0 + np.random.normal(0, 0.1, n), 0, None)  # MJ/m² 스케일
+    solar_mw = np.clip(irradiance * 3000 + np.random.normal(0, 100, n), 0, None)
+    return pd.DataFrame({"datetime": dates, "solar_mw": solar_mw.round(1),
+                         "irradiance": irradiance.round(2)})
 
 
 def make_synthetic_wind(start: str = "2026-01-01", end: str = "2026-03-01") -> pd.DataFrame:
     dates = _hourly_index(start, end)
     n = len(dates)
-    wind_speed = np.clip(np.random.gamma(shape=2.0, scale=3.0, size=n), 0, 25)
-    wind_mw = np.where(wind_speed < 3, 0, np.where(wind_speed < 12, (wind_speed - 3) ** 2 * 8, 700))
-    wind_mw = np.where(wind_speed >= 25, 0, wind_mw)
-    wind_mw = np.clip(wind_mw + np.random.normal(0, 20, n), 0, None)
-    return pd.DataFrame({"datetime": dates, "wind_mw": wind_mw.round(1), "wind_speed": wind_speed.round(2)})
+    wind_speed = np.clip(np.random.gamma(shape=2.0, scale=1.5, size=n), 0, 25)
+    wind_mw = np.clip(500 + wind_speed * 250 + np.random.normal(0, 100, n), 0, None)
+    return pd.DataFrame({"datetime": dates, "wind_mw": wind_mw.round(1),
+                         "wind_speed": wind_speed.round(2)})
+
+
+_SYNTHETIC = {"demand": make_synthetic_demand, "solar": make_synthetic_solar,
+              "wind": make_synthetic_wind}
 
 
 # --- 실제 CSV 로딩 -----------------------------------------------------------
 
 
 def _read_power_demand() -> pd.DataFrame:
-    df = pd.read_csv(DATA_DIR / "power_demand.csv", parse_dates=["ts"])
+    df = pd.read_csv(DATA_DIR / "power_demand.csv", parse_dates=["ts"], na_values=[MISSING])
     return df.rename(columns={"ts": "datetime"})
 
 
-def _read_generation_by_fuel(fuel: str) -> pd.DataFrame:
-    df = pd.read_csv(DATA_DIR / "generation_by_fuel.csv", parse_dates=["ts"])
-    df = df[df["fuel"] == fuel][["ts", "mw"]].rename(columns={"ts": "datetime"})
-    return df
+def _read_trading_by_fuel(fuel: str) -> pd.DataFrame:
+    df = pd.read_csv(DATA_DIR / "trading_by_fuel.csv", parse_dates=["ts"], na_values=[MISSING])
+    df = df[df["fuel"] == fuel][["ts", "trade_mwh"]]
+    return df.rename(columns={"ts": "datetime", "trade_mwh": "mw"})
 
 
 def _read_weather() -> pd.DataFrame:
-    df = pd.read_csv(DATA_DIR / "weather.csv", parse_dates=["observed_at"])
-    df = df[df["station_id"] == WEATHER_STATION_ID].rename(columns={"observed_at": "datetime"})
-    return df
+    df = pd.read_csv(DATA_DIR / "weather.csv", parse_dates=["observed_at"], na_values=[MISSING])
+    df = df[df["station_id"] == WEATHER_STATION_ID]
+    return df.rename(columns={"observed_at": "datetime"})
 
 
 def _filter_range(df: pd.DataFrame, start: str, end: str) -> pd.DataFrame:
     return df[(df["datetime"] >= start) & (df["datetime"] <= end)]
 
 
-def get_demand(start: str, end: str) -> pd.DataFrame:
-    """수요 이력 조회. 실제 CSV(5분 간격)를 1시간 평균으로 리샘플링해서 반환.
+def _to_hourly(df: pd.DataFrame, col: str) -> pd.DataFrame:
+    """시간 단위 평균으로 맞추고, 중간에 빈 시간은 선형 보간한다."""
+    s = df.set_index("datetime")[col].resample("h").mean()
+    s = s.interpolate(limit_direction="both")
+    return s.reset_index()
 
-    실데이터가 있어도 MIN_HOURS_REQUIRED보다 적으면(lag_168h를 못 채우면)
-    목업으로 대체한다 — "0행은 아니지만 학습엔 못 쓰는" 상황을 막기 위함.
+
+def _fallback(target: str, n_hours: int, start: str, end: str) -> pd.DataFrame:
+    print(f"[data_client] 경고: {target} 실데이터가 {n_hours}시간뿐 "
+          f"(최소 {MIN_HOURS_REQUIRED}시간 필요) → 목업으로 대체")
+    return _SYNTHETIC[target](start, end)
+
+
+def get_weather(target: str, start: str, end: str) -> pd.Series:
+    """solar/wind 예측에 쓰는 기상 변수(irradiance / wind_speed)를 시간 단위 Series로 반환.
+
+    forecast_engine이 "미래 구간의 기상 예보" 자리에 쓴다. 지금은 예보 API가 없어서
+    해당 시각의 관측값을 예보값 대용으로 쓰고, 관측값도 없으면 빈 Series를 돌려준다.
     """
-    df = _read_power_demand()
-    df = _filter_range(df, start, end)
-    hourly = df.set_index("datetime")["demand_mw"].resample("h").mean().reset_index()
+    _, src_col, out_col = _RENEWABLE[target]
+    w = _filter_range(_read_weather(), start, end)[["datetime", src_col]]
+    if target == "solar":
+        w[src_col] = w[src_col].fillna(0.0)  # 밤 일사량 "None" → 0
+    s = w.set_index("datetime")[src_col].resample("h").mean()
+    s = s.interpolate(limit_direction="both")
+    s.name = out_col
+    return s
 
+
+def get_demand(start: str, end: str) -> pd.DataFrame:
+    """수요 이력 조회. 실제 CSV(5분 간격)를 1시간 평균으로 리샘플링해서 반환."""
+    df = _filter_range(_read_power_demand(), start, end)
+    hourly = _to_hourly(df, "demand_mw") if len(df) else df
     if len(hourly) < MIN_HOURS_REQUIRED:
-        print(f"[data_client] 경고: demand 실데이터가 {len(hourly)}시간뿐 "
-              f"(최소 {MIN_HOURS_REQUIRED}시간 필요) → 목업으로 대체")
-        return make_synthetic_demand(start, end)
-
+        return _fallback("demand", len(hourly), start, end)
     return hourly
 
 
-def get_solar(start: str, end: str) -> pd.DataFrame:
-    """태양광 발전량(generation_by_fuel, fuel=solar) + 일사량(weather) 조회."""
-    gen = _read_generation_by_fuel(SOLAR_FUEL_CODE)
-    gen = _filter_range(gen, start, end)
-    weather = _read_weather()[["datetime", "solar_radiation_mj"]]
+def _get_renewable(target: str, start: str, end: str) -> pd.DataFrame:
+    fuel, _, weather_col = _RENEWABLE[target]
+    target_col = f"{target}_mw"
 
-    gen_hourly = gen.set_index("datetime")["mw"].resample("h").mean().reset_index()
-    gen_hourly = gen_hourly.rename(columns={"mw": "solar_mw"})
-
+    gen = _filter_range(_read_trading_by_fuel(fuel), start, end)
+    gen_hourly = _to_hourly(gen, "mw").rename(columns={"mw": target_col}) if len(gen) else gen
     if len(gen_hourly) < MIN_HOURS_REQUIRED:
-        print(f"[data_client] 경고: solar 실데이터가 {len(gen_hourly)}시간뿐 "
-              f"(최소 {MIN_HOURS_REQUIRED}시간 필요) → 목업으로 대체")
-        return make_synthetic_solar(start, end)
+        return _fallback(target, len(gen_hourly), start, end)
 
+    gen_hourly[target_col] = gen_hourly[target_col].clip(lower=0)
+    weather = get_weather(target, start, end).reset_index()
     merged = pd.merge(gen_hourly, weather, on="datetime", how="left")
-    merged = merged.rename(columns={"solar_radiation_mj": "irradiance"})
-    merged["irradiance"] = merged["irradiance"].ffill().bfill()  # 결측 시간대 보간
-    return merged
+    merged[weather_col] = merged[weather_col].interpolate(limit_direction="both").fillna(0.0)
+    return merged[["datetime", target_col, weather_col]]
+
+
+def get_solar(start: str, end: str) -> pd.DataFrame:
+    """태양광 발전량(trading_by_fuel, fuel=solar) + 일사량(weather) 조회."""
+    return _get_renewable("solar", start, end)
 
 
 def get_wind(start: str, end: str) -> pd.DataFrame:
-    """풍력 발전량 조회. WIND_FUEL_CODE("renewable")를 임시 대체값으로 사용 중.
+    """풍력 발전량(trading_by_fuel, fuel=wind) + 풍속(weather) 조회."""
+    return _get_renewable("wind", start, end)
 
-    실제 풍력 필드가 아직 없어서(도입부 주석 참고) 정확도를 신뢰하면 안 되고,
-    구조 검증용으로만 쓴다. A가 sumperfuel5m을 추가하면 이 함수만 고치면 된다.
-    """
-    gen = _read_generation_by_fuel(WIND_FUEL_CODE)
-    gen = _filter_range(gen, start, end)
-    weather = _read_weather()[["datetime", "wind_speed_ms"]]
 
-    gen_hourly = gen.set_index("datetime")["mw"].resample("h").mean().reset_index()
-    gen_hourly = gen_hourly.rename(columns={"mw": "wind_mw"})
-
-    if len(gen_hourly) < MIN_HOURS_REQUIRED:
-        print(f"[data_client] 경고: wind(renewable 대체) 실데이터가 {len(gen_hourly)}시간뿐 "
-              f"(최소 {MIN_HOURS_REQUIRED}시간 필요) → 목업으로 대체")
-        return make_synthetic_wind(start, end)
-
-    merged = pd.merge(gen_hourly, weather, on="datetime", how="left")
-    merged = merged.rename(columns={"wind_speed_ms": "wind_speed"})
-    merged["wind_speed"] = merged["wind_speed"].ffill().bfill()
-    return merged
+def available_range(target: str) -> tuple[str, str]:
+    """target별로 실제 CSV에 들어있는 기간(start, end)을 반환. 학습 스크립트 기본 기간으로 쓴다."""
+    if target == "demand":
+        dt = _read_power_demand()["datetime"]
+    else:
+        dt = _read_trading_by_fuel(_RENEWABLE[target][0])["datetime"]
+    return str(dt.min()), str(dt.max())
 
 
 def get_mock_data(target: str, start: str = "2026-01-01", end: str = "2026-03-01") -> pd.DataFrame:
     """target("demand"/"solar"/"wind")에 맞는 데이터를 한 번에 가져오는 진입점.
 
-    이름은 "mock"이지만 이제 실제 데이터를 우선 시도하고, 실데이터가 없을 때만
+    이름은 "mock"이지만 실제 데이터를 우선 쓰고, 실데이터가 부족할 때만
     목업으로 폴백한다 (기존 호출부 코드를 안 바꾸려고 함수명은 유지).
     """
     if target == "demand":
         return get_demand(start, end)
-    if target == "solar":
-        return get_solar(start, end)
-    if target == "wind":
-        return get_wind(start, end)
+    if target in _RENEWABLE:
+        return _get_renewable(target, start, end)
     raise ValueError(f"알 수 없는 target: {target}")
 
 
+# 새 이름으로도 쓸 수 있게 별칭 제공
+get_data = get_mock_data
+
+
 if __name__ == "__main__":
-    # 실제 CSV에 들어있는 기간을 먼저 확인
-    demand_raw = _read_power_demand()
-    print(f"실데이터 보유 기간: {demand_raw['datetime'].min()} ~ {demand_raw['datetime'].max()}")
-    print(f"총 {len(demand_raw)}행 (5분 간격)\n")
-
-    start = str(demand_raw["datetime"].min().date())
-    end = str(demand_raw["datetime"].max().date())
-
+    print(f"DATA_DIR = {DATA_DIR}\n")
     for t in ["demand", "solar", "wind"]:
+        start, end = available_range(t)
+        df = get_data(t, start=start, end=end)
         print("=" * 60)
-        print(f"target = {t}  (start={start}, end={end})")
-        print("=" * 60)
-        df = get_mock_data(t, start=start, end=end)
-        print(df.head())
-        print(f"행 수: {len(df)}\n")
+        print(f"target = {t}  ({start} ~ {end})  행 수: {len(df)}")
+        print(df.describe().round(2).loc[["mean", "min", "max"]])
+        print(f"결측: {df.isna().sum().to_dict()}\n")

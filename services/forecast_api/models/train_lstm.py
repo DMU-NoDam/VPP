@@ -26,7 +26,7 @@ from torch import nn
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from data_client import get_mock_data
+from data_client import available_range, get_mock_data
 
 SAVED_DIR = Path(__file__).resolve().parent / "saved"
 SAVED_DIR.mkdir(exist_ok=True)
@@ -88,8 +88,12 @@ def _build_feature_matrix(df: pd.DataFrame, target_col: str, weather_col: str | 
     return np.stack([target_norm, weather_norm], axis=-1)
 
 
-def train_one(target: str, start: str = "2025-06-01", end: str = "2026-01-01",
+def train_one(target: str, start: str | None = None, end: str | None = None,
               epochs: int = 30) -> float:
+    # 기간을 안 주면 실제 CSV에 들어있는 전체 기간으로 학습
+    if start is None or end is None:
+        start, end = available_range(target)
+
     print("=" * 60)
     weather_col = WEATHER_COLUMN.get(target)
     print(f"target = {target}  (다변량: {weather_col if weather_col else '아니오, 단변량'})")

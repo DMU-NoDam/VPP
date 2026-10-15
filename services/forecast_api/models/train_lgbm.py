@@ -20,7 +20,7 @@ import pandas as pd
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))  # forecast_api/ 를 import 경로에 추가
 
-from data_client import get_mock_data
+from data_client import available_range, get_mock_data
 from features import build_features
 
 SAVED_DIR = Path(__file__).resolve().parent / "saved"
@@ -56,15 +56,19 @@ METRIC_FN = {"demand": mape, "solar": nmae, "wind": nmae}
 METRIC_NAME = {"demand": "MAPE", "solar": "nMAE", "wind": "nMAE"}
 
 
-def train_one(target: str, start: str = "2025-06-01", end: str = "2026-01-01") -> None:
+def train_one(target: str, start: str | None = None, end: str | None = None) -> None:
+    # 기간을 안 주면 실제 CSV에 들어있는 전체 기간으로 학습
+    if start is None or end is None:
+        start, end = available_range(target)
+
     print("=" * 60)
-    print(f"target = {target}")
+    print(f"target = {target}  ({start} ~ {end})")
     print("=" * 60)
 
     target_col = TARGET_COLUMN[target]
     feature_cols = FEATURE_COLUMNS[target]
 
-    # 1) 데이터 가져오기 + feature 손질 (지금은 목업, 나중에 실데이터로 자동 교체됨)
+    # 1) 데이터 가져오기 + feature 손질 (실데이터 우선, 부족하면 목업 폴백)
     raw = get_mock_data(target, start=start, end=end)
     df = build_features(raw, target_col)
 
