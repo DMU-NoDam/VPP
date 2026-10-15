@@ -1,0 +1,9 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.6
+pandas>=2.2
+numpy>=1.26
+requests>=2.31
+lightgbm>=4.0
+torch>=2.2
+scikit-learn>=1.4
