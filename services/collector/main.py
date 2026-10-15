@@ -35,7 +35,7 @@ import store
 
 CSV_DIR = Path(os.getenv("CSV_DIR", "data/csv"))
 INTERVAL_SEC = int(os.getenv("INTERVAL_SEC", "300"))  # 수집 주기, 원본이 5분 간격
-MAX_DAYS = 3  # call_api 한 번에 맡길 최대 기간. 모든 데이터셋 공통
+MAX_DAYS = 1  # call_api 한 번에 맡길 최대 기간. 모든 데이터셋 공통
 COLLECT_ENABLED = os.getenv("COLLECT_ENABLED", "false") == "true"  # true / false 만 쓴다
 API_HOST = os.getenv("API_HOST", "0.0.0.0")
 API_PORT = int(os.getenv("API_PORT", "8000"))
