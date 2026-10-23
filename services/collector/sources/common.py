@@ -15,7 +15,7 @@ import domain
 
 logger = logging.getLogger(__name__)
 
-TIMEOUT = int(os.getenv("HTTP_TIMEOUT_SEC", "30"))
+TIMEOUT = int(os.getenv("HTTP_TIMEOUT_SEC", "60"))
 RETRIES = int(os.getenv("HTTP_RETRIES", "3"))
 BACKOFF_SEC = 2.0
 
