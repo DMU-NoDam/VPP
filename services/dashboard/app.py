@@ -14,13 +14,16 @@ config/dashboard.yaml 에 있다.
 
 데이터 출처 (모두 REST, 다른 서비스 코드는 import 하지 않는다):
     collector     GET  /data/{name}                    실측 수요·발전원별 출력·SMP
+                                                       (수요 게이지, Merit Order 실측 발전 믹스)
     forecast_api  GET  /health                         연결 상태
+                  POST /api/v1/forecast                168h 수요 예측·90% PI (분석 상세)
     dispatch_api  GET  /health                         연결 상태
-                  POST /api/v1/dispatch/stochastic     VSS (shared/schemas.py StochasticResponse)
+                  GET  /api/v1/dispatch/stochastic/latest  VSS (미리 계산, StochasticLatest)
                   POST /api/v1/scenarios               시나리오 생성기 페이지 (page_scenarios.py)
-응답이 없거나 계약이 아직 없는 패널은 목업으로 그린다. 서비스 응답을 쓴 패널에만 LIVE 태그를 단다.
+응답이 없거나 계약이 아직 없는 패널은 목업으로 그린다. 서비스 응답을 쓴 패널에는 LIVE,
+목업으로 그린 패널에는 목업 태그를 단다 (ui.source_tag, ui.mock_tag).
 
-TODO(통합): /forecast, /dispatch/milp 응답 계약이 정해지면 logic.sample_* 대신 파서를 붙인다.
+TODO(통합): /dispatch/milp 응답 계약이 정해지면 logic.sample_* 대신 파서를 붙인다.
 """
 
 from __future__ import annotations
@@ -54,6 +57,7 @@ from ui import (
     get_settings,
     inject_custom_css,
     kpi_badge,
+    mock_tag,
     panel_title,
     pw,
     source_tag,
@@ -76,6 +80,18 @@ COLLECTOR_FUEL_KO = {
     "nuclear": "원자력", "bituminous_coal": "유연탄", "anthracite": "국내탄", "lng": "가스",
     "oil": "유류", "hydro": "수력", "pumped": "양수", "solar": "태양광", "wind": "풍력",
     "renewable": "신재생",
+}
+# collector trading_by_fuel 발전원 색 (실측 발전 믹스). 6종과 겹치는 건 FUEL_COLOR 와 같게
+COLLECTOR_FUEL_COLOR = {
+    "nuclear": FUEL_COLOR["nuclear"], "bituminous_coal": FUEL_COLOR["coal"],
+    "anthracite": "#4b5563", "lng": FUEL_COLOR["lng"], "oil": "#c084fc",
+    "hydro": FUEL_COLOR["hydro"], "pumped": "#60a5fa", "solar": FUEL_COLOR["solar"],
+    "wind": FUEL_COLOR["wind"], "renewable": "#4ade80",
+}
+# 실측 발전원 → 아이콘 (gen_icon 은 6종만 있다)
+REAL_ICON = {
+    "nuclear": "nuclear", "bituminous_coal": "coal", "anthracite": "coal", "lng": "lng",
+    "hydro": "hydro", "solar": "solar", "wind": "wind",
 }
 STATUS_COLOR = {"ok": C_GREEN, "warn": C_YELLOW, "critical": C_RED}
 # collector 수집 주기 (services/collector/main.py INTERVAL_SEC=300). 바꾸면 같이 바꾼다.
@@ -134,6 +150,7 @@ class Context:
     period: pd.DataFrame    # 분석 기간 시계열 (탄소·ESS, 조정 반영)
     start: date
     end: date
+    real: RealMix | None = None  # collector 실측 하루 (발전 믹스·탄소·이용률). 없으면 목업
 
     @property
     def prev(self) -> pd.Series:
@@ -162,28 +179,124 @@ def fetch_collector(base_url: str, name: str, limit: int) -> ApiResult:
     return logic.call_api("GET", f"{base_url}/data/{name}", params={"limit": limit}, timeout=5.0)
 
 
-@st.cache_data(ttl=300, show_spinner="확률론적 최적화 호출 중…")
-def fetch_stochastic(base_url: str, timeout: float) -> ApiResult:
-    """POST /dispatch/stochastic. 풀이가 수 초 걸려 5분 캐시한다."""
-    payload = {"start": f"{date.today().isoformat()}T00:00:00+09:00", "horizon_h": 24}
-    return logic.call_api(
-        "POST", f"{base_url}{API_PREFIX}/dispatch/stochastic", payload=payload, timeout=timeout
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_stochastic_latest(base_url: str) -> ApiResult:
+    """GET /dispatch/stochastic/latest. dispatch_api 가 미리 계산해 둔 결과라 바로 온다."""
+    return logic.call_api("GET", f"{base_url}{API_PREFIX}/dispatch/stochastic/latest",
+                          timeout=5.0)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_collector_range(base_url: str, name: str, start: str, end: str) -> ApiResult:
+    """collector 데이터셋의 start~end 구간 (시간 컬럼 기준, 양 끝 포함)."""
+    return logic.call_api("GET", f"{base_url}/data/{name}",
+                          params={"start": start, "end": end}, timeout=5.0)
+
+
+@dataclass
+class RealMix:
+    """실측 발전 믹스 하루치 (Merit Order 패널)."""
+
+    day: date
+    mix: pd.DataFrame       # hour, fuel, mw, demand_mw (logic.real_mix)
+    order: list[str]        # 연료비 순 발전원 코드
+    co2: dict[str, float]   # 연료별 배출계수 (generators.yaml)
+    latency_s: float | None
+
+    @property
+    def tag(self) -> str:
+        """패널 제목 옆 실측 태그."""
+        return real_tag(f"실측 {self.day:%m/%d}")
+
+
+def real_mix(collector_url: str) -> RealMix | None:
+    """collector 실측으로 가장 최근 하루치 발전 믹스와 같은 날 수요. 없으면 None.
+
+    trading_by_fuel 은 10개 발전원 x 시간이라 최근 5일치(1200행)에서 완전한 날을 찾는다.
+    """
+    trading_res = fetch_collector(collector_url, "trading_by_fuel", 1200)
+    trading = logic.rows_frame(trading_res, ("trade_mwh",))
+    day = logic.latest_full_day(trading)
+    if day is None:
+        return None
+    demand = logic.rows_frame(
+        fetch_collector_range(collector_url, "power_demand", f"{day} 00:00:00", f"{day} 23:59:59"),
+        ("demand_mw",),
     )
+    fuel_cost = logic.rows_frame(fetch_collector(collector_url, "fuel_cost", 60),
+                                 ("cost_won_per_kwh",))
+    mix = logic.real_mix(trading, demand, day)
+    order = logic.merit_fuel_order(sorted(mix.fuel.unique()), fuel_cost)
+    return RealMix(day=day, mix=mix, order=order, co2=fuel_co2(),
+                   latency_s=trading_res.latency_s)
 
 
-def stochastic_result(ctx: Context) -> tuple[dict, bool, float | None]:
-    """(VSS 요약, LIVE 여부, 지연시간). 서비스가 없거나 응답이 깨지면 목업."""
+@st.cache_data(show_spinner=False)
+def fuel_co2() -> dict[str, float]:
+    """연료별 배출계수 (config/generators.yaml, C 담당)."""
+    return logic.load_fuel_co2()
+
+
+def real_tag(text: str) -> str:
+    """실측 태그 (LIVE 와 같은 모양, 기준 시각을 함께 쓴다)."""
+    return f'<span class="vpp-src live">{text}</span>'
+
+
+@st.cache_data(ttl=300, show_spinner="수요 예측 호출 중…")
+def fetch_forecast(base_url: str, timeout: float) -> ApiResult:
+    """POST /forecast (168h, 수요·태양광·풍력). 과거 1년을 넘기고 5분 캐시한다."""
+    today = date.today()
+    payload = {
+        "start_date": (today - timedelta(days=365)).isoformat(),
+        "end_date": today.isoformat(),
+        "target": "all",
+        "horizon_hours": 168,
+    }
+    return logic.call_api("POST", f"{base_url}{API_PREFIX}/forecast", payload=payload,
+                          timeout=timeout)
+
+
+def forecast_result(ctx: Context) -> tuple[pd.DataFrame, dict, bool, float | None]:
+    """(예측 시계열, 지표, LIVE 여부, 지연시간). 서비스가 없거나 응답이 깨지면 목업."""
     res = (
-        fetch_stochastic(ctx.urls["dispatch_api"], ctx.settings.timeout_s)
-        if ctx.health["dispatch_api"].ok
-        else ApiResult(error="dispatch_api down")
+        fetch_forecast(ctx.urls["forecast_api"], ctx.settings.timeout_s)
+        if ctx.health["forecast_api"].ok
+        else ApiResult(error="forecast_api down")
     )
     try:
         if res.ok:
-            return logic.parse_stochastic(res.data), True, res.latency_s
-    except (KeyError, TypeError, ValueError):
+            fc, metrics = logic.parse_forecast(res.data)
+            return fc, metrics, True, res.latency_s
+    except (KeyError, TypeError, ValueError, IndexError):
         pass
-    return logic.parse_stochastic(logic.sample_stochastic()), False, None
+    fc = logic.sample_forecast(ctx.settings)
+    return fc, logic.forecast_metrics(fc, ctx.settings), False, None
+
+
+def stochastic_result(ctx: Context, label: str = "") -> tuple[dict, str]:
+    """(VSS 요약, 출처 태그). dispatch_api 의 미리 계산 결과를 쓰고, 없으면 목업.
+
+    결과에는 계산 조건(seed·예비율·계산 시각)이 같이 들어 있다 (logic.parse_stochastic_latest).
+    """
+    prefix = f"{label} " if label else ""
+    res = (
+        fetch_stochastic_latest(ctx.urls["dispatch_api"])
+        if ctx.health["dispatch_api"].ok
+        else ApiResult(error="dispatch_api down")
+    )
+    parsed = None
+    try:
+        if res.ok:
+            parsed = logic.parse_stochastic_latest(res.data)
+    except (KeyError, TypeError, ValueError):
+        parsed = None
+    if parsed is not None:
+        at = parsed["computed_at"]
+        return parsed, real_tag(f"{prefix}계산 {at:%m/%d %H:%M}" if at else f"{prefix}LIVE")
+    mock = logic.parse_stochastic(logic.sample_stochastic())
+    if res.ok and res.data.get("state") in ("pending", "running"):
+        return mock, mock_tag(f"{prefix}계산 중 · 목업")
+    return mock, mock_tag(f"{prefix}목업")
 
 
 # ── 작은 그리기 도구 ─────────────────────────────────────────────────────────
@@ -404,6 +517,7 @@ def build_context() -> Context:
         settings=settings, urls=urls, health=health, hour=hour, adjust=adjust,
         base=logic.sample_day(settings, today), df=df,
         now=df.loc[df.hour == hour].iloc[0], period=period, start=start, end=end,
+        real=real_mix(urls["collector"]) if health["collector"].ok else None,
     )
 
 
@@ -491,12 +605,16 @@ def _bullet(
 
 def _bullet_card(
     title: str, value: str, unit: str, delta_html: str, bullet: str, sub: str,
-    value_color: str = C_GREEN,
+    value_color: str = C_GREEN, tag: str | None = None,
 ) -> None:
-    """수급 게이지 카드: 큰 값·변화 한 줄, 그 아래 카드 폭 전체를 쓰는 불릿 게이지."""
+    """수급 게이지 카드: 큰 값·변화 한 줄, 그 아래 카드 폭 전체를 쓰는 불릿 게이지.
+
+    tag 를 주지 않으면 목업 태그를 단다.
+    """
     with card():
         html(
-            f'<div class="vpp-kpi-head">{title}<small>실시간</small></div>'
+            f'<div class="vpp-kpi-head"><span>{title}{mock_tag() if tag is None else tag}'
+            "</span></div>"
             '<div class="vpp-kpi-row">'
             f'<span class="vpp-kpi-value" style="color:{value_color}">{value}'
             f'<span class="u">{unit}</span></span>{delta_html}</div>'
@@ -517,10 +635,20 @@ def render_supply_gauges(ctx: Context) -> None:
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        value, unit = pw(now.demand_mw).split(" ")
+        # 수요는 collector 실측 최신값 (5분). 공급능력·예비율은 collector 에 없어 목업이다.
+        res = fetch_collector(ctx.urls["collector"], "power_demand", 13)
+        real = logic.latest_demand(res)
+        if real:
+            d_now, d_prev = real["mw"], real["prev_mw"]
+            tag = real_tag(f'실측 {real["ts"]:%m/%d %H:%M}')
+            delta = _delta(_pct_change(d_now, d_prev)) if d_prev else ""
+        else:
+            d_now, tag = now.demand_mw, None
+            delta = _delta(_pct_change(now.demand_mw, prev.demand_mw))
+        value, unit = pw(d_now).split(" ")
         _bullet_card(
-            "전력 수요", value, unit, _delta(_pct_change(now.demand_mw, prev.demand_mw)),
-            _bullet(now.demand_mw / scale, gmax, C_GREEN, ticks), "",
+            "전력 수요", value, unit, delta, _bullet(d_now / scale, gmax, C_GREEN, ticks),
+            "1시간 전 대비" if real and d_prev else "", tag=tag,
         )
     with c2:
         cap, cap_prev = now.available_capacity_mw, prev.available_capacity_mw
@@ -582,11 +710,14 @@ def render_realtime_card(ctx: Context) -> None:
 
 
 def render_merit_order(ctx: Context) -> None:
-    """시간대별 발전원 스택 (연료비 순) + 수요선."""
+    """시간대별 발전원 스택 (연료비 순) + 수요선. collector 실측이 있으면 실측 하루치."""
+    if ctx.real is not None:
+        _render_real_mix(ctx.real)
+        return
     s, df = ctx.settings, ctx.df
     fleet = sorted(s.fleet, key=lambda f: f.fuel_cost_won_per_kwh)
     with card():
-        html('<div class="vpp-kpi-head">Merit Order 스택'
+        html(f'<div class="vpp-kpi-head"><span>Merit Order 스택{mock_tag()}</span>'
              f'<small>{" < ".join(f.name for f in fleet)} (연료비 순)</small></div>')
         fig = px.bar(
             _melt_by_fuel(s, df), x="hour", y="mw", color="발전원",
@@ -605,11 +736,37 @@ def render_merit_order(ctx: Context) -> None:
                         config=NO_BAR)
 
 
+def _render_real_mix(real: RealMix) -> None:
+    """실측 발전 믹스 (collector trading_by_fuel) 를 연료비 순으로 쌓고 같은 날 실측 수요선."""
+    names = [COLLECTOR_FUEL_KO.get(f, f) for f in real.order]
+    mix = real.mix.assign(발전원=real.mix.fuel.map(lambda f: COLLECTOR_FUEL_KO.get(f, f)))
+    demand = mix.groupby("hour")["demand_mw"].first()
+    with card():
+        html(f'<div class="vpp-kpi-head"><span>Merit Order 스택{real.tag}</span>'
+             f'<small>{" < ".join(names)} (연료비 순)</small></div>')
+        fig = px.bar(
+            mix, x="hour", y="mw", color="발전원",
+            category_orders={"발전원": names},
+            color_discrete_map={COLLECTOR_FUEL_KO.get(f, f): COLLECTOR_FUEL_COLOR.get(f, C_TEXT)
+                                for f in real.order},
+            labels={"hour": "시간", "mw": "MW", "발전원": ""},
+        )
+        if demand.notna().any():
+            fig.add_scatter(
+                x=demand.index, y=demand.values, mode="lines", name="수요",
+                line=dict(color=C_BRIGHT, width=2, dash="dot"),
+            )
+        fig.update_traces(marker_line_width=0, selector=dict(type="bar"))
+        fig.update_layout(barmode="stack", bargap=0.22)
+        st.plotly_chart(_compact_chart(fig, H_MERIT), width="stretch", key="c_merit",
+                        config=NO_BAR)
+
+
 def render_optimization(ctx: Context) -> None:
     """최적화 결과 — MILP 절감률·비용·응답·제약 6종 + Two-Stage VSS."""
     s = ctx.settings
     milp = logic.sample_dispatch_summary(ctx.df)
-    vss, live, latency = stochastic_result(ctx)
+    vss, vss_tag = stochastic_result(ctx)
     ok_saving = logic.meets(s, "milp_saving_pct", milp["saving_pct"])
     constraints = milp["constraints"]
     n_ok = sum(constraints.values())
@@ -631,7 +788,8 @@ def render_optimization(ctx: Context) -> None:
 
     with card():
         html(
-            '<div class="vpp-kpi-head">최적화 결과<small>MILP · Two-Stage</small></div>'
+            '<div class="vpp-kpi-head">'
+            f'<span>최적화 결과{mock_tag("MILP 목업")}</span><small>MILP · Two-Stage</small></div>'
             '<div class="vpp-kpi-row">'
             f'<span class="vpp-kpi-value" style="color:{C_GREEN if ok_saving else C_RED}">'
             f'{milp["saving_pct"]:.1f}<span class="u">%</span></span>'
@@ -642,8 +800,10 @@ def render_optimization(ctx: Context) -> None:
                    f'Rule-based {won(milp["rule_cost_won"])}')
             + tile("API 응답", f'{milp["latency_s"]:.1f}초', "MILP 풀이 시간",
                    "milp_latency_s", milp["latency_s"])
-            + tile(f"VSS{source_tag(live, latency)}", f'{vss["vss_pct"]:.1f}%',
-                   f'Two-Stage · 시나리오 {vss["n_scenarios"]}개', "vss_pct", vss["vss_pct"])
+            + tile(f"VSS{vss_tag}", f'{vss["vss_pct"]:.1f}%',
+                   f'Two-Stage · 시나리오 {vss["n_scenarios"]}개'
+                   + (f' · 예비율 {vss["reserve_ratio"]:.0%}' if "reserve_ratio" in vss else ""),
+                   "vss_pct", vss["vss_pct"])
             + "</div>"
         )
         html(
@@ -666,7 +826,8 @@ def render_crisis_card(ctx: Context) -> None:
     names = [sc.name for sc in s.crisis]
     with card():
         # 바로 아래가 위젯이라 Streamlit 마크다운의 음수 하단 여백(-1rem)을 메운다
-        html('<div class="vpp-kpi-head" style="margin-bottom:1.65rem">위기 시나리오'
+        html('<div class="vpp-kpi-head" style="margin-bottom:1.65rem">'
+             f'<span>위기 시나리오{mock_tag()}</span>'
              "<small>예비율 ≥ 5% 유지</small></div>")
         choice = st.selectbox("시나리오", ["없음", *names], key="crisis_scenario",
                               label_visibility="collapsed")
@@ -713,14 +874,40 @@ def _period_axis(fig: go.Figure, ctx: Context) -> go.Figure:
     return fig
 
 
+def _render_real_carbon(real: RealMix) -> None:
+    """실측 하루의 시간대별 탄소 배출량 = 발전원별 실측 출력 x 배출계수."""
+    carbon = logic.real_carbon_by_hour(real.mix, real.co2)
+    with card():
+        html(
+            f'<div class="vpp-kpi-head"><span>탄소 배출량 추이{real.tag}</span>'
+            '<small>실측 출력 x 배출계수</small></div>'
+            '<div class="vpp-kpi-row">'
+            f'<span class="vpp-kpi-value sm">{ton(carbon.sum())}</span>'
+            '<span class="vpp-kpi-sub">일간 · 실제 계통 (ESS 비교 없음)</span></div>'
+        )
+        fig = go.Figure()
+        fig.add_scatter(
+            x=carbon.index, y=carbon.values, mode="lines", name="실측", fill="tozeroy",
+            line=dict(color=C_ORANGE, width=2.5, shape="spline"),
+            fillgradient=dict(type="vertical", colorscale=[[0, "rgba(251,146,60,0)"],
+                                                           [1, "rgba(251,146,60,.35)"]]),
+        )
+        st.plotly_chart(_compact_chart(fig, H_SMALL), width="stretch", key="c_carbon",
+                        config=NO_BAR)
+
+
 def render_carbon(ctx: Context) -> None:
-    """분석 기간의 시간대별 탄소 배출량 (ESS 반영 전/후)."""
+    """시간대별 탄소 배출량. 실측이 있으면 실측 하루, 없으면 분석 기간 목업(ESS 반영 전/후)."""
+    if ctx.real is not None:
+        _render_real_carbon(ctx.real)
+        return
     df, x = ctx.period, _period_x(ctx)
     total, base = df.carbon_ton.sum(), df.carbon_no_ess_ton.sum()
     diff = total - base
     with card():
         html(
-            f'<div class="vpp-kpi-head">탄소 배출량 추이<small>{ctx.period_label}</small></div>'
+            f'<div class="vpp-kpi-head"><span>탄소 배출량 추이{mock_tag()}</span>'
+            f'<small>{ctx.period_label}</small></div>'
             '<div class="vpp-kpi-row">'
             f'<span class="vpp-kpi-value sm">{ton(total)}</span>'
             f'<span class="vpp-kpi-sub">{"일간" if ctx.days == 1 else "기간 합계"} · ESS 연계 '
@@ -749,7 +936,7 @@ def render_ess(ctx: Context) -> None:
     ok = logic.meets(s, "ess_peak_cut_pct", cut_pct)
     with card():
         html(
-            '<div class="vpp-kpi-head">ESS 충/방전 · SoC'
+            f'<div class="vpp-kpi-head"><span>ESS 충/방전 · SoC{mock_tag()}</span>'
             f'<small>{ctx.period_label} · {logic.target_text(s, "ess_peak_cut_pct")}</small></div>'
             '<div class="vpp-kpi-row">'
             f'<span class="vpp-kpi-value sm" style="color:{C_GREEN if ok else C_RED}">'
@@ -771,8 +958,29 @@ def render_ess(ctx: Context) -> None:
         st.plotly_chart(fig, width="stretch", key="c_ess", config=NO_BAR)
 
 
+def _render_real_generators(real: RealMix, hour: int) -> None:
+    """실측 하루의 그 시각 발전원별 출력과 이용률 (출력 / 설비용량)."""
+    rows = []
+    for r in logic.real_utilization(real.mix, hour).itertuples():
+        color = COLLECTOR_FUEL_COLOR.get(r.fuel, C_TEXT)
+        # 아이콘이 없는 발전원도 그리드 첫 칸을 채워야 열이 밀리지 않는다
+        icon = gen_icon(REAL_ICON[r.fuel], 18) if r.fuel in REAL_ICON else "<span></span>"
+        rows.append(
+            f'<div class="vpp-gen-row">{icon}'
+            f'<span class="n">{COLLECTOR_FUEL_KO.get(r.fuel, r.fuel)}</span><b>{pw(r.mw)}</b>'
+            f'<span class="bar"><i style="width:{r.util_pct:.1f}%;background:{color}"></i></span>'
+            f'<small>{r.util_pct:.0f}%</small></div>'
+        )
+    with card():
+        html(f'<div class="vpp-kpi-head"><span>발전원별 출력{real.tag}</span>'
+             f'<small>{hour}시 · 이용률</small></div>' + "".join(rows))
+
+
 def render_generators(ctx: Context) -> None:
-    """발전원 6종 — 현재 출력과 이용률 (목록형)."""
+    """발전원별 현재 출력과 이용률 (목록형). 실측이 있으면 실측 하루의 같은 시각."""
+    if ctx.real is not None:
+        _render_real_generators(ctx.real, ctx.hour)
+        return
     rows = []
     for fuel in ctx.settings.fleet:
         mw = ctx.now[f"{fuel.code}_mw"]
@@ -785,7 +993,8 @@ def render_generators(ctx: Context) -> None:
             f'<small>{usage:.0f}%</small></div>'
         )
     with card():
-        html(f'<div class="vpp-kpi-head">발전원별 출력<small>{ctx.hour}시 · 이용률</small></div>'
+        html(f'<div class="vpp-kpi-head"><span>발전원별 출력{mock_tag()}</span>'
+             f'<small>{ctx.hour}시 · 이용률</small></div>'
              + "".join(rows))
 
 
@@ -820,11 +1029,11 @@ def page_overview() -> None:
 # ── 분석 상세 ────────────────────────────────────────────────────────────────
 
 
-def render_forecast(settings: Settings) -> None:
-    """168h 수요 예측 + 90% PI 와 예측 성능 지표."""
-    fc = logic.sample_forecast(settings)
-    metrics = logic.forecast_metrics(fc, settings)
-    panel_title("수요 예측 · 90% 예측구간 (168h)")
+def render_forecast(ctx: Context) -> None:
+    """168h 수요 예측 + 90% PI 와 예측 성능 지표. forecast_api 가 없으면 목업."""
+    settings = ctx.settings
+    fc, metrics, live, latency = forecast_result(ctx)
+    panel_title("수요 예측 · 90% 예측구간 (168h)", source_tag(live, latency))
 
     fig = go.Figure()
     fig.add_scatter(
@@ -837,33 +1046,54 @@ def render_forecast(settings: Settings) -> None:
     )
     fig.add_scatter(x=fc.hour, y=fc.demand_fc_mw, mode="lines", name="예측",
                     line=dict(color=C_GREEN, width=2.5, shape="spline"))
-    fig.add_scatter(x=fc.hour, y=fc.demand_actual_mw, mode="lines", name="실측",
-                    line=dict(color=C_ORANGE, width=1.6, shape="spline"))
+    if "demand_actual_mw" in fc:  # 목업만 실측이 있다 (forecast_api 는 미래 예측)
+        fig.add_scatter(x=fc.hour, y=fc.demand_actual_mw, mode="lines", name="실측",
+                        line=dict(color=C_ORANGE, width=1.6, shape="spline"))
     fig.add_vline(x=23.5, line=dict(color="rgba(255,255,255,.35)", dash="dash"))
     fig.update_layout(legend=dict(orientation="h", y=-0.2),
                       xaxis_title="예측 시점 (h ahead)", yaxis_title="MW")
     st.plotly_chart(style_dark(fig, height=300), width="stretch", key="c_forecast")
 
-    html(
-        kpi_badge(settings, "mape_24h_pct", "MAPE 24h", metrics["mape_24h_pct"])
-        + kpi_badge(settings, "mape_168h_pct", "MAPE 168h", metrics["mape_168h_pct"])
-        + kpi_badge(settings, "pi_coverage_pct", "PI Coverage", metrics["pi_coverage_pct"])
-        + kpi_badge(settings, "nmae_solar_pct", "태양광 nMAE", metrics["nmae_solar_pct"])
-        + kpi_badge(settings, "nmae_wind_pct", "풍력 nMAE", metrics["nmae_wind_pct"])
+    if not live:
+        html(
+            kpi_badge(settings, "mape_24h_pct", "MAPE 24h", metrics["mape_24h_pct"])
+            + kpi_badge(settings, "mape_168h_pct", "MAPE 168h", metrics["mape_168h_pct"])
+            + kpi_badge(settings, "pi_coverage_pct", "PI Coverage", metrics["pi_coverage_pct"])
+            + kpi_badge(settings, "nmae_solar_pct", "태양광 nMAE", metrics["nmae_solar_pct"])
+            + kpi_badge(settings, "nmae_wind_pct", "풍력 nMAE", metrics["nmae_wind_pct"])
+        )
+        st.caption("목업 — forecast_api 응답 없음. nMAE 는 설비용량 기준 정규화. "
+                   "점선 왼쪽이 24h ahead 구간.")
+        return
+
+    # forecast_api 지표는 정의가 스펙 지표와 달라 기준 배지는 참고용이다 (logic.parse_forecast)
+    badges = kpi_badge(settings, "mape_24h_pct", "MAPE 1h", metrics["mape_1h_pct"])
+    badges += kpi_badge(settings, "pi_coverage_pct", "PI Coverage", metrics["pi_coverage_pct"])
+    for code, label in (("solar", "태양광"), ("wind", "풍력")):
+        if f"nmae_{code}_pct" in metrics:
+            badges += kpi_badge(settings, f"nmae_{code}_pct", f"{label} nMAE",
+                                metrics[f"nmae_{code}_pct"])
+    html(badges)
+    re_start = metrics.get("solar_start")
+    st.caption(
+        f"{metrics['model']} · 예측 시작 {fc.ts.iloc[0]:%m/%d %H}시 (수요 데이터 끝 다음 시각). "
+        "지표는 forecast_api 가 보정 구간에서 잰 값이다 — MAPE 는 1시간 앞 예측이라 "
+        "24h·168h 기준과 다르고, nMAE 는 실측 평균 기준, Coverage 는 구간을 맞춘 같은 "
+        "구간에서 잰 값이다. 168h MAPE 는 백테스트가 없어 표시하지 않는다."
+        + (f" 태양광·풍력 예측은 {re_start:%m/%d}부터 (발전원 데이터 끝)." if re_start else "")
     )
-    st.caption("nMAE 는 설비용량 기준 정규화. 점선 왼쪽이 24h ahead 구간.")
 
 
 def render_optimization_detail(ctx: Context) -> None:
     """MILP 비용·제약과 Two-Stage RP/EV/EEV."""
     s = ctx.settings
     milp = logic.sample_dispatch_summary(ctx.df)
-    vss, live, latency = stochastic_result(ctx)
-    panel_title("최적화 상세 (MILP · Two-Stage)", source_tag(live, latency))
+    vss, vss_tag = stochastic_result(ctx, "VSS")
+    panel_title("최적화 상세 (MILP · Two-Stage)", mock_tag("MILP 목업") + vss_tag)
     c1, c2, c3 = st.columns(3)
     c1.metric("MILP 연료비 (일간)", won(milp["milp_cost_won"]))
     c2.metric("Rule-based 연료비", won(milp["rule_cost_won"]))
-    c3.metric("불확실성 시나리오", f"{milp['n_scenarios']}개")
+    c3.metric("불확실성 시나리오", f"{vss['n_scenarios']}개")  # Two-Stage 시나리오 수
     c4, c5, c6 = st.columns(3)
     c4.metric("EV", won(vss["ev_won"]))
     c5.metric("EEV", won(vss["eev_won"]))
@@ -873,16 +1103,23 @@ def render_optimization_detail(ctx: Context) -> None:
         + kpi_badge(s, "milp_latency_s", "응답", milp["latency_s"])
         + kpi_badge(s, "vss_pct", "VSS", vss["vss_pct"])
     )
+    cond = (
+        f' 계산 조건: 시나리오 {vss["n_scenarios"]}개 (seed {vss["seed"]}), '
+        f'예비율 {vss["reserve_ratio"]:.0%}, 풀이 {vss["status"]} {vss["solve_time_s"]:.0f}초 '
+        f'(문제당 제한 {vss["time_limit_s"]:.0f}초). 예비율 10% 에서는 시나리오 폭보다 '
+        "예비율이 커서 VSS 가 0 에 가깝다 (formulation.md 3장 측정표)."
+        if "seed" in vss else ""
+    )
     st.caption(
         "VSS = EEV − RP, VSS% = VSS / EEV. EEV 는 평균 시나리오(EV) 해의 1단계를 고정하고 "
-        "전 시나리오로 평가한 기대비용 (docs/formulation.md 9절)."
+        "전 시나리오로 평가한 기대비용 (docs/formulation.md 3장)." + cond
     )
 
 
 def render_crisis_detail(ctx: Context) -> None:
     """시나리오 3종을 관측 시각에 적용한 게이지 + 하루 최저 예비율 표."""
     s = ctx.settings
-    panel_title(f"위기 시나리오 상세 ({ctx.hour}시 적용)")
+    panel_title(f"위기 시나리오 상세 ({ctx.hour}시 적용)", mock_tag())
     # 게이지 눈금 범위는 모두 같게 둔다 — 다르면 같은 값도 바늘 위치가 달라 보인다.
     steps = _reserve_steps(s, value_min=-30)
     cols = st.columns(len(s.crisis) + 1)
@@ -901,8 +1138,20 @@ def render_crisis_detail(ctx: Context) -> None:
 
 
 def render_carbon_detail(ctx: Context) -> None:
-    """분석 기간의 발전원별 배출 내역·일별 요약과 Trade-off 설명."""
-    panel_title(f"탄소 · ESS 분석 ({ctx.period_label})")
+    """발전원별 배출 내역. 실측이 있으면 실측 하루, 없으면 분석 기간 목업과 Trade-off 설명."""
+    if ctx.real is not None:
+        real = ctx.real
+        panel_title("탄소 분석 (발전원별 배출)", real.tag)
+        table = logic.real_carbon_by_fuel(real.mix, real.co2, COLLECTOR_FUEL_KO, real.order)
+        st.dataframe(table, hide_index=True, width="stretch")
+        st.caption(
+            f"{real.day:%m/%d} 하루 실측 발전량 x 배출계수. 합계 "
+            f"{ton(table['배출량(tCO2)'].sum())}. 배출계수는 config/generators.yaml (IAEA 2022 "
+            "전과정 기준, 유류·국내탄은 출처 없는 가정값). 태양광·풍력·기타 재생·양수는 0 으로 "
+            "본다. 사이드바 분석 기간과 ESS 비교는 실측에 적용하지 않는다."
+        )
+        return
+    panel_title(f"탄소 · ESS 분석 ({ctx.period_label})", mock_tag())
     st.dataframe(logic.carbon_by_fuel(ctx.period, ctx.settings), hide_index=True,
                  width="stretch")
     if ctx.days > 1:
@@ -925,7 +1174,7 @@ def page_analysis() -> None:
     html('<div class="vpp-topbar"><div class="vpp-title">분석 상세</div>'
          '<div class="vpp-subtitle">예측 · 최적화 · 위기 시나리오 · 탄소</div></div>')
     with st.container(border=True):
-        render_forecast(ctx.settings)
+        render_forecast(ctx)
     c1, c2 = st.columns([1, 1])
     with c1, st.container(border=True):
         render_optimization_detail(ctx)
@@ -941,7 +1190,8 @@ def page_analysis() -> None:
 def render_realtime_mix(collector_url: str) -> None:
     """collector 최신 발전원별 출력."""
     mix = fetch_collector(collector_url, "trading_by_fuel", 20)
-    panel_title("KPX 발전원별 시간대 거래량 (collector)", source_tag(mix.ok, mix.latency_s))
+    panel_title("KPX 발전원별 시간대 거래량 (collector)",
+                source_tag(True, mix.latency_s) if mix.ok else "")
     fuel_mw = logic.latest_mix(mix) if mix.ok else {}
     if not fuel_mw:
         st.caption(f"collector 응답 없음 ({mix.error or '데이터 없음'})")
@@ -955,9 +1205,23 @@ def render_realtime_mix(collector_url: str) -> None:
     st.plotly_chart(style_dark(fig, height=260), width="stretch", key="c_mix")
 
 
-def render_generation_heatmap(settings: Settings, df: pd.DataFrame) -> None:
-    """발전원 x 시간 출력 히트맵."""
-    panel_title("발전원별 시간대 출력 히트맵")
+def render_generation_heatmap(
+    settings: Settings, df: pd.DataFrame, real: RealMix | None = None,
+) -> None:
+    """발전원 x 시간 출력 히트맵. real 이 있으면 실측 하루."""
+    if real is not None:
+        panel_title("발전원별 시간대 출력 히트맵", real.tag)
+        names = [COLLECTOR_FUEL_KO.get(f, f) for f in real.order]
+        mix = real.mix.assign(발전원=real.mix.fuel.map(lambda f: COLLECTOR_FUEL_KO.get(f, f)))
+        pivot = mix.pivot(index="발전원", columns="hour", values="mw").reindex(names[::-1])
+        fig = px.imshow(
+            pivot, aspect="auto", color_continuous_scale=HEAT_SCALE,
+            labels={"x": "시간", "y": "발전원", "color": "MW"},
+        )
+        fig.update_coloraxes(colorbar=dict(outlinewidth=0, tickfont=dict(color=C_TEXT, size=9)))
+        st.plotly_chart(style_dark(fig, height=260), width="stretch", key="c_heatmap")
+        return
+    panel_title("발전원별 시간대 출력 히트맵", mock_tag())
     order = [f.name for f in settings.fleet][::-1]
     pivot = _melt_by_fuel(settings, df).pivot(index="발전원", columns="hour", values="mw")
     fig = px.imshow(
@@ -970,7 +1234,7 @@ def render_generation_heatmap(settings: Settings, df: pd.DataFrame) -> None:
 
 def render_hourly_table(settings: Settings, df: pd.DataFrame) -> None:
     """시간대 상세표와 CSV 내려받기."""
-    panel_title("시간대 상세표")
+    panel_title("시간대 상세표", mock_tag())
     table = logic.hourly_table(settings, df)
     crit, warn = settings.reserve_critical_pct, settings.reserve_warning_pct
 
@@ -1004,7 +1268,7 @@ def page_data() -> None:
     with c1, st.container(border=True):
         render_realtime_mix(ctx.urls["collector"])
     with c2, st.container(border=True):
-        render_generation_heatmap(ctx.settings, ctx.df)
+        render_generation_heatmap(ctx.settings, ctx.df, ctx.real)
     with st.container(border=True):
         render_hourly_table(ctx.settings, ctx.df)
 

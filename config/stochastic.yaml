@@ -18,3 +18,18 @@ startup_time_h:
   anthracite: 6
   lng: 2
   hydro: 0.1
+
+# 대시보드 VSS 타일용 미리 계산 (services/dispatch_api/precompute.py).
+# 대시보드는 응답을 12초만 기다리는데, RP·EV·EEV 를 시간 제한에 걸리지 않게 풀면 1분 넘게 걸린다.
+# 그래서 서버가 켜질 때와 refresh_hours 마다 백그라운드로 한 번 풀어 두고
+# GET /api/v1/dispatch/stochastic/latest 로 마지막 결과를 내준다.
+# 조건은 formulation.md 3장 측정표의 seed 1 행과 같다 (R1~R4, 예비율 10% → VSS 0.00%).
+precompute:
+  enabled: true
+  seed: 1
+  n_scenarios: 10
+  reserve_ratio: 0.10          # [스펙] 2장 제약 2. 3장 S5(1단계 예비율)는 미확정
+  shed_penalty_won_per_mwh: 10000000   # K. 미확정 (formulation.md 3장)
+  time_limit_s: 60             # 측정표와 같은 풀이 조건
+  mip_gap: 0.001
+  refresh_hours: 24

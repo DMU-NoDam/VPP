@@ -135,6 +135,7 @@ def inject_custom_css() -> None:
             padding: .08rem .5rem; border-radius: 999px; vertical-align: middle;
         }
         .vpp-src.live { color: #17181c; background: var(--vpp-green); }
+        .vpp-src.mock { color: var(--vpp-yellow); border: 1px dashed var(--vpp-yellow); }
 
         /* 카드 머리글·큰 값 */
         .vpp-kpi-head {
@@ -422,12 +423,18 @@ def kpi_badge(settings: Settings, key: str, label: str, value: float) -> str:
     return badge(text, "ok" if ok else "critical")
 
 
-def source_tag(live: bool, latency_s: float | None = None) -> str:
-    """패널 제목 옆 LIVE 태그 (서비스 응답일 때만, 지연시간 포함)."""
+def mock_tag(text: str = "목업") -> str:
+    """패널 제목 옆 목업 태그. 서비스 응답이 아닌 더미 값으로 그린 패널에 단다."""
+    return f'<span class="vpp-src mock">{text}</span>'
+
+
+def source_tag(live: bool, latency_s: float | None = None, label: str = "") -> str:
+    """패널 제목 옆 출처 태그. 서비스 응답이면 LIVE(지연시간 포함), 아니면 목업."""
+    prefix = f"{label} " if label else ""
     if not live:
-        return ""
+        return mock_tag(f"{prefix}목업")
     suffix = f" · {latency_s:.2f}s" if latency_s is not None else ""
-    return f'<span class="vpp-src live">LIVE{suffix}</span>'
+    return f'<span class="vpp-src live">{prefix}LIVE{suffix}</span>'
 
 
 def panel_title(text: str, tag: str = "") -> None:

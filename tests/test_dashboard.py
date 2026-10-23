@@ -5,6 +5,7 @@
 
 import importlib.util
 import sys
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -156,6 +157,56 @@ def test_forecast_metrics_perfect_forecast(settings) -> None:
     m = logic.forecast_metrics(fc, settings)
     assert m["mape_24h_pct"] == 0 and m["nmae_wind_pct"] == 0
     assert m["pi_coverage_pct"] == 100
+
+
+def _forecast_response() -> dict:
+    """forecast_api ForecastResponse 모양 (services/forecast_api/schemas.py)."""
+    def target(start: str, pred: float, metrics: dict) -> dict:
+        ts = pd.date_range(start, periods=3, freq="h")
+        return {
+            "model_used": "lightgbm", "pi_method": "conformal", "metrics": metrics,
+            "points": [
+                {"datetime": t.isoformat(), "predicted": pred + i,
+                 "lower_bound": pred + i - 10, "upper_bound": pred + i + 10}
+                for i, t in enumerate(ts)
+            ],
+        }
+
+    return {
+        "result_code": "00", "result_msg": "OK", "generated_at": "2026-10-23T10:00:00",
+        "horizon_hours": 3,
+        "forecasts": {
+            "demand": target("2026-10-17 10:00", 60000.0,
+                             {"mape": 0.9, "nmae": 0.88, "coverage": 90.0}),
+            "solar": target("2026-09-19 00:00", 0.0, {"mape": 1800.0, "nmae": 7.2}),
+            "wind": target("2026-09-19 00:00", 500.0, {"mape": 78.0, "nmae": 11.0}),
+        },
+    }
+
+
+def test_parse_forecast() -> None:
+    fc, m = logic.parse_forecast(_forecast_response())
+    assert list(fc.hour) == [0, 1, 2]
+    assert fc.ts.iloc[0] == pd.Timestamp("2026-10-17 10:00")
+    assert (fc.demand_lo_mw < fc.demand_fc_mw).all() and (fc.demand_fc_mw < fc.demand_hi_mw).all()
+    assert "demand_actual_mw" not in fc
+    assert m["mape_1h_pct"] == 0.9 and m["pi_coverage_pct"] == 90.0
+    assert m["nmae_solar_pct"] == 7.2 and m["nmae_wind_pct"] == 11.0
+    assert m["solar_start"] == pd.Timestamp("2026-09-19")
+
+
+def test_parse_forecast_demand_only() -> None:
+    data = _forecast_response()
+    data["forecasts"] = {"demand": data["forecasts"]["demand"]}
+    _, m = logic.parse_forecast(data)
+    assert "nmae_solar_pct" not in m and "solar_start" not in m
+
+
+def test_parse_forecast_rejects_missing_demand() -> None:
+    data = _forecast_response()
+    del data["forecasts"]["demand"]
+    with pytest.raises(KeyError):
+        logic.parse_forecast(data)
 
 
 def test_sample_dispatch_summary(df) -> None:
@@ -688,3 +739,131 @@ def test_stochastic_page_helpers() -> None:
     assert list(matrix.index) == ["nuclear_1", "lng_1"]
     assert matrix.loc["nuclear_1", 1] == 100.0 and matrix.loc["lng_1", 0] == 0.0
     assert page.request_timeout(10, 10, True) == 10 * 13 + 60
+
+
+# ── collector 실측 ───────────────────────────────────────────────────────────
+
+
+def _trading_rows(days: list[str], skip: tuple[str, str] | None = None) -> list[dict]:
+    """trading_by_fuel 응답 행. skip=(날짜, 발전원) 이면 그날 그 발전원은 결측."""
+    rows = []
+    for day in days:
+        for h in range(24):
+            ts = f"{day} {h:02d}:00:00"
+            for fuel, mw in (("nuclear", 20000.0), ("bituminous_coal", 25000.0),
+                             ("lng", 12000.0), ("solar", 1000.0), ("pumped", 300.0)):
+                val = "None" if skip == (day, fuel) else mw
+                rows.append({"ts": ts, "fuel": fuel, "capacity_mw": 1.0, "trade_mwh": val})
+    return rows
+
+
+def test_latest_demand_takes_last_and_hour_ago() -> None:
+    rows = [{"ts": f"2026-10-17 {8 + (m // 60):02d}:{m % 60:02d}:00", "demand_mw": 50000.0 + m}
+            for m in range(0, 65, 5)]
+    res = logic.ApiResult(data={"rows": rows})
+    d = logic.latest_demand(res)
+    assert d["ts"] == pd.Timestamp("2026-10-17 09:00") and d["mw"] == 50060.0
+    assert d["prev_mw"] == 50000.0
+
+
+def test_latest_demand_missing() -> None:
+    assert logic.latest_demand(logic.ApiResult(error="down")) is None
+    res = logic.ApiResult(data={"rows": [{"ts": "2026-10-17 09:00:00", "demand_mw": "None"}]})
+    assert logic.latest_demand(res) is None
+
+
+def test_latest_full_day_skips_incomplete_day() -> None:
+    res = logic.ApiResult(data={"rows": _trading_rows(
+        ["2026-09-17", "2026-09-18"], skip=("2026-09-18", "nuclear"))})
+    trading = logic.rows_frame(res, ("trade_mwh",))
+    assert logic.latest_full_day(trading) == date(2026, 9, 17)
+
+
+def test_latest_full_day_none_when_fuel_absent() -> None:
+    rows = [r for r in _trading_rows(["2026-09-17"]) if r["fuel"] != "lng"]
+    trading = logic.rows_frame(logic.ApiResult(data={"rows": rows}), ("trade_mwh",))
+    assert logic.latest_full_day(trading) is None
+
+
+def test_merit_fuel_order_by_latest_cost() -> None:
+    cost = pd.DataFrame({
+        "month": ["2026-07", "2026-08", "2026-08", "2026-08"],
+        "fuel": ["lng", "lng", "bituminous_coal", "nuclear"],
+        "cost_won_per_kwh": [1.0, 155.0, 90.0, 6.5],
+    })
+    fuels = ["pumped", "lng", "solar", "nuclear", "bituminous_coal", "unknown"]
+    assert logic.merit_fuel_order(fuels, cost) == [
+        "solar", "nuclear", "bituminous_coal", "lng", "unknown", "pumped",
+    ]
+
+
+def test_real_mix_same_day_demand() -> None:
+    trading = logic.rows_frame(logic.ApiResult(data={"rows": _trading_rows(
+        ["2026-09-16", "2026-09-17"])}), ("trade_mwh",))
+    demand = pd.DataFrame({
+        "ts": ["2026-09-17 00:00:00", "2026-09-17 00:05:00", "2026-09-17 01:00:00"],
+        "demand_mw": [60000.0, 62000.0, 59000.0],
+    })
+    mix = logic.real_mix(trading, demand, date(2026, 9, 17))
+    assert set(mix.hour) == set(range(24))
+    assert mix.groupby("hour").mw.sum().iloc[0] == pytest.approx(58300.0)
+    assert mix.loc[mix.hour == 0, "demand_mw"].iloc[0] == pytest.approx(61000.0)
+    assert mix.loc[mix.hour == 5, "demand_mw"].isna().all()
+
+
+def _mix() -> pd.DataFrame:
+    """real_mix 모양의 이틀 시간 분량 (hour 0·1)."""
+    return pd.DataFrame({
+        "hour": [0, 0, 0, 1, 1, 1],
+        "fuel": ["bituminous_coal", "lng", "solar", "bituminous_coal", "lng", "solar"],
+        "mw": [1000.0, 500.0, 0.0, 800.0, 400.0, 200.0],
+        "capacity_mw": [2000.0, 1000.0, 400.0, 2000.0, 1000.0, 400.0],
+    })
+
+
+def test_load_fuel_co2_reads_generators_yaml() -> None:
+    co2 = logic.load_fuel_co2()
+    assert co2["bituminous_coal"] > co2["lng"] > co2["nuclear"]
+    assert "solar" not in co2
+
+
+def test_load_fuel_co2_missing_file(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(logic, "_config_candidates", lambda *a, **k: [tmp_path / "x.yaml"])
+    assert logic.load_fuel_co2() == {}
+
+
+def test_real_carbon_by_hour_zero_for_unknown_fuel() -> None:
+    carbon = logic.real_carbon_by_hour(_mix(), {"bituminous_coal": 0.9, "lng": 0.5})
+    assert carbon[0] == pytest.approx(1000 * 0.9 + 500 * 0.5)
+    assert carbon[1] == pytest.approx(800 * 0.9 + 400 * 0.5)
+
+
+def test_real_carbon_by_fuel_follows_order() -> None:
+    table = logic.real_carbon_by_fuel(
+        _mix(), {"bituminous_coal": 0.9}, {"bituminous_coal": "유연탄"},
+        ["solar", "bituminous_coal", "lng", "oil"],
+    )
+    assert list(table["발전원"]) == ["solar", "유연탄", "lng"]
+    assert table.loc[1, "발전량(MWh)"] == 1800 and table.loc[1, "배출량(tCO2)"] == 1620
+    assert table.loc[2, "배출량(tCO2)"] == 0
+
+
+def test_real_utilization_top_and_rest() -> None:
+    u = logic.real_utilization(_mix(), 1, top=2)
+    assert list(u.fuel) == ["bituminous_coal", "lng", "기타"]
+    assert u.loc[0, "util_pct"] == pytest.approx(40.0)
+    assert u.loc[2, "mw"] == 200.0 and u.loc[2, "util_pct"] == pytest.approx(50.0)
+
+
+def test_parse_stochastic_latest() -> None:
+    latest = {
+        "state": "running", "computed_at": "2026-10-23T15:31:00+09:00", "seed": 1,
+        "n_scenarios": 10, "reserve_ratio": 0.1, "shed_penalty_won_per_mwh": 1e7,
+        "time_limit_s": 60.0, "mip_gap": 0.001, "result": logic.sample_stochastic(),
+        "error": None,
+    }
+    data = logic.parse_stochastic_latest(latest)
+    assert data["vss_pct"] == pytest.approx(3.51, abs=0.01)
+    assert data["seed"] == 1 and data["reserve_ratio"] == 0.1 and data["state"] == "running"
+    assert data["computed_at"].hour == 15
+    assert logic.parse_stochastic_latest({**latest, "result": None}) is None
