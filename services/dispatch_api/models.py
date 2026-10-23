@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -119,6 +120,96 @@ class DispatchInput:
 
 
 @dataclass(frozen=True)
+class EssSpec:
+    """config/ess.yaml 의 ESS 사양.
+
+    규모와 효율은 과제가 고정하지 않은 `[미정]` 값이다. 근거는 yaml 에 적는다.
+
+    SOC 는 **MWh 로 다룬다**. 비율로 다루면 "SOC 가 0.5" 가 50% 인지 0.5 MWh 인지
+    헷갈리고, 전이식에서 용량을 곱하는 걸 잊는 버그가 생긴다 (CLAUDE.md 단위 규칙).
+    yaml 은 사람이 읽기 쉬운 % 로 받고, 여기서 MWh 로 환산해 노출한다.
+
+    왕복효율은 충전·방전에 반씩 나눈다: eta_ch = eta_dis = sqrt(rte).
+    """
+
+    power_charge_mw: float
+    power_discharge_mw: float
+    capacity_mwh: float
+    round_trip_efficiency: float
+    soc_min_pct: float
+    soc_max_pct: float
+    soc_init_pct: float
+    soc_final_min_pct: float
+    enforce_exclusive: bool = False
+    mode: str = "cost"               # cost | peak_shaving | combined
+    peak_target_pct: float = 5.0     # peak_shaving 목표 감소율
+    peak_penalty_krw_per_mw: float = 0.0  # combined 모드의 피크 1 MW 가중치
+
+    @property
+    def eta_charge(self) -> float:
+        return math.sqrt(self.round_trip_efficiency)
+
+    @property
+    def eta_discharge(self) -> float:
+        return math.sqrt(self.round_trip_efficiency)
+
+    @property
+    def soc_min_mwh(self) -> float:
+        return self.capacity_mwh * self.soc_min_pct / 100.0
+
+    @property
+    def soc_max_mwh(self) -> float:
+        return self.capacity_mwh * self.soc_max_pct / 100.0
+
+    @property
+    def soc_init_mwh(self) -> float:
+        return self.capacity_mwh * self.soc_init_pct / 100.0
+
+    @property
+    def soc_final_min_mwh(self) -> float:
+        """종료 SOC 하한. 이게 없으면 배터리를 비우고 끝내 '공짜 에너지'를 얻는다."""
+        return self.capacity_mwh * self.soc_final_min_pct / 100.0
+
+    @property
+    def usable_mwh(self) -> float:
+        return self.soc_max_mwh - self.soc_min_mwh
+
+
+@dataclass(frozen=True)
+class EssSchedule:
+    """ESS 운전 계획. 리스트 길이는 horizon_h."""
+
+    charge_mw: list[float]
+    discharge_mw: list[float]
+    soc_mwh: list[float]
+    spec: EssSpec
+
+    def net_mw(self, t: int) -> float:
+        """계통 기준 순출력 (+ 방전 / - 충전)."""
+        return self.discharge_mw[t] - self.charge_mw[t]
+
+    @property
+    def energy_charged_mwh(self) -> float:
+        return sum(self.charge_mw)
+
+    @property
+    def energy_discharged_mwh(self) -> float:
+        return sum(self.discharge_mw)
+
+    @property
+    def loss_mwh(self) -> float:
+        """왕복효율 손실. 충전량 - 방전량 - SOC 증가분."""
+        soc_gain = self.soc_mwh[-1] - self.spec.soc_init_mwh if self.soc_mwh else 0.0
+        return self.energy_charged_mwh - self.energy_discharged_mwh - soc_gain
+
+    @property
+    def cycles(self) -> float:
+        """사용 가능 에너지 기준 등가 사이클 수."""
+        usable = self.spec.usable_mwh
+        return self.energy_discharged_mwh / usable if usable > 0 else 0.0
+
+
+@dataclass(frozen=True)
 class HydroPolicy:
     """저수율에 따른 수력 출력 제한 정책 (docs/formulation.md 4.2-6).
 
@@ -209,6 +300,7 @@ class DispatchResult:
     hydro_factor: float
     size: ModelSize | None = None
     notes: list[str] = field(default_factory=list)
+    ess: EssSchedule | None = None
     surplus_mw: list[float] = field(default_factory=list)
     """시간대별 과잉발전 (MW). 수요보다 많이 낸 양으로, 감발·수출 대상이다.
 
@@ -232,10 +324,23 @@ class DispatchResult:
         return self.fuel_cost_krw + self.startup_cost_krw
 
     def supply_mw(self, t: int) -> float:
+        """발전기 출력 합. ESS 방전은 포함하지 않는다."""
         return sum(u.p_mw[t] for u in self.units)
+
+    def ess_net_mw(self, t: int) -> float:
+        """ESS 순출력 (+ 방전 / - 충전). ESS 가 없으면 0."""
+        return self.ess.net_mw(t) if self.ess else 0.0
 
     def served_demand_mw(self, t: int) -> float:
         return self.net_demand_mw[t] - self.shed_mw[t]
+
+    def generator_load_mw(self, t: int) -> float:
+        """발전기가 담당해야 하는 부하 = 공급한 수요 + 충전 - 방전.
+
+        예비율의 분모이자 ESS 적용 후 피크의 정의다. ESS 가 방전하면 발전기가
+        덜 내고, 충전하면 더 내야 한다.
+        """
+        return self.served_demand_mw(t) - self.ess_net_mw(t)
 
     def surplus_at(self, t: int) -> float:
         return self.surplus_mw[t] if t < len(self.surplus_mw) else 0.0
@@ -245,12 +350,36 @@ class DispatchResult:
         return sum(u.p_max_eff_mw for u in self.units if u.on[t])
 
     def reserve_pct(self, t: int) -> float:
-        """(가동 용량 - 공급한 수요) / 공급한 수요 x 100."""
-        served = self.served_demand_mw(t)
-        if served <= 0:
+        """(가동 용량 - 발전기 부하) / 발전기 부하 x 100."""
+        load = self.generator_load_mw(t)
+        if load <= 0:
             return 0.0
-        return (self.available_capacity_mw(t) - served) / served * 100.0
+        return (self.available_capacity_mw(t) - load) / load * 100.0
 
     @property
     def peak_demand_mw(self) -> float:
+        """ESS 적용 전 피크 = 순수요의 최대값.
+
+        ESS 가 없으면 발전기가 순수요를 그대로 담당하므로 이 값이 곧 피크 부하다.
+        """
         return max(self.net_demand_mw) if self.net_demand_mw else 0.0
+
+    @property
+    def peak_after_ess_mw(self) -> float:
+        """ESS 적용 후 피크 = max(순수요 + 충전 - 방전)."""
+        if not self.timestamps:
+            return 0.0
+        return max(
+            self.net_demand_mw[t] - self.ess_net_mw(t) for t in range(self.horizon_h)
+        )
+
+    @property
+    def peak_reduction_pct(self) -> float:
+        """피크 감소율 = (전 - 후) / 전 x 100. KPI 기준 >= 5%.
+
+        분모는 ESS 미적용 순수요 피크다 (docs/formulation.md 5.4).
+        """
+        before = self.peak_demand_mw
+        if before <= 0:
+            return 0.0
+        return (before - self.peak_after_ess_mw) / before * 100.0

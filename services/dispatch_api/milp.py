@@ -13,6 +13,10 @@
     w[g,t] in [0,1]   정지 이벤트
     p[g,t] >= 0       출력 (MW). step 이 1시간이므로 MWh 와 수치가 같다
     s[t]   >= 0       부하차단 슬랙 (옵션, 기본 off)
+    ch[t], dis[t] >= 0  ESS 충전·방전 출력 (MW)
+    soc[t]            ESS 저장 에너지 (MWh)
+    z[t] in {0,1}     동시 충·방전 금지 (옵션)
+    peak              ESS 적용 후 최대 발전기 부하 (MW, peak 모드에서만)
 
 v, w 를 이진변수로 두지 않는 이유: u 가 이진이고 연결식 u_t - u_{t-1} = v_t - w_t 가
 있으므로 기동비(>= 0)를 최소화하는 해에서 v 는 max(0, u_t - u_{t-1}) 로 정확히
@@ -33,6 +37,8 @@ import pulp
 from models import (
     DispatchInput,
     DispatchResult,
+    EssSchedule,
+    EssSpec,
     Generator,
     HydroPolicy,
     ModelSize,
@@ -123,6 +129,10 @@ class _Model:
     w: dict[str, dict[int, pulp.LpVariable]]
     p: dict[str, dict[int, pulp.LpVariable]]
     shed: dict[int, pulp.LpVariable]
+    charge: dict[int, pulp.LpVariable] | None
+    discharge: dict[int, pulp.LpVariable] | None
+    soc: dict[int, pulp.LpVariable] | None
+    ess: EssSpec | None
     p_max_eff: dict[str, float]
     hydro_factor: float
     notes: list[str]
@@ -135,8 +145,12 @@ def build_model(
     hydro_policy: HydroPolicy | None = None,
     allow_load_shedding: bool = False,
     shed_penalty_krw_per_mwh: float = DEFAULT_SHED_PENALTY_KRW_PER_MWH,
+    ess: EssSpec | None = None,
 ) -> _Model:
-    """MILP 를 세운다 (풀지는 않는다)."""
+    """MILP 를 세운다 (풀지는 않는다).
+
+    `ess` 를 주면 충·방전을 **제약 있는 결정변수**로 같이 푼다 (후처리가 아니다).
+    """
     started = time.perf_counter()
     policy = hydro_policy or HydroPolicy()
     hydro_factor = policy.factor(inp.storage_rate_pct)
@@ -176,17 +190,53 @@ def build_model(
     else:
         shed = {t: pulp.LpVariable(f"shed_{t}", lowBound=0, upBound=0) for t in hours}
 
-    # ── 목적함수: 연료비 + 기동비 (+ 부하차단 페널티) ───────────────────────
-    problem += (
+    # ── ESS 변수 (제약 8) ───────────────────────────────────────────────────
+    charge = discharge = soc = None
+    peak_var = None
+    if ess is not None:
+        charge = {t: pulp.LpVariable(f"ch_{t}", lowBound=0, upBound=ess.power_charge_mw)
+                  for t in hours}
+        discharge = {t: pulp.LpVariable(f"dis_{t}", lowBound=0,
+                                        upBound=ess.power_discharge_mw)
+                     for t in hours}
+        soc = {t: pulp.LpVariable(f"soc_{t}", lowBound=ess.soc_min_mwh,
+                                  upBound=ess.soc_max_mwh)
+               for t in hours}
+        notes.append(
+            f"ESS {ess.power_discharge_mw:,.0f} MW / {ess.capacity_mwh:,.0f} MWh, "
+            f"왕복효율 {ess.round_trip_efficiency:.2f}, mode={ess.mode}"
+        )
+        if ess.mode in ("peak_shaving", "combined"):
+            peak_var = pulp.LpVariable("peak_mw", lowBound=0)
+
+    def ess_net(t: int):
+        """ESS 순출력 (+ 방전 / - 충전). ESS 가 없으면 0."""
+        if charge is None or discharge is None:
+            return 0
+        return discharge[t] - charge[t]
+
+    # ── 목적함수: 연료비 + 기동비 (+ 부하차단 페널티) (+ 피크 가중치) ───────
+    objective = (
         pulp.lpSum(g.fuel_cost_krw_per_mwh * p[g.id][t] for g in gens for t in hours)
         + pulp.lpSum(g.startup_cost_krw * v[g.id][t] for g in gens for t in hours)
         + pulp.lpSum(shed_penalty_krw_per_mwh * shed[t] for t in hours)
-    ), "total_cost_krw"
+    )
+    if ess is not None and ess.mode == "combined" and peak_var is not None:
+        # [모델링 선택] 비용 + lambda x 피크 의 가중합. lambda 는 config 값이며
+        # 비용 단위가 아니라 "피크 1 MW 를 얼마로 볼지"의 선호도다. 그래서
+        # 이 모드의 total_cost 는 baseline 과의 비용 비교에 그대로 쓰면 안 된다.
+        objective += ess.peak_penalty_krw_per_mw * peak_var
+        notes.append(
+            f"combined 모드: 목적함수에 피크 가중치 "
+            f"{ess.peak_penalty_krw_per_mw:,.0f} 원/MW 가 더해졌다 (모델링 선택)"
+        )
+    problem += objective, "total_cost_krw"
 
     # ── 제약 1: 수급 균형 ───────────────────────────────────────────────────
+    # ESS 방전은 공급, 충전은 부하다.
     for t in hours:
         problem += (
-            pulp.lpSum(p[g.id][t] for g in gens) + shed[t] == demand[t],
+            pulp.lpSum(p[g.id][t] for g in gens) + shed[t] + ess_net(t) == demand[t],
             f"balance_{t}",
         )
 
@@ -195,10 +245,12 @@ def build_model(
     # 즉 "가동 중인 유닛의 상한 합"을 공급능력으로 본다. 정지한 유닛은 그 시간에
     # 즉시 쓸 수 없으므로 제외한다. 부하차단을 쓰면 차단 후 실제 공급한 수요를
     # 기준으로 예비율을 요구한다 (위기 시나리오에서 "차단하고 나면 안정"을 판정).
+    # ESS 가 있으면 분모는 발전기가 담당하는 부하(수요 - 차단 + 충전 - 방전)다.
+    # ESS 의 남은 방전 여력을 예비력으로 셀지는 [미정] 이라 세지 않는다 (보수적).
     for t in hours:
         problem += (
             pulp.lpSum(p_max_eff[g.id] * u[g.id][t] for g in gens)
-            >= (1 + reserve_ratio) * (demand[t] - shed[t]),
+            >= (1 + reserve_ratio) * (demand[t] - shed[t] - ess_net(t)),
             f"reserve_{t}",
         )
 
@@ -266,6 +318,51 @@ def build_model(
                     f"mindown_{g.id}_{t}",
                 )
 
+    # ── 제약 8: ESS ─────────────────────────────────────────────────────────
+    if ess is not None and charge is not None and discharge is not None and soc is not None:
+        for t in hours:
+            # SOC 전이식. 충전은 효율만큼 덜 쌓이고, 방전은 효율만큼 더 꺼낸다.
+            #   soc_t = soc_{t-1} + eta_ch * ch_t * dt - dis_t * dt / eta_dis
+            previous = soc[t - 1] if t > 0 else ess.soc_init_mwh
+            problem += (
+                soc[t] == previous
+                + ess.eta_charge * charge[t]
+                - discharge[t] / ess.eta_discharge,
+                f"soc_{t}",
+            )
+            if ess.enforce_exclusive:
+                # 동시 충·방전 금지. 왕복효율 < 1 이면 손실이라 비용 최소화에서
+                # 저절로 배제되지만, 명시적으로 막고 싶을 때 쓴다 (이진변수 +H).
+                z = pulp.LpVariable(f"z_{t}", cat=pulp.LpBinary)
+                problem += (charge[t] <= ess.power_charge_mw * z, f"ess_ch_excl_{t}")
+                problem += (
+                    discharge[t] <= ess.power_discharge_mw * (1 - z),
+                    f"ess_dis_excl_{t}",
+                )
+
+        # 종료 SOC 하한. 없으면 배터리를 비우고 끝내 "공짜 에너지"를 얻는다.
+        problem += (
+            soc[inp.horizon_h - 1] >= ess.soc_final_min_mwh,
+            "soc_final",
+        )
+
+        if peak_var is not None:
+            # 피크 = max(발전기 부하). 선형화는 "모든 t 에서 peak >= 부하".
+            for t in hours:
+                problem += (
+                    peak_var >= demand[t] - shed[t] - ess_net(t),
+                    f"peak_def_{t}",
+                )
+            if ess.mode == "peak_shaving":
+                before = max(demand)
+                cap = before * (1 - ess.peak_target_pct / 100.0)
+                problem += (peak_var <= cap, "peak_cap")
+                notes.append(
+                    f"peak_shaving 모드: 피크를 {ess.peak_target_pct:.1f}% 이상 깎도록 "
+                    f"상한 {cap:,.0f} MW 를 걸었다 (ESS 미적용 피크 {before:,.0f} MW). "
+                    "달성 불가하면 infeasible 로 드러난다"
+                )
+
     if not (inp.p_init_mw and all(g.id in inp.p_init_mw for g in gens)):
         notes.append(
             "유닛별 초기 출력(p_init_mw)이 없어 t=0 의 램프 제약을 생략했다 "
@@ -275,6 +372,7 @@ def build_model(
     return _Model(
         problem=problem,
         u=u, v=v, w=w, p=p, shed=shed,
+        charge=charge, discharge=discharge, soc=soc, ess=ess,
         p_max_eff=p_max_eff,
         hydro_factor=hydro_factor,
         notes=notes,
@@ -309,6 +407,7 @@ def solve(
     hydro_policy: HydroPolicy | None = None,
     allow_load_shedding: bool = False,
     shed_penalty_krw_per_mwh: float = DEFAULT_SHED_PENALTY_KRW_PER_MWH,
+    ess: EssSpec | None = None,
 ) -> DispatchResult:
     """UC + ED MILP 를 풀어 급전 계획을 돌려준다.
 
@@ -321,6 +420,7 @@ def solve(
         hydro_policy=hydro_policy,
         allow_load_shedding=allow_load_shedding,
         shed_penalty_krw_per_mwh=shed_penalty_krw_per_mwh,
+        ess=ess,
     )
 
     solver = build_solver(config)
@@ -353,6 +453,18 @@ def solve(
     }
     shed_mw = [value(model.shed[t]) if solved else 0.0 for t in range(inp.horizon_h)]
 
+    ess_schedule = None
+    if ess is not None and model.charge is not None and model.discharge is not None:
+        ess_schedule = EssSchedule(
+            charge_mw=[value(model.charge[t]) if solved else 0.0
+                       for t in range(inp.horizon_h)],
+            discharge_mw=[value(model.discharge[t]) if solved else 0.0
+                          for t in range(inp.horizon_h)],
+            soc_mwh=[value(model.soc[t]) if solved else ess.soc_init_mwh
+                     for t in range(inp.horizon_h)],
+            spec=ess,
+        )
+
     notes = list(model.notes)
     if not solved:
         notes.append(
@@ -366,11 +478,15 @@ def solve(
         "milp", status, inp, on, p_mw, model.p_max_eff, shed_mw,
         shed_penalty_krw_per_mwh=shed_penalty_krw_per_mwh,
         hydro_factor=model.hydro_factor,
+        ess=ess_schedule,
         size=size,
         notes=notes,
     )
 
     # 교차검증: 목적함수 값과 다시 계산한 비용이 어긋나면 계수 누락이다.
+    # combined 모드는 목적함수에 비용이 아닌 피크 가중치가 섞여 있어 제외한다.
+    if ess is not None and ess.mode == "combined":
+        objective = None
     if objective is not None and abs(objective - result.total_cost_krw) > max(
         1.0, abs(objective) * 1e-6
     ):

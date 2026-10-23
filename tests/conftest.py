@@ -98,3 +98,40 @@ def make_input():
         )
 
     return _make
+
+
+@pytest.fixture
+def make_ess():
+    """손계산이 쉬운 ESS. 왕복효율 0.64 -> eta_ch = eta_dis = 0.8 이다."""
+    from models import EssSpec
+
+    def _make(
+        power_charge_mw: float = 100.0,
+        power_discharge_mw: float = 100.0,
+        capacity_mwh: float = 400.0,
+        round_trip_efficiency: float = 0.64,
+        soc_min_pct: float = 0.0,
+        soc_max_pct: float = 100.0,
+        soc_init_pct: float = 50.0,
+        soc_final_min_pct: float = 0.0,
+        enforce_exclusive: bool = False,
+        mode: str = "cost",
+        peak_target_pct: float = 5.0,
+        peak_penalty_krw_per_mw: float = 0.0,
+    ) -> EssSpec:
+        return EssSpec(
+            power_charge_mw=power_charge_mw,
+            power_discharge_mw=power_discharge_mw,
+            capacity_mwh=capacity_mwh,
+            round_trip_efficiency=round_trip_efficiency,
+            soc_min_pct=soc_min_pct,
+            soc_max_pct=soc_max_pct,
+            soc_init_pct=soc_init_pct,
+            soc_final_min_pct=soc_final_min_pct,
+            enforce_exclusive=enforce_exclusive,
+            mode=mode,
+            peak_target_pct=peak_target_pct,
+            peak_penalty_krw_per_mw=peak_penalty_krw_per_mw,
+        )
+
+    return _make

@@ -11,7 +11,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
-from models import DispatchInput, DispatchResult, Generator, ModelSize, UnitSchedule
+from models import (
+    DispatchInput,
+    DispatchResult,
+    EssSchedule,
+    Generator,
+    ModelSize,
+    UnitSchedule,
+)
 
 # 급전 결과에서 "출력 0" 과 수치오차를 구분하는 기준. solver 는 1e-9 수준의
 # 쓰레기값을 남기므로 그대로 리포트하면 정지한 유닛이 켜진 것처럼 보인다.
@@ -80,6 +87,7 @@ def assemble(
     shed_penalty_krw_per_mwh: float,
     surplus_mw: Sequence[float] | None = None,
     hydro_factor: float = 1.0,
+    ess: EssSchedule | None = None,
     size: ModelSize | None = None,
     notes: Sequence[str] | None = None,
 ) -> DispatchResult:
@@ -130,6 +138,7 @@ def assemble(
         shed_cost_krw=shed_penalty_krw_per_mwh * sum(shed),
         reserve_margin_ratio=inp.reserve_margin_ratio,
         hydro_factor=hydro_factor,
+        ess=ess,
         size=size,
         notes=list(notes or []),
         surplus_mw=[float(x) for x in (surplus_mw or [0.0] * len(shed))],

@@ -12,6 +12,7 @@ import yaml
 
 from loaders.config_loader import (
     ConfigError,
+    load_ess,
     load_generator_specs,
     load_settings,
     resolve_fuel_costs,
@@ -329,3 +330,93 @@ def test_negative_reserve_rejected(tmp_path):
 def test_invalid_horizon_rejected(tmp_path):
     with pytest.raises(ConfigError, match="horizon_h"):
         load_settings(write_settings(tmp_path, horizon_h=0))
+
+
+# ── ESS (ess.yaml) ───────────────────────────────────────────────────────────
+
+
+def write_ess(tmp_path, **overrides):
+    data = {
+        "power_charge_mw": 4700,
+        "power_discharge_mw": 4700,
+        "capacity_mwh": 32900,
+        "round_trip_efficiency": 0.75,
+        "soc_min_pct": 10,
+        "soc_max_pct": 95,
+        "soc_init_pct": 50,
+        "soc_final_min_pct": 50,
+        "mode": "cost",
+        "peak_target_pct": 5.0,
+    }
+    data.update(overrides)
+    path = tmp_path / "ess.yaml"
+    path.write_text(yaml.safe_dump({"ess": data}), encoding="utf-8")
+    return path
+
+
+def test_ess_loads_and_converts_soc_to_mwh(tmp_path):
+    """SOC 는 % 로 받아 MWh 로 환산한다 (단위 혼동 방지)."""
+    ess = load_ess(write_ess(tmp_path))
+
+    assert ess.soc_min_mwh == pytest.approx(3290)
+    assert ess.soc_init_mwh == pytest.approx(16450)
+    assert ess.soc_max_mwh == pytest.approx(31255)
+    assert ess.usable_mwh == pytest.approx(27965)
+
+
+def test_ess_efficiency_is_split_evenly(tmp_path):
+    """왕복효율을 충전·방전에 반씩 나눈다: eta = sqrt(rte)."""
+    ess = load_ess(write_ess(tmp_path, round_trip_efficiency=0.64))
+
+    assert ess.eta_charge == pytest.approx(0.8)
+    assert ess.eta_discharge == pytest.approx(0.8)
+    assert ess.eta_charge * ess.eta_discharge == pytest.approx(0.64)
+
+
+def test_ess_zero_capacity_rejected(tmp_path):
+    """placeholder(용량 0)를 조용히 통과시키지 않는다."""
+    with pytest.raises(ConfigError, match="capacity_mwh"):
+        load_ess(write_ess(tmp_path, capacity_mwh=0))
+
+
+@pytest.mark.parametrize("overrides, message", [
+    ({"power_charge_mw": 0}, "출력"),
+    ({"power_discharge_mw": -1}, "출력"),
+    ({"round_trip_efficiency": 0}, "round_trip_efficiency"),
+    ({"round_trip_efficiency": 1.2}, "round_trip_efficiency"),
+    ({"soc_min_pct": 120}, "soc_min_pct"),
+    ({"soc_min_pct": 95, "soc_max_pct": 95}, "사용 가능 구간"),
+    ({"soc_init_pct": 5}, "soc_init_pct"),
+    ({"soc_final_min_pct": 99}, "soc_final_min_pct"),
+    ({"mode": "arbitrage"}, "mode"),
+    ({"peak_target_pct": 100}, "peak_target_pct"),
+    ({"peak_penalty_krw_per_mw": -1}, "peak_penalty"),
+])
+def test_invalid_ess_rejected(tmp_path, overrides, message):
+    with pytest.raises(ConfigError, match=message):
+        load_ess(write_ess(tmp_path, **overrides))
+
+
+def test_missing_required_ess_field_rejected(tmp_path):
+    path = tmp_path / "ess.yaml"
+    path.write_text(yaml.safe_dump({"ess": {"capacity_mwh": 100}}), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="power_charge_mw"):
+        load_ess(path)
+
+
+def test_ess_block_required(tmp_path):
+    path = tmp_path / "ess.yaml"
+    path.write_text(yaml.safe_dump({"storage": {}}), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="ess"):
+        load_ess(path)
+
+
+def test_repo_ess_config_loads(repo_root):
+    """레포의 실제 ess.yaml 이 유효하고 5% 피크 감소에 충분한 규모인지."""
+    ess = load_ess(repo_root / "config" / "ess.yaml")
+
+    assert ess.power_discharge_mw >= 4584  # 1년 측정 최대 필요 출력
+    assert ess.usable_mwh >= 27171         # 1년 측정 최대 필요 에너지
+    assert ess.soc_final_min_pct >= ess.soc_init_pct

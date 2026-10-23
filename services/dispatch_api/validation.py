@@ -45,15 +45,16 @@ class CheckResult:
 def check_power_balance(
     result: DispatchResult, tol_mw: float = DEFAULT_TOL_MW
 ) -> list[Violation]:
-    """수급 균형: Σ p + 부하차단 - 과잉발전 = 순수요.
+    """수급 균형: Σ p + ESS 순출력 + 부하차단 - 과잉발전 = 순수요.
 
-    과잉발전은 baseline 이 램프 한계 때문에 못 내린 양이다 (MILP 는 항상 0).
-    균형식에서 빼 주고, 양 자체는 아래 `report` 가 따로 드러낸다.
+    ESS 순출력은 방전(+)과 충전(-)의 합이다. 과잉발전은 baseline 이 램프 한계
+    때문에 못 내린 양이다 (MILP 는 항상 0). 균형식에서 빼 주고, 양 자체는 아래
+    `report` 가 따로 드러낸다.
     """
     out = []
     for t in range(result.horizon_h):
         gap = (
-            result.supply_mw(t) + result.shed_mw[t]
+            result.supply_mw(t) + result.ess_net_mw(t) + result.shed_mw[t]
             - result.surplus_at(t) - result.net_demand_mw[t]
         )
         if abs(gap) > tol_mw:
@@ -95,11 +96,14 @@ def check_capacity(
 def check_reserve(
     result: DispatchResult, tol_mw: float = DEFAULT_TOL_MW
 ) -> list[Violation]:
-    """예비율: 가동 중 유닛의 상한 합 >= (1 + r) x 공급한 수요."""
+    """예비율: 가동 중 유닛의 상한 합 >= (1 + r) x 발전기 부하.
+
+    발전기 부하 = 공급한 수요 + ESS 충전 - ESS 방전 (ESS 가 없으면 수요와 같다).
+    """
     out = []
     required_ratio = 1.0 + result.reserve_margin_ratio
     for t in range(result.horizon_h):
-        required = required_ratio * result.served_demand_mw(t)
+        required = required_ratio * result.generator_load_mw(t)
         available = result.available_capacity_mw(t)
         if available < required - tol_mw:
             out.append(Violation(
@@ -213,6 +217,83 @@ def check_hydro_limit(
     return out
 
 
+def check_ess(
+    result: DispatchResult, tol_mw: float = DEFAULT_TOL_MW
+) -> list[Violation]:
+    """ESS 출력 한계·SOC 범위·SOC 전이식·종료 SOC·동시 충방전.
+
+    SOC 전이식을 **다시 계산해서** 비교한다. 효율을 빼먹거나 충·방전 부호를
+    바꿔 쓰는 실수는 비용이 그럴듯하게 나오기 때문에 결과만 보면 안 잡힌다.
+    """
+    ess = result.ess
+    if ess is None:
+        return []
+
+    spec = ess.spec
+    out: list[Violation] = []
+    tol_mwh = tol_mw  # step 1시간이라 MWh 허용오차도 같은 값을 쓴다
+
+    for t in range(result.horizon_h):
+        if ess.charge_mw[t] > spec.power_charge_mw + tol_mw:
+            out.append(Violation(
+                "ess_power",
+                f"충전 {ess.charge_mw[t]:.2f} > 한계 {spec.power_charge_mw:.2f} MW",
+                unit_id="ess", hour=t,
+            ))
+        if ess.discharge_mw[t] > spec.power_discharge_mw + tol_mw:
+            out.append(Violation(
+                "ess_power",
+                f"방전 {ess.discharge_mw[t]:.2f} > 한계 {spec.power_discharge_mw:.2f} MW",
+                unit_id="ess", hour=t,
+            ))
+        if ess.charge_mw[t] < -tol_mw or ess.discharge_mw[t] < -tol_mw:
+            out.append(Violation(
+                "ess_power", "충전·방전은 음수일 수 없다", unit_id="ess", hour=t,
+            ))
+
+        if not (spec.soc_min_mwh - tol_mwh <= ess.soc_mwh[t] <= spec.soc_max_mwh + tol_mwh):
+            out.append(Violation(
+                "ess_soc_bounds",
+                f"SOC {ess.soc_mwh[t]:,.1f} MWh 가 "
+                f"[{spec.soc_min_mwh:,.1f}, {spec.soc_max_mwh:,.1f}] 밖이다",
+                unit_id="ess", hour=t,
+            ))
+
+        previous = ess.soc_mwh[t - 1] if t > 0 else spec.soc_init_mwh
+        expected = (
+            previous
+            + spec.eta_charge * ess.charge_mw[t]
+            - ess.discharge_mw[t] / spec.eta_discharge
+        )
+        if abs(ess.soc_mwh[t] - expected) > tol_mwh:
+            out.append(Violation(
+                "ess_soc_balance",
+                f"SOC {ess.soc_mwh[t]:,.2f} != 전이식 결과 {expected:,.2f} MWh "
+                f"(차이 {ess.soc_mwh[t] - expected:+.2f})",
+                unit_id="ess", hour=t,
+            ))
+
+        if (
+            spec.enforce_exclusive
+            and ess.charge_mw[t] > tol_mw
+            and ess.discharge_mw[t] > tol_mw
+        ):
+            out.append(Violation(
+                "ess_exclusive",
+                f"동시 충전 {ess.charge_mw[t]:.1f} / 방전 {ess.discharge_mw[t]:.1f} MW",
+                unit_id="ess", hour=t,
+            ))
+
+    if ess.soc_mwh and ess.soc_mwh[-1] < spec.soc_final_min_mwh - tol_mwh:
+        out.append(Violation(
+            "ess_soc_final",
+            f"종료 SOC {ess.soc_mwh[-1]:,.1f} < 하한 {spec.soc_final_min_mwh:,.1f} MWh "
+            "(배터리를 비우고 끝내면 비용이 부당하게 낮아진다)",
+            unit_id="ess", hour=result.horizon_h - 1,
+        ))
+    return out
+
+
 def all_violations(
     result: DispatchResult,
     generators: Sequence[Generator],
@@ -227,6 +308,7 @@ def all_violations(
         *check_ramp(result, generators, p_init_mw, tol_mw),
         *check_min_up_down(result, generators),
         *check_hydro_limit(result, generators, tol_mw),
+        *check_ess(result, tol_mw),
     ]
 
 
@@ -240,6 +322,11 @@ CHECK_LABELS: tuple[tuple[str, str], ...] = (
     ("min_up", "최소 기동시간"),
     ("min_down", "최소 정지시간"),
     ("hydro_limit", "수력 저수율 제한"),
+    ("ess_power", "ESS 출력 한계"),
+    ("ess_soc_bounds", "ESS SOC 범위"),
+    ("ess_soc_balance", "ESS SOC 전이식"),
+    ("ess_soc_final", "ESS 종료 SOC"),
+    ("ess_exclusive", "ESS 동시 충방전 금지"),
 )
 
 
@@ -265,6 +352,8 @@ def report(
             ),
         )
         for key, label in CHECK_LABELS
+        # ESS 를 쓰지 않은 해에 ESS 항목을 "통과"로 보여주면 검증한 것처럼 오해된다
+        if result.ess is not None or not key.startswith("ess_")
     ]
 
     surplus_mwh = sum(result.surplus_mw)

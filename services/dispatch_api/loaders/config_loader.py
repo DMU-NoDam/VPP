@@ -18,7 +18,7 @@ from typing import Any
 import yaml
 
 import constants
-from models import Generator, GeneratorSpec, Settings
+from models import EssSpec, Generator, GeneratorSpec, Settings
 
 logger = logging.getLogger(__name__)
 
@@ -295,6 +295,7 @@ def resolve_fuel_costs(
 
 VALID_RESAMPLE = ("mean", "instant")
 VALID_HYDRO_MODES = ("linear", "fixed")
+VALID_ESS_MODES = ("cost", "peak_shaving", "combined")
 VALID_NET_DEMAND_MODES = (
     "subtract_solar_renewable",
     "subtract_renewable_only",
@@ -382,3 +383,99 @@ def load_settings(path: str | Path) -> Settings:
         hydro_derate_mode=hydro_mode,
         shed_penalty_krw_per_mwh=shed_penalty,
     )
+
+
+# ── ESS ─────────────────────────────────────────────────────────────────────
+
+
+def load_ess(path: str | Path) -> EssSpec:
+    """ess.yaml -> EssSpec. 물리적으로 불가능한 조합을 걸러낸다.
+
+    용량 0 인 placeholder 를 조용히 통과시키지 않는다. ESS 를 쓰겠다고 하고
+    용량이 0 이면 "ESS 가 아무것도 안 하는데 성공한 것처럼 보이는" 결과가 나온다.
+    """
+    data = load_yaml(path)
+    where = str(path)
+
+    raw = data.get("ess")
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where}: `ess` 블록이 없거나 매핑이 아니다")
+
+    def number(key: str, default: Any = None) -> float:
+        if key not in raw:
+            if default is None:
+                raise ConfigError(f"{where}: ess.{key} 가 없다")
+            return float(default)
+        value = raw[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ConfigError(f"{where}: ess.{key} 가 숫자가 아니다 (받은 값 {value!r})")
+        return float(value)
+
+    mode = str(raw.get("mode", "cost"))
+    if mode not in VALID_ESS_MODES:
+        raise ConfigError(f"{where}: ess.mode '{mode}' 는 {VALID_ESS_MODES} 중 하나여야 한다")
+
+    spec = EssSpec(
+        power_charge_mw=number("power_charge_mw"),
+        power_discharge_mw=number("power_discharge_mw"),
+        capacity_mwh=number("capacity_mwh"),
+        round_trip_efficiency=number("round_trip_efficiency"),
+        soc_min_pct=number("soc_min_pct", 0),
+        soc_max_pct=number("soc_max_pct", 100),
+        soc_init_pct=number("soc_init_pct", 50),
+        soc_final_min_pct=number("soc_final_min_pct", 0),
+        enforce_exclusive=bool(raw.get("enforce_exclusive", False)),
+        mode=mode,
+        peak_target_pct=number("peak_target_pct", 5.0),
+        peak_penalty_krw_per_mw=number("peak_penalty_krw_per_mw", 0),
+    )
+    _check_ess_invariants(spec, where)
+    return spec
+
+
+def _check_ess_invariants(spec: EssSpec, where: str) -> None:
+    if spec.capacity_mwh <= 0:
+        raise ConfigError(
+            f"{where}: ess.capacity_mwh 는 양수여야 한다 (받은 값 {spec.capacity_mwh}). "
+            "ESS 를 쓰지 않으려면 요청에서 use_ess: false 를 쓸 것"
+        )
+    if spec.power_charge_mw <= 0 or spec.power_discharge_mw <= 0:
+        raise ConfigError(
+            f"{where}: ess 출력 한계는 양수여야 한다 "
+            f"(충전 {spec.power_charge_mw}, 방전 {spec.power_discharge_mw})"
+        )
+    if not 0 < spec.round_trip_efficiency <= 1:
+        raise ConfigError(
+            f"{where}: ess.round_trip_efficiency 는 0 초과 1 이하여야 한다 "
+            f"(받은 값 {spec.round_trip_efficiency})"
+        )
+    for key, value in (
+        ("soc_min_pct", spec.soc_min_pct),
+        ("soc_max_pct", spec.soc_max_pct),
+        ("soc_init_pct", spec.soc_init_pct),
+        ("soc_final_min_pct", spec.soc_final_min_pct),
+    ):
+        if not 0 <= value <= 100:
+            raise ConfigError(f"{where}: ess.{key} 는 0~100 이어야 한다 (받은 값 {value})")
+    if spec.soc_min_pct >= spec.soc_max_pct:
+        raise ConfigError(
+            f"{where}: ess.soc_min_pct({spec.soc_min_pct}) >= "
+            f"soc_max_pct({spec.soc_max_pct}) 면 사용 가능 구간이 비어 있다"
+        )
+    if not spec.soc_min_pct <= spec.soc_init_pct <= spec.soc_max_pct:
+        raise ConfigError(
+            f"{where}: ess.soc_init_pct({spec.soc_init_pct}) 가 "
+            f"[{spec.soc_min_pct}, {spec.soc_max_pct}] 밖이다"
+        )
+    if not spec.soc_min_pct <= spec.soc_final_min_pct <= spec.soc_max_pct:
+        raise ConfigError(
+            f"{where}: ess.soc_final_min_pct({spec.soc_final_min_pct}) 가 "
+            f"[{spec.soc_min_pct}, {spec.soc_max_pct}] 밖이다"
+        )
+    if not 0 <= spec.peak_target_pct < 100:
+        raise ConfigError(
+            f"{where}: ess.peak_target_pct 는 0 이상 100 미만이어야 한다 "
+            f"(받은 값 {spec.peak_target_pct})"
+        )
+    if spec.peak_penalty_krw_per_mw < 0:
+        raise ConfigError(f"{where}: ess.peak_penalty_krw_per_mw 는 음수일 수 없다")
