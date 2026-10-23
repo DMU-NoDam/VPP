@@ -218,3 +218,95 @@ def test_demand_from_collected_data(client):
         for a, b in zip(payload.timestamps, payload.timestamps[1:], strict=False)
     }
     assert gaps == {3600.0}
+
+
+# ── ESS ──────────────────────────────────────────────────────────────────────
+
+
+def test_ess_is_included_by_default(client):
+    """use_ess 기본값은 true 다. 응답에 ESS 운전 계획과 피크 지표가 담긴다."""
+    body = {"net_demand_mw": FLAT_DEMAND, "include_units": False, "include_baseline": False}
+    payload = MilpResponse.model_validate(
+        client.post("/api/v1/dispatch/milp", json=body).json()
+    )
+
+    ess = payload.ess
+    assert ess is not None
+    assert len(ess.charge_mw) == len(ess.discharge_mw) == len(ess.soc_mwh) == 24
+    assert ess.peak_before_mw > 0
+    assert ess.peak_target_pct == 5.0
+    # 시간 요약의 ess_mw 는 방전(+) - 충전(-)
+    for t, hour in enumerate(payload.hours):
+        assert hour.ess_mw == pytest.approx(ess.discharge_mw[t] - ess.charge_mw[t])
+
+
+def test_ess_can_be_disabled(client):
+    """use_ess: false 면 ESS 없이 풀고, 전/후 비교의 '전' 쪽이 된다."""
+    body = {"net_demand_mw": FLAT_DEMAND, "include_units": False,
+            "include_baseline": False, "use_ess": False}
+    payload = MilpResponse.model_validate(
+        client.post("/api/v1/dispatch/milp", json=body).json()
+    )
+
+    assert payload.ess is None
+    assert all(h.ess_mw == 0 for h in payload.hours)
+    assert not any(c.name.startswith("ESS") for c in payload.constraints)
+
+
+def test_peak_shaving_mode_meets_target(client):
+    """peak_shaving 모드는 피크 감소율 5% 를 하드 제약으로 보장한다."""
+    demand = [60000.0] * 12 + [78000.0, 82000.0, 84000.0, 83000.0] + [65000.0] * 8
+    body = {"net_demand_mw": demand, "include_units": False, "include_baseline": False,
+            "ess_mode": "peak_shaving", "ess_peak_target_pct": 5.0}
+    payload = MilpResponse.model_validate(
+        client.post("/api/v1/dispatch/milp", json=body).json()
+    )
+
+    assert payload.status == "optimal"
+    ess = payload.ess
+    assert ess.mode == "peak_shaving"
+    assert ess.peak_reduction_pct >= 5.0
+    assert ess.target_met is True
+    assert ess.peak_after_mw <= ess.peak_before_mw * 0.95 + 1e-6
+    assert [c.name for c in payload.constraints if not c.ok] == []
+
+
+def test_impossible_peak_target_is_infeasible(client):
+    """달성 불가한 목표는 infeasible 로 드러나고 제약 검증은 생략된다."""
+    demand = [60000.0] * 23 + [90000.0]
+    body = {"net_demand_mw": demand, "include_units": False, "include_baseline": False,
+            "ess_mode": "peak_shaving", "ess_peak_target_pct": 30.0}
+    payload = MilpResponse.model_validate(
+        client.post("/api/v1/dispatch/milp", json=body).json()
+    )
+
+    assert payload.status == "infeasible"
+    assert [c.name for c in payload.constraints] == ["제약 검증"]
+
+
+def test_ess_energy_balance_in_response(client):
+    """응답의 충전·방전·손실이 왕복효율과 일치한다."""
+    demand = [60000.0] * 12 + [80000.0] * 4 + [65000.0] * 8
+    body = {"net_demand_mw": demand, "include_units": False, "include_baseline": False,
+            "ess_mode": "peak_shaving"}
+    payload = MilpResponse.model_validate(
+        client.post("/api/v1/dispatch/milp", json=body).json()
+    )
+
+    ess = payload.ess
+    soc_gain = ess.soc_mwh[-1] - ess.soc_init_mwh
+    assert ess.loss_mwh == pytest.approx(
+        ess.energy_charged_mwh - ess.energy_discharged_mwh - soc_gain, abs=1.0
+    )
+    assert ess.loss_mwh >= 0
+
+
+def test_baseline_comparison_notes_ess_condition(client):
+    """ESS 를 쓰면 절감률 비교 조건을 notes 에 밝힌다 (baseline 은 ESS 없음)."""
+    body = {"net_demand_mw": FLAT_DEMAND, "include_units": False, "include_baseline": True}
+    payload = MilpResponse.model_validate(
+        client.post("/api/v1/dispatch/milp", json=body).json()
+    )
+
+    assert payload.baseline is not None
+    assert any("ESS" in note and "미정" in note for note in payload.notes)

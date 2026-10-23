@@ -212,6 +212,9 @@ class MilpRequest(BaseModel):
     unit_ids: list[str] | None = None          # None 이면 generators.yaml 전체
     allow_load_shedding: bool = False          # [모델링 선택] 과제 필수 아님
     shed_penalty_won_per_mwh: float | None = None
+    use_ess: bool = True                       # false 면 ESS 없이 푼다 (전/후 비교용)
+    ess_mode: Literal["cost", "peak_shaving", "combined"] | None = None  # None 이면 ess.yaml
+    ess_peak_target_pct: float | None = Field(None, ge=0, lt=100)  # peak_shaving 목표
     include_baseline: bool = True              # Rule-based 비교와 절감률을 같이 계산
     include_units: bool = True                 # 유닛 x 시간 급전값 (응답이 커진다)
     solver: SolverOptions | None = None
@@ -263,6 +266,35 @@ class BaselineComparison(BaseModel):
     constraints: list[CheckItem]
 
 
+class EssSummary(BaseModel):
+    """ESS 사양·운전 계획·피크 저감 효과. 대시보드의 ESS 현황 패널이 이걸 본다."""
+
+    mode: str                      # cost | peak_shaving | combined
+    power_charge_mw: float
+    power_discharge_mw: float
+    capacity_mwh: float
+    round_trip_efficiency: float
+    soc_min_mwh: float
+    soc_max_mwh: float
+    soc_init_mwh: float
+
+    charge_mw: list[float]         # 시간대별 충전 출력
+    discharge_mw: list[float]      # 시간대별 방전 출력
+    soc_mwh: list[float]           # 시간대별 저장 에너지
+    soc_pct: list[float]           # 같은 값을 용량 대비 %로
+
+    energy_charged_mwh: float
+    energy_discharged_mwh: float
+    loss_mwh: float                # 왕복효율 손실
+    cycles: float                  # 사용 가능 에너지 기준 등가 사이클
+
+    peak_before_mw: float          # ESS 미적용 순수요 피크
+    peak_after_mw: float           # ESS 적용 후 발전기 부하 피크
+    peak_reduction_pct: float       # (전 - 후) / 전 x 100
+    peak_target_pct: float          # 기준 (기본 5%)
+    target_met: bool
+
+
 class MilpResponse(BaseModel):
     status: SolveStatus
     method: str = "milp"
@@ -274,6 +306,7 @@ class MilpResponse(BaseModel):
     units: list[UnitHour] | None = None
     merit_order: list[MeritOrderEntry]
     carbon: CarbonSummary
+    ess: EssSummary | None = None         # use_ess: false 면 null
     constraints: list[CheckItem]          # 필수 제약 위반 검사 (해를 다시 검증한 결과)
     baseline: BaselineComparison | None = None
     reserve_ratio: float

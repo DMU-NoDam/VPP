@@ -49,6 +49,9 @@ UC 포함 경제급전 MILP. 스키마는 `shared/schemas.py` 의 `MilpRequest` 
   "unit_ids": null,
   "allow_load_shedding": false,
   "shed_penalty_won_per_mwh": null,
+  "use_ess": true,
+  "ess_mode": null,
+  "ess_peak_target_pct": null,
   "include_baseline": true,
   "include_units": true,
   "solver": { "time_limit_s": 10, "mip_gap": 0.005 }
@@ -65,6 +68,9 @@ UC 포함 경제급전 MILP. 스키마는 `shared/schemas.py` 의 `MilpRequest` 
 | `p_init_mw` | `{"coal_1": 3000.0}` 형태의 직전 출력. 없으면 t=0 램프 제약을 생략하고 `notes` 에 남긴다 |
 | `unit_ids` | 쓸 유닛 일부만 지정 (발전소 탈락 시나리오). 없는 id 면 500 |
 | `allow_load_shedding` | `[모델링 선택]` 기본 false. true 면 부족량이 `shed_mw` 로 나온다 |
+| `use_ess` | 기본 true. false 면 ESS 없이 푼다 (피크 전/후 비교의 "전") |
+| `ess_mode` | `cost`(기본) / `peak_shaving` / `combined`. 비우면 `config/ess.yaml`. 피크 5% KPI 는 `peak_shaving` 으로 본다 |
+| `ess_peak_target_pct` | `peak_shaving` 목표 감소율(%). 비우면 ess.yaml (5.0) |
 | `include_baseline` | Rule-based 비교와 절감률 포함 (기본 true) |
 | `include_units` | 유닛 x 시간 급전값 포함 (29기 x 24h = 696행) |
 | `solver` | 요청별 time limit / MIP gap |
@@ -107,9 +113,22 @@ forecast_api 연동 전까지는 `net_demand_mw` 를 직접 주는 경로를 쓴
     "by_fuel_ton": { "nuclear": 3594.9, "bituminous_coal": 702087.9 },
     "intensity_ton_per_mwh": 0.498
   },
+  "ess": {
+    "mode": "peak_shaving",
+    "power_charge_mw": 4700.0, "power_discharge_mw": 4700.0,
+    "capacity_mwh": 32900.0, "round_trip_efficiency": 0.75,
+    "soc_min_mwh": 3290.0, "soc_max_mwh": 31255.0, "soc_init_mwh": 16450.0,
+    "charge_mw": [2271.1, 0.0], "discharge_mw": [0.0, 4424.0],
+    "soc_mwh": [31255.0, 26146.6], "soc_pct": [95.0, 79.5],
+    "energy_charged_mwh": 24698.7, "energy_discharged_mwh": 18524.0,
+    "loss_mwh": 6174.7, "cycles": 0.66,
+    "peak_before_mw": 84000.0, "peak_after_mw": 79300.0,
+    "peak_reduction_pct": 5.6, "peak_target_pct": 5.0, "target_met": true
+  },
   "constraints": [
     { "name": "수급 균형", "ok": true, "detail": "위반 없음" },
-    { "name": "예비율", "ok": true, "detail": "위반 없음" }
+    { "name": "예비율", "ok": true, "detail": "위반 없음" },
+    { "name": "ESS SOC 전이식", "ok": true, "detail": "위반 없음" }
   ],
   "baseline": {
     "method": "rule_based",
@@ -129,14 +148,26 @@ forecast_api 연동 전까지는 `net_demand_mw` 를 직접 주는 경로를 쓴
 
 - `status`: `optimal` | `feasible` | `infeasible` | `time_limit` | `error`.
   **`optimal` 이 아니면 급전값은 유효하지 않다** (전부 0). `notes` 에 진단 순서가 담긴다.
-- `constraints`: 해를 받은 뒤 제약을 다시 검사한 결과 9종
+- `constraints`: 해를 받은 뒤 제약을 다시 검사한 결과
   (수급 균형 / 출력 상·하한 / 예비율 / 램프업 / 램프다운 / 최소 기동시간 /
-  최소 정지시간 / 수력 저수율 제한 / 과잉발전 / 부하차단). 정상 해에서는 전부 `ok: true`.
+  최소 정지시간 / 수력 저수율 제한 / 과잉발전 / 부하차단, ESS 를 쓰면 + ESS 출력
+  한계 / SOC 범위 / SOC 전이식 / 종료 SOC / 동시 충방전). 정상 해에서는 전부
+  `ok: true`. `status` 가 optimal 이 아니면 검증할 계획이 없으므로 `제약 검증`
+  한 줄만 돌아온다.
 - `model_size.total_time_s`: 응답시간 KPI(<= 10초)를 이 값으로 확인한다.
   (HTTP 왕복에는 데이터 로딩이 더해지지만, 로딩 결과는 파일 변경 전까지 캐시된다.)
 - `baseline.cost_reduction_pct`: `(baseline - milp) / baseline x 100`. 기준 >= 10%.
   `target_met` 이 판정이다. 양쪽 모두 같은 회계(연료비 + 기동비)를 쓴다.
-- `hours[].ess_mw`: ESS 미구현이라 현재 항상 0 이다 (자리만 잡아 둠).
+- `hours[].ess_mw`: ESS 순출력 (+ 방전 / - 충전). `use_ess: false` 면 0.
+- `ess`: 사양 + 시간대별 충·방전·SOC + 피크 저감 효과. `peak_reduction_pct` 의
+  정의는 `(ESS 미적용 순수요 피크 - 적용 후 발전기 부하 피크) / 전 x 100` 이고
+  기준은 5% 다 ([formulation.md](formulation.md) 5.4). `target_met` 이 판정이다.
+  `cost` 모드는 피크 감소를 **보장하지 않는다** (단가 차이가 없으면 ESS 를 쓸
+  이유가 없다). 5% 를 보장해야 하면 `peak_shaving` 을 쓰고, 물리적으로 불가능한
+  목표면 `status: infeasible` 로 돌아온다.
+- ESS 를 켠 채 `include_baseline: true` 로 받은 `cost_reduction_pct` 는
+  "MILP + ESS vs ESS 없는 Rule-based" 비교다. 조건이 다르다는 사실이 `notes` 에
+  들어간다 (baseline 에 ESS 를 포함할지는 `[미정]`).
 
 ### HTTP 상태
 

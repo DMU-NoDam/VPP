@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import replace
 from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -23,18 +24,20 @@ import milp
 import validation
 from loaders.config_loader import (
     ConfigError,
+    load_ess,
     load_generator_specs,
     load_settings,
     resolve_fuel_costs,
 )
 from loaders.data_loader import DataError, build_dispatch_input, read_csv_dataset
-from models import DispatchInput, DispatchResult, Generator, Settings
+from models import DispatchInput, DispatchResult, EssSpec, Generator, Settings
 from schedule import cost_reduction_pct, merit_order
 from shared.schemas import (
     BaselineComparison,
     CarbonSummary,
     CheckItem,
     CostBreakdown,
+    EssSummary,
     HourSummary,
     MeritOrderEntry,
     MilpRequest,
@@ -48,8 +51,9 @@ logger = logging.getLogger(__name__)
 CONFIG_DIR = Path(os.getenv("VPP_CONFIG_DIR", "config"))
 CSV_DIR = Path(os.getenv("VPP_CSV_DIR", "data/csv"))
 
-# 절감률 KPI (CLAUDE.md 정량 기준). 응답의 target_met 판정에 쓴다.
+# KPI 기준 (CLAUDE.md 정량 기준). 응답의 target_met 판정에 쓴다.
 COST_REDUCTION_TARGET_PCT = 10.0
+PEAK_REDUCTION_TARGET_PCT = 5.0
 
 # baseline 규칙을 응답에 그대로 싣는다. "규칙을 문서로 명확히 고정한다"
 # (CLAUDE.local.md) 를 코드에서도 보이게 하려는 것이다. baseline.py 의
@@ -80,6 +84,11 @@ def _specs_cached(stamp: tuple[str, float, int]):
     return load_generator_specs(stamp[0])
 
 
+@lru_cache(maxsize=8)
+def _ess_cached(stamp: tuple[str, float, int]) -> EssSpec:
+    return load_ess(stamp[0])
+
+
 @lru_cache(maxsize=16)
 def _csv_cached(stamp: tuple[str, float, int]) -> tuple[dict, ...]:
     """CSV 를 행 목록으로 캐시한다. 요청마다 다시 읽으면 10초 예산을 깎는다."""
@@ -95,6 +104,18 @@ def generators(cfg: Settings) -> list[Generator]:
     specs = _specs_cached(_stamp(CONFIG_DIR / "generators.yaml"))
     fuel_cost = _csv_cached(_stamp(CSV_DIR / "fuel_cost.csv"))
     return resolve_fuel_costs(list(specs), [dict(r) for r in fuel_cost], cfg.fuel_cost_month)
+
+
+def ess_spec(req: MilpRequest) -> EssSpec | None:
+    """요청과 ess.yaml 로 ESS 사양을 정한다. use_ess: false 면 None."""
+    if not req.use_ess:
+        return None
+    spec = _ess_cached(_stamp(CONFIG_DIR / "ess.yaml"))
+    if req.ess_mode is not None:
+        spec = replace(spec, mode=req.ess_mode)
+    if req.ess_peak_target_pct is not None:
+        spec = replace(spec, peak_target_pct=req.ess_peak_target_pct)
+    return spec
 
 
 def _dataset(name: str) -> list[dict]:
@@ -183,7 +204,7 @@ def _hours(result: DispatchResult) -> list[HourSummary]:
             supply_mw=result.supply_mw(t),
             reserve_pct=result.reserve_pct(t),
             shed_mw=result.shed_mw[t],
-            ess_mw=0.0,  # ESS 미구현 — 연계 후 교체
+            ess_mw=result.ess_net_mw(t),  # + 방전 / - 충전
             co2_t=co2[t],
         )
         for t in range(result.horizon_h)
@@ -203,6 +224,39 @@ def _units(result: DispatchResult) -> list[UnitHour]:
     ]
 
 
+def _ess(result: DispatchResult) -> EssSummary | None:
+    ess = result.ess
+    if ess is None:
+        return None
+
+    spec = ess.spec
+    reduction = result.peak_reduction_pct
+    target = spec.peak_target_pct or PEAK_REDUCTION_TARGET_PCT
+    return EssSummary(
+        mode=spec.mode,
+        power_charge_mw=spec.power_charge_mw,
+        power_discharge_mw=spec.power_discharge_mw,
+        capacity_mwh=spec.capacity_mwh,
+        round_trip_efficiency=spec.round_trip_efficiency,
+        soc_min_mwh=spec.soc_min_mwh,
+        soc_max_mwh=spec.soc_max_mwh,
+        soc_init_mwh=spec.soc_init_mwh,
+        charge_mw=ess.charge_mw,
+        discharge_mw=ess.discharge_mw,
+        soc_mwh=ess.soc_mwh,
+        soc_pct=[v / spec.capacity_mwh * 100.0 for v in ess.soc_mwh],
+        energy_charged_mwh=ess.energy_charged_mwh,
+        energy_discharged_mwh=ess.energy_discharged_mwh,
+        loss_mwh=ess.loss_mwh,
+        cycles=ess.cycles,
+        peak_before_mw=result.peak_demand_mw,
+        peak_after_mw=result.peak_after_ess_mw,
+        peak_reduction_pct=reduction,
+        peak_target_pct=target,
+        target_met=reduction >= target,
+    )
+
+
 def _cost(result: DispatchResult) -> CostBreakdown:
     return CostBreakdown(
         fuel_won=result.fuel_cost_krw,
@@ -213,9 +267,24 @@ def _cost(result: DispatchResult) -> CostBreakdown:
     )
 
 
+# 급전값이 유효한 solver 상태. 이 밖에서는 제약을 검증할 대상이 없다.
+SOLVED_STATUSES = ("optimal", "feasible", "time_limit")
+
+
 def _checks(
     result: DispatchResult, fleet: list[Generator], inp: DispatchInput
 ) -> list[CheckItem]:
+    """제약 재검증 결과. 해가 없으면 검증하지 않는다.
+
+    infeasible 해는 급전값이 전부 0 이라 "수급 균형 위반"이 뜨는데, 그건 제약을
+    어긴 계획이 아니라 계획이 없는 것이다. 그대로 내보내면 원인을 오해한다.
+    """
+    if result.status not in SOLVED_STATUSES:
+        return [CheckItem(
+            name="제약 검증",
+            ok=False,
+            detail=f"solver status '{result.status}' — 검증할 급전 계획이 없다",
+        )]
     return [
         CheckItem(name=c.name, ok=c.ok, detail=c.detail)
         for c in validation.report(result, fleet, inp.p_init_mw)
@@ -236,12 +305,14 @@ def run_milp(req: MilpRequest) -> MilpResponse:
         cfg.shed_penalty_krw_per_mwh if req.shed_penalty_won_per_mwh is None
         else req.shed_penalty_won_per_mwh
     )
+    ess = ess_spec(req)
     result = milp.solve(
         inp,
         solver_config=_solver_config(req, cfg),
         hydro_policy=cfg.hydro_policy,
         allow_load_shedding=req.allow_load_shedding,
         shed_penalty_krw_per_mwh=penalty,
+        ess=ess,
     )
 
     comparison: BaselineComparison | None = None
@@ -250,6 +321,11 @@ def run_milp(req: MilpRequest) -> MilpResponse:
         # 비용에는 섞지 않는다 (섞으면 절감률이 페널티 크기에 좌우된다).
         rule = baseline.run(inp, hydro_policy=cfg.hydro_policy, shed_penalty_krw_per_mwh=0.0)
         reduction = cost_reduction_pct(rule, result) if result.status == "optimal" else 0.0
+        if ess is not None:
+            result.notes.append(
+                "절감률은 'MILP + ESS' vs 'ESS 없는 Rule-based' 비교다. baseline 에 "
+                "ESS 를 포함할지는 [미정] (CLAUDE.md) — 팀 확정 전까지 이 조건을 함께 읽을 것"
+            )
         comparison = BaselineComparison(
             method=rule.method,
             rules=list(BASELINE_RULES),
@@ -281,6 +357,7 @@ def run_milp(req: MilpRequest) -> MilpResponse:
         units=_units(result) if req.include_units else None,
         merit_order=[MeritOrderEntry(**row) for row in merit_order(result)],
         carbon=CarbonSummary(**carbon.summary(result)),
+        ess=_ess(result),
         constraints=_checks(result, list(inp.generators), inp),
         baseline=comparison,
         reserve_ratio=inp.reserve_margin_ratio,
