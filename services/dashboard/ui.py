@@ -133,6 +133,7 @@ def inject_custom_css() -> None:
         .vpp-src {
             font-size: .64rem; font-weight: 700; letter-spacing: .04em; margin-left: .5rem;
             padding: .08rem .5rem; border-radius: 999px; vertical-align: middle;
+            white-space: nowrap;
         }
         .vpp-src.live { color: #17181c; background: var(--vpp-green); }
         .vpp-src.mock { color: var(--vpp-yellow); border: 1px dashed var(--vpp-yellow); }
