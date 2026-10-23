@@ -263,3 +263,69 @@ def test_repo_config_loads(repo_root):
     assert settings.time_step_min == 60
     assert 20 <= len(specs) <= 40, "대표유닛 권장 범위 (VPP_PROJECT_CONTEXT 9.4)"
     assert all(s.p_min_mw <= s.p_max_mw for s in specs)
+
+
+# ── 수력 정책 · 부하차단 페널티 (settings.yaml) ───────────────────────────────
+
+
+def test_hydro_policy_defaults(tmp_path):
+    """hydro 블록이 없으면 제안 기본값(30% / 0.5 / linear)을 쓴다."""
+    settings = load_settings(write_settings(tmp_path))
+
+    policy = settings.hydro_policy
+    assert (policy.threshold_pct, policy.min_factor, policy.mode) == (30.0, 0.5, "linear")
+    assert settings.shed_penalty_krw_per_mwh == pytest.approx(10_000_000)
+
+
+def test_hydro_policy_from_yaml(tmp_path):
+    settings = load_settings(write_settings(
+        tmp_path, hydro={"threshold_pct": 25.0, "min_factor": 0.3, "derate_mode": "fixed"}
+    ))
+
+    policy = settings.hydro_policy
+    assert policy.threshold_pct == pytest.approx(25.0)
+    assert policy.factor(10.0) == pytest.approx(0.3)   # fixed 는 일괄 적용
+    assert policy.factor(30.0) == 1.0                  # 임계값 이상이면 제한 없음
+
+
+def test_hydro_linear_factor_is_continuous_at_threshold(tmp_path):
+    """linear 모드는 임계값에서 1.0 이라 계단이 생기지 않는다."""
+    policy = load_settings(write_settings(tmp_path)).hydro_policy
+
+    assert policy.factor(30.0) == 1.0
+    assert policy.factor(29.999) == pytest.approx(1.0, abs=1e-4)
+    assert policy.factor(15.0) == pytest.approx(0.75)
+    assert policy.factor(0.0) == pytest.approx(0.5)
+    assert policy.factor(None) == 1.0
+
+
+@pytest.mark.parametrize("hydro", [
+    {"derate_mode": "sigmoid"},
+    {"threshold_pct": 0},
+    {"threshold_pct": 120},
+    {"min_factor": -0.1},
+    {"min_factor": 1.5},
+])
+def test_invalid_hydro_settings_rejected(tmp_path, hydro):
+    with pytest.raises(ConfigError, match="hydro"):
+        load_settings(write_settings(tmp_path, hydro=hydro))
+
+
+def test_hydro_block_must_be_mapping(tmp_path):
+    with pytest.raises(ConfigError, match="hydro"):
+        load_settings(write_settings(tmp_path, hydro=[30.0]))
+
+
+def test_negative_shed_penalty_rejected(tmp_path):
+    with pytest.raises(ConfigError, match="shed_penalty"):
+        load_settings(write_settings(tmp_path, shed_penalty_krw_per_mwh=-1))
+
+
+def test_negative_reserve_rejected(tmp_path):
+    with pytest.raises(ConfigError, match="reserve_margin_ratio"):
+        load_settings(write_settings(tmp_path, reserve_margin_ratio=-0.1))
+
+
+def test_invalid_horizon_rejected(tmp_path):
+    with pytest.raises(ConfigError, match="horizon_h"):
+        load_settings(write_settings(tmp_path, horizon_h=0))

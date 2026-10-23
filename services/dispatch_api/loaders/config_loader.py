@@ -294,6 +294,7 @@ def resolve_fuel_costs(
 # ── 운영 설정 ────────────────────────────────────────────────────────────────
 
 VALID_RESAMPLE = ("mean", "instant")
+VALID_HYDRO_MODES = ("linear", "fixed")
 VALID_NET_DEMAND_MODES = (
     "subtract_solar_renewable",
     "subtract_renewable_only",
@@ -338,6 +339,30 @@ def load_settings(path: str | Path) -> Settings:
     if reserve < 0:
         raise ConfigError(f"{where}: reserve_margin_ratio 는 음수일 수 없다")
 
+    hydro = data.get("hydro") or {}
+    if not isinstance(hydro, dict):
+        raise ConfigError(f"{where}: hydro 는 매핑이어야 한다")
+
+    hydro_mode = str(hydro.get("derate_mode", "linear"))
+    if hydro_mode not in VALID_HYDRO_MODES:
+        raise ConfigError(
+            f"{where}: hydro.derate_mode '{hydro_mode}' 는 {VALID_HYDRO_MODES} 중 하나여야 한다"
+        )
+
+    threshold_pct = float(hydro.get("threshold_pct", 30.0))
+    if not 0.0 < threshold_pct <= 100.0:
+        raise ConfigError(f"{where}: hydro.threshold_pct 는 0 초과 100 이하여야 한다")
+
+    min_factor = float(hydro.get("min_factor", 0.5))
+    if not 0.0 <= min_factor <= 1.0:
+        raise ConfigError(
+            f"{where}: hydro.min_factor 는 0.0~1.0 이어야 한다 (받은 값 {min_factor})"
+        )
+
+    shed_penalty = float(data.get("shed_penalty_krw_per_mwh", 10_000_000.0))
+    if shed_penalty < 0:
+        raise ConfigError(f"{where}: shed_penalty_krw_per_mwh 는 음수일 수 없다")
+
     time_limit = data.get("solver_time_limit_s")
     return Settings(
         horizon_h=horizon_h,
@@ -352,4 +377,8 @@ def load_settings(path: str | Path) -> Settings:
         min_sample_ratio=min_sample_ratio,
         net_demand_mode=net_demand_mode,
         fuel_cost_month=str(data.get("fuel_cost_month", "latest")),
+        hydro_threshold_pct=threshold_pct,
+        hydro_min_factor=min_factor,
+        hydro_derate_mode=hydro_mode,
+        shed_penalty_krw_per_mwh=shed_penalty,
     )
