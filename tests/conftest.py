@@ -27,3 +27,74 @@ def repo_root() -> Path:
 @pytest.fixture
 def csv_dir() -> Path:
     return REPO_ROOT / "data" / "csv"
+
+
+# ── 최적화 테스트 공용 팩토리 ────────────────────────────────────────────────
+# 손계산이 가능한 작은 유닛/입력을 만든다. 기본값은 "제약이 걸리지 않는" 값이고,
+# 각 테스트가 검사할 제약만 좁혀서 쓴다.
+
+
+@pytest.fixture
+def make_generator():
+    from models import Generator
+
+    def _make(
+        gen_id: str = "g1",
+        fuel: str = "lng",
+        p_max_mw: float = 100.0,
+        p_min_mw: float = 20.0,
+        ramp_up_mw_per_h: float = 100.0,
+        ramp_down_mw_per_h: float = 100.0,
+        min_up_h: int = 1,
+        min_down_h: int = 1,
+        startup_cost_krw: float = 0.0,
+        co2_ton_per_mwh: float = 0.5,
+        u_init: int = 1,
+        init_state_h: int = 24,
+        fuel_cost_krw_per_mwh: float = 10_000.0,
+    ) -> Generator:
+        return Generator(
+            id=gen_id,
+            fuel=fuel,
+            p_max_mw=p_max_mw,
+            p_min_mw=p_min_mw,
+            ramp_up_mw_per_h=ramp_up_mw_per_h,
+            ramp_down_mw_per_h=ramp_down_mw_per_h,
+            min_up_h=min_up_h,
+            min_down_h=min_down_h,
+            startup_cost_krw=startup_cost_krw,
+            co2_ton_per_mwh=co2_ton_per_mwh,
+            u_init=u_init,
+            init_state_h=init_state_h,
+            fuel_cost_krw_per_mwh=fuel_cost_krw_per_mwh,
+        )
+
+    return _make
+
+
+@pytest.fixture
+def make_input():
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    from models import DispatchInput
+
+    def _make(
+        generators,
+        net_demand_mw,
+        reserve_margin_ratio: float = 0.10,
+        storage_rate_pct: float | None = None,
+        p_init_mw: dict[str, float] | None = None,
+        start: str = "2026-04-10 00:00:00",
+    ) -> DispatchInput:
+        first = datetime.fromisoformat(start).replace(tzinfo=ZoneInfo("Asia/Seoul"))
+        return DispatchInput(
+            generators=list(generators),
+            timestamps=[first + timedelta(hours=h) for h in range(len(net_demand_mw))],
+            net_demand_mw=[float(v) for v in net_demand_mw],
+            reserve_margin_ratio=reserve_margin_ratio,
+            storage_rate_pct=storage_rate_pct,
+            p_init_mw=p_init_mw,
+        )
+
+    return _make
