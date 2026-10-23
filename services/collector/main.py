@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import uvicorn
@@ -35,6 +35,7 @@ import store
 
 CSV_DIR = Path(os.getenv("CSV_DIR", "data/csv"))
 INTERVAL_SEC = int(os.getenv("INTERVAL_SEC", "300"))  # 수집 주기, 원본이 5분 간격
+MAX_DAYS = 1  # call_api 한 번에 맡길 최대 기간. 모든 데이터셋 공통
 COLLECT_ENABLED = os.getenv("COLLECT_ENABLED", "false") == "true"  # true / false 만 쓴다
 API_HOST = os.getenv("API_HOST", "0.0.0.0")
 API_PORT = int(os.getenv("API_PORT", "8000"))
@@ -73,20 +74,39 @@ def collect(tables: domain.Tables, now: datetime) -> None:
     for gap in gaps:
         _fill(tables, gap)
 
-    store.save(CSV_DIR, tables)
-
 
 def _fill(tables: domain.Tables, gap: domain.Gap) -> None:
-    """구간 하나를 받아 메모리에 반영한다. 실패해도 예외를 올리지 않는다."""
-    try:
-        rows = collector.call_api(gap.dataset, gap.start, gap.end)
-    except Exception:
-        # 한 데이터셋이 실패해도 나머지는 진행한다. 다음 틱에 다시 결측으로 잡힌다.
-        logger.exception("%s 수집 실패 (%s ~ %s)", gap.dataset, gap.start, gap.end)
-        return
+    """구간 하나를 MAX_DAYS 씩 잘라 받고, 조각마다 메모리와 CSV 에 반영한다.
 
-    added = tables.add(gap.dataset, rows)
-    logger.info("%s %d행 수신, %d행 추가", gap.dataset, len(rows), added)
+    실패해도 예외를 올리지 않는다. 앞 조각은 이미 적혀 있으므로 다음 틱은 거기서 이어간다.
+    """
+    for start, end in _chunks(gap.start, gap.end):
+        try:
+            rows = collector.call_api(gap.dataset, start, end)
+        except Exception:
+            # 한 데이터셋이 실패해도 나머지는 진행한다. 다음 틱에 다시 결측으로 잡힌다.
+            logger.exception("%s 수집 실패 (%s ~ %s)", gap.dataset, start, end)
+            return
+
+        added = tables.add(gap.dataset, rows)
+        logger.info("%s %d행 수신, %d행 추가", gap.dataset, len(rows), added)
+        if added:
+            store.save(CSV_DIR, tables)
+
+
+def _chunks(start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
+    """[start, end] 를 MAX_DAYS 씩 자른다. 경계는 자정이다.
+
+    날 중간에서 자르면 하루 단위 API 가 같은 날을 두 번 받게 된다.
+    """
+    span = timedelta(days=MAX_DAYS)
+    out: list[tuple[datetime, datetime]] = []
+    cur = start
+    while cur <= end:
+        boundary = datetime(cur.year, cur.month, cur.day) + span
+        out.append((cur, min(boundary - timedelta(seconds=1), end)))
+        cur = boundary
+    return out
 
 
 # --- 6단계: 주기 수집 루프 ---------------------------------------------------
