@@ -22,6 +22,7 @@ CSV 를 기본으로 두고, 외부 API 장애 시에도 최소 실행이 가능
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 from typing import Any
 
@@ -97,7 +98,7 @@ def to_hourly(
     timezone: str = constants.DEFAULT_TIMEZONE,
     resample: str = "mean",
     source_interval_min: int = 5,
-    require_complete: bool = True,
+    min_sample_ratio: float = 1.0,
 ) -> pd.DataFrame:
     """행 목록을 1시간 간격 DataFrame 으로. 인덱스는 tz-aware 정시다.
 
@@ -105,9 +106,16 @@ def to_hourly(
       mean    : 시간평균. 1시간 에너지 균형과 의미가 맞아 기본값이다 [팀 확정 2026-10-01]
       instant : 정시값(그 시간의 첫 샘플)
 
-    `require_complete` 가 True 면 샘플이 모자란 시간을 버린다. 5분 간격이면
-    1시간에 12개가 와야 하는데, 원본에 결측 구간이 있어 모자란 시간이 생긴다.
-    그대로 평균을 내면 그 시간만 다른 모집단의 평균이 된다.
+    `min_sample_ratio` 는 그 시간을 받아들일 최소 샘플 비율이다. 5분 간격이면
+    1시간에 12개가 와야 하는데 원본에 빠진 시각이 있다. 모자란 시간을 그대로
+    평균내면 그 시간만 다른 모집단의 평균이 된다. 0 이면 필터를 끈다.
+
+    기준을 1.0 에서 낮춘 근거 [2026-10-11]: KPX sukub.do 원본을 직접 조회해 보면
+    빠진 시각은 "값이 빈 칸"이 아니라 "행 자체가 없음"이다 (조회 3일 모두 빈 칸
+    0개). 단발 누락(주로 23:55, 전체 결측의 26%)이면 11/12 샘플의 평균은 12/12 와
+    사실상 같으므로 버릴 이유가 없다. 반면 수십 분짜리 연속 누락(예 2026-06-29
+    23:20~23:55)은 비율로 걸러지며, 그래도 남는 격자 구멍은
+    `latest_contiguous_window` 가 처리한다.
     """
     if not rows:
         raise DataError(f"빈 데이터 (time_column={time_column})")
@@ -130,18 +138,19 @@ def to_hourly(
 
     hourly = grouped.mean() if resample == "mean" else grouped.first()
 
-    if require_complete:
+    if min_sample_ratio > 0:
         expected = constants.MINUTES_PER_HOUR // source_interval_min
+        threshold = max(1, math.ceil(expected * min_sample_ratio))
         counts = grouped.count().min(axis=1)
-        incomplete = counts[counts < expected]
+        incomplete = counts[counts < threshold]
         if len(incomplete):
             logger.info(
-                "불완전한 시간 %d개 제외 (기대 샘플 %d개): %s%s",
-                len(incomplete), expected,
+                "불완전한 시간 %d개 제외 (기대 %d개 중 %d개 이상 필요): %s%s",
+                len(incomplete), expected, threshold,
                 [str(i) for i in incomplete.index[:3]],
                 " ..." if len(incomplete) > 3 else "",
             )
-        hourly = hourly[counts >= expected]
+        hourly = hourly[counts >= threshold]
 
     hourly = hourly.dropna()
     if hourly.empty:
@@ -235,6 +244,55 @@ def wide_trading(
     return wide.reset_index().to_dict("records")
 
 
+HOUR_STEP = pd.Timedelta(hours=1)
+
+
+def contiguous_runs(index: pd.DatetimeIndex) -> list[tuple[int, int]]:
+    """1시간 등간격으로 이어지는 구간들의 [시작, 끝) 위치 목록. 시간 오름차순."""
+    if len(index) == 0:
+        return []
+
+    starts = [0]
+    starts += [i for i in range(1, len(index)) if index[i] - index[i - 1] != HOUR_STEP]
+    starts.append(len(index))
+    return [(starts[k], starts[k + 1]) for k in range(len(starts) - 1)]
+
+
+def latest_contiguous_window(series: pd.Series, horizon_h: int) -> pd.Series:
+    """1시간 등간격이 horizon_h 개 이어지는 가장 최근 구간.
+
+    `tail(horizon_h)` 을 쓰면 안 되는 이유: 원본 결측 때문에 1시간 격자에 구멍이
+    생기는데, 개수만 세면 그 구멍을 건너뛴 채 24개를 집는다. 실제로 그렇게 뽑힌
+    24개가 26시간에 걸쳐 있고 2시간 점프가 2곳 있었다 [2026-10-11].
+
+    램프율(MW/h)과 min up/down 제약은 "인접한 두 점은 1시간 차이"를 전제한다.
+    구멍이 섞이면 solver 는 아무 불만 없이 풀고 제약만 조용히 틀린다. 그래서
+    개수가 아니라 연속성으로 구간을 고른다.
+
+    KPI 측정 스크립트도 여러 구간을 비교할 때 이 함수를 재사용한다.
+    """
+    if horizon_h < 1:
+        raise DataError(f"horizon 은 1 이상이어야 한다 (받은 값 {horizon_h})")
+
+    runs = contiguous_runs(series.index)
+    for begin, stop in reversed(runs):
+        if stop - begin >= horizon_h:
+            window = series.iloc[stop - horizon_h:stop]
+            if stop != len(series):
+                logger.info(
+                    "격자 구멍 때문에 최신 %d시간을 건너뛰고 %s ~ %s 를 썼다",
+                    len(series) - stop, window.index[0], window.index[-1],
+                )
+            return window
+
+    longest = max((stop - begin for begin, stop in runs), default=0)
+    raise DataError(
+        f"연속 {horizon_h}시간 구간이 없다. 가장 긴 연속 구간은 {longest}시간이고 "
+        f"전체 {len(series)}시간이 {len(runs)}개 조각으로 끊겨 있다. "
+        "원본 결측 때문이다 — horizon 을 줄이거나 데이터를 보강할 것"
+    )
+
+
 def _common_index(*frames: pd.DataFrame) -> pd.DatetimeIndex:
     """여러 데이터셋에 공통으로 있는 시각. 수집 구간이 다를 때 쓴다.
 
@@ -269,13 +327,19 @@ def build_dispatch_input(
     dam_rows: list[dict[str, Any]] | None = None,
     horizon_h: int | None = None,
 ) -> DispatchInput:
-    """로딩된 행들을 MILP 입력으로 묶는다. horizon 만큼 끝에서 잘라 쓴다."""
+    """로딩된 행들을 MILP 입력으로 묶는다.
+
+    horizon 은 "끝에서 N개"가 아니라 "연속 N시간이 확보되는 가장 최근 구간"이다
+    (`latest_contiguous_window`). 반환되는 timestamps 는 반드시 1시간 등간격이다 —
+    MILP 의 램프·최소시간 제약이 그걸 전제한다.
+    """
     horizon = horizon_h or settings.horizon_h
 
     demand_hourly = to_hourly(
         demand_rows, "ts", ["demand_mw"],
         timezone=settings.timezone, resample=settings.resample,
         source_interval_min=DEMAND_INTERVAL_MIN,
+        min_sample_ratio=settings.min_sample_ratio,
     )
 
     wide_rows = wide_trading(trading_rows)
@@ -285,6 +349,7 @@ def build_dispatch_input(
         wide_rows, "ts", fuel_columns,
         timezone=settings.timezone, resample=settings.resample,
         source_interval_min=TRADING_INTERVAL_MIN,
+        min_sample_ratio=settings.min_sample_ratio,
     )
 
     # 두 데이터셋의 수집 구간이 다르다. 겹치는 구간으로 먼저 자른다.
@@ -297,7 +362,20 @@ def build_dispatch_input(
         raise DataError(
             f"1시간 집계 결과가 {len(net)}시간뿐이라 horizon {horizon}시간을 못 채운다"
         )
-    net = net.tail(horizon)
+    net = latest_contiguous_window(net, horizon)
+
+    # 구성상 등간격이 보장되지만, MILP 가 틀린 입력을 받는 경로를 한 번 더 막는다.
+    gaps = [
+        (net.index[i - 1], net.index[i])
+        for i in range(1, len(net))
+        if net.index[i] - net.index[i - 1] != HOUR_STEP
+    ]
+    if gaps:
+        raise DataError(
+            f"timestamp 가 1시간 등간격이 아니다 ({len(gaps)}곳): "
+            f"{[f'{a} -> {b}' for a, b in gaps[:3]]}. "
+            "램프·최소시간 제약이 조용히 틀리므로 MILP 에 넘기지 않는다"
+        )
 
     return DispatchInput(
         generators=generators,

@@ -72,6 +72,7 @@ class Settings:
     solver_mip_gap: float
     reserve_margin_ratio: float
     resample: str
+    min_sample_ratio: float
     net_demand_mode: str
     fuel_cost_month: str
 

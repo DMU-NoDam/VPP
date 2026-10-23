@@ -212,6 +212,7 @@ def write_settings(tmp_path, **overrides):
         "solver": "HiGHS",
         "reserve_margin_ratio": 0.10,
         "resample": "mean",
+        "min_sample_ratio": 0.9,
         "net_demand_mode": "subtract_solar_renewable",
     }
     data.update(overrides)
@@ -227,6 +228,12 @@ def test_settings_defaults(tmp_path):
     assert settings.resample == "mean"
     assert settings.reserve_margin_ratio == pytest.approx(0.10)
     assert settings.fuel_cost_month == "latest"
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.1, 2.0])
+def test_invalid_min_sample_ratio_rejected(tmp_path, value):
+    with pytest.raises(ConfigError, match="min_sample_ratio"):
+        load_settings(write_settings(tmp_path, min_sample_ratio=value))
 
 
 def test_invalid_resample_rejected(tmp_path):

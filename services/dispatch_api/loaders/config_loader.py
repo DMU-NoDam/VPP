@@ -310,6 +310,12 @@ def load_settings(path: str | Path) -> Settings:
     if resample not in VALID_RESAMPLE:
         raise ConfigError(f"{where}: resample '{resample}' 는 {VALID_RESAMPLE} 중 하나여야 한다")
 
+    min_sample_ratio = float(data.get("min_sample_ratio", 1.0))
+    if not 0.0 <= min_sample_ratio <= 1.0:
+        raise ConfigError(
+            f"{where}: min_sample_ratio 는 0.0~1.0 이어야 한다 (받은 값 {min_sample_ratio})"
+        )
+
     net_demand_mode = str(data.get("net_demand_mode", "subtract_solar_renewable"))
     if net_demand_mode not in VALID_NET_DEMAND_MODES:
         raise ConfigError(
@@ -343,6 +349,7 @@ def load_settings(path: str | Path) -> Settings:
         solver_mip_gap=float(data.get("solver_mip_gap", 0.0)),
         reserve_margin_ratio=reserve,
         resample=resample,
+        min_sample_ratio=min_sample_ratio,
         net_demand_mode=net_demand_mode,
         fuel_cost_month=str(data.get("fuel_cost_month", "latest")),
     )

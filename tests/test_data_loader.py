@@ -58,7 +58,7 @@ def test_hourly_mean_actually_averages():
         {"ts": "2026-09-20 00:30:00", "demand_mw": 200.0},
     ]
     hourly = to_hourly(rows, "ts", ["demand_mw"], resample="mean",
-                       require_complete=False)
+                       min_sample_ratio=0.0)
 
     assert hourly["demand_mw"].iloc[0] == pytest.approx(150.0)
 
@@ -69,7 +69,7 @@ def test_instant_takes_first_sample():
         {"ts": "2026-09-20 00:30:00", "demand_mw": 200.0},
     ]
     hourly = to_hourly(rows, "ts", ["demand_mw"], resample="instant",
-                       require_complete=False)
+                       min_sample_ratio=0.0)
 
     assert hourly["demand_mw"].iloc[0] == pytest.approx(100.0)
 
@@ -89,9 +89,33 @@ def test_incomplete_hour_kept_when_not_required():
     rows = demand_rows("2026-09-20 00:00:00", 1, [1000.0])
     rows += [{"ts": "2026-09-20 01:00:00", "demand_mw": 9999.0}]
 
-    hourly = to_hourly(rows, "ts", ["demand_mw"], require_complete=False)
+    hourly = to_hourly(rows, "ts", ["demand_mw"], min_sample_ratio=0.0)
 
     assert len(hourly) == 2
+
+
+def test_single_missing_sample_survives_relaxed_ratio():
+    """KPX 가 한 시각만 빼먹은 경우(11/12). 0.9 면 살리고 1.0 이면 버린다.
+
+    원본 결측의 26%가 23:55 단발 누락이다. 11개 평균과 12개 평균은 사실상 같으니
+    그 때문에 격자에 구멍을 만들 이유가 없다.
+    """
+    rows = [r for r in demand_rows("2026-09-20 00:00:00", 1, [1000.0])
+            if not r["ts"].endswith("00:55:00")]
+    assert len(rows) == 11
+
+    assert len(to_hourly(rows, "ts", ["demand_mw"], min_sample_ratio=0.9)) == 1
+    with pytest.raises(DataError, match="비었다"):
+        to_hourly(rows, "ts", ["demand_mw"], min_sample_ratio=1.0)
+
+
+def test_long_gap_still_dropped_at_relaxed_ratio():
+    """수십 분짜리 연속 누락은 완화해도 걸러야 한다 (예 23:20~23:55)."""
+    rows = demand_rows("2026-09-20 00:00:00", 1, [1000.0])[:5]  # 25분치만
+    assert len(rows) == 5
+
+    with pytest.raises(DataError, match="비었다"):
+        to_hourly(rows, "ts", ["demand_mw"], min_sample_ratio=0.9)
 
 
 # ── 시간대 ───────────────────────────────────────────────────────────────────
@@ -212,6 +236,61 @@ def test_missing_must_take_fuel_rejected():
 
 
 # ── 세로형 -> 가로형 ─────────────────────────────────────────────────────────
+
+
+# ── 연속 구간 선택 ───────────────────────────────────────────────────────────
+
+
+def _hourly_series(*hours: int) -> pd.Series:
+    """주어진 시(hour)들만 있는 시계열. 빠진 시는 격자 구멍이 된다."""
+    index = pd.DatetimeIndex(
+        [pd.Timestamp(f"2026-09-20 {h:02d}:00:00", tz="Asia/Seoul") for h in hours],
+        name="ts",
+    )
+    return pd.Series([float(h) for h in hours], index=index, name="net_demand_mw")
+
+
+def test_contiguous_runs_splits_on_gaps():
+    runs = dl.contiguous_runs(_hourly_series(0, 1, 2, 5, 6).index)
+
+    assert runs == [(0, 3), (3, 5)]
+
+
+def test_latest_contiguous_window_skips_trailing_gap():
+    """끝에 구멍이 있으면 최신 데이터를 건너뛰고 연속 구간을 쓴다.
+
+    tail(3) 은 [2, 5, 6] 을 집어 3시간이 아니라 5시간에 걸친 입력을 만든다.
+    """
+    series = _hourly_series(0, 1, 2, 5, 6)
+
+    window = dl.latest_contiguous_window(series, 3)
+
+    assert window.index.tolist() == series.index[:3].tolist()
+    assert window.tolist() == [0.0, 1.0, 2.0]
+
+
+def test_latest_contiguous_window_prefers_most_recent_run():
+    series = _hourly_series(0, 1, 2, 10, 11, 12)
+
+    window = dl.latest_contiguous_window(series, 3)
+
+    assert window.tolist() == [10.0, 11.0, 12.0]
+
+
+def test_latest_contiguous_window_takes_tail_of_long_run():
+    series = _hourly_series(0, 1, 2, 3, 4)
+
+    window = dl.latest_contiguous_window(series, 2)
+
+    assert window.tolist() == [3.0, 4.0]
+
+
+def test_latest_contiguous_window_reports_longest_run_when_too_short():
+    """연속 구간이 모자라면 가장 긴 구간 길이를 메시지에 담는다 (원인 파악용)."""
+    series = _hourly_series(0, 1, 2, 5, 6)
+
+    with pytest.raises(DataError, match="가장 긴 연속 구간은 3시간"):
+        dl.latest_contiguous_window(series, 4)
 
 
 def test_wide_trading_pivots_long_format():
@@ -384,6 +463,7 @@ def _synthetic_settings(**overrides):
         horizon_h=3, time_step_min=60, timezone="Asia/Seoul",
         solver="HiGHS", solver_msg=False, solver_time_limit_s=60,
         solver_mip_gap=0.0, reserve_margin_ratio=0.10, resample="mean",
+        min_sample_ratio=1.0,
         net_demand_mode="subtract_solar_renewable", fuel_cost_month="latest",
     )
     base.update(overrides)
@@ -469,6 +549,35 @@ def test_build_dispatch_input_insufficient_history_rejected():
 
     with pytest.raises(DataError, match="horizon"):
         dl.build_dispatch_input([_synthetic_generator()], settings, demand_rows_, trading_rows_)
+
+
+def test_build_dispatch_input_timestamps_are_contiguous_despite_gap(caplog):
+    """원본에 구멍이 있어도 반환되는 timestamp 는 1시간 등간격이어야 한다.
+
+    MILP 의 램프율(MW/h)·min up/down 은 "인접한 두 점은 1시간 차이"를 전제한다.
+    개수만 세서 자르면 구멍을 건너뛴 채 N개를 집어, 제약이 예외 없이 틀린다.
+    """
+    demand_rows_, trading_rows_ = _synthetic_series(
+        "2026-09-20 00:00:00", hours=5,
+        demand=[70000.0, 71000.0, 72000.0, 73000.0, 74000.0],
+        solar=[0.0] * 5, renewable=[0.0] * 5,
+    )
+    # 03시의 5분 샘플을 전부 지워 격자에 구멍을 만든다 (연속 누락 재현).
+    demand_rows_ = [r for r in demand_rows_ if " 03:" not in r["ts"]]
+    settings = _synthetic_settings(horizon_h=3)
+
+    with caplog.at_level("INFO"):
+        result = dl.build_dispatch_input(
+            [_synthetic_generator()], settings, demand_rows_, trading_rows_,
+        )
+
+    ts = result.timestamps
+    assert len(ts) == 3
+    deltas = {(ts[i] - ts[i - 1]).total_seconds() for i in range(1, len(ts))}
+    assert deltas == {3600.0}
+    # 04시가 최신이지만 03시 구멍 때문에 00~02시 구간이 선택된다.
+    assert ts[-1].hour == 2
+    assert "격자 구멍" in caplog.text
 
 
 def test_build_dispatch_input_disjoint_periods_rejected():
