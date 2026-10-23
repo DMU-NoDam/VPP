@@ -9,6 +9,7 @@ config/dashboard.yaml 에 있다.
     분석 상세      168h 예측·성능 지표, 최적화 상세, 위기 시나리오 게이지, 배출 내역
     시간대 데이터  KPX 실측, 출력 히트맵, 시간대 상세표·CSV
     시나리오 생성기 page_scenarios.py
+    Two-Stage 테스트 page_stochastic_test.py — RP·EV·EEV·WS 비교, VSS 판정
 사이드바의 관측 시각·조정값은 앞의 세 페이지가 함께 쓴다 (main 에서 한 번 그린다).
 
 데이터 출처 (모두 REST, 다른 서비스 코드는 import 하지 않는다):
@@ -36,6 +37,7 @@ from streamlit.delta_generator import DeltaGenerator
 
 import logic
 import page_scenarios
+import page_stochastic_test
 from logic import API_PREFIX, ApiResult, Settings
 from ui import (
     C_BRIGHT,
@@ -1021,9 +1023,13 @@ def main() -> None:
             page_scenarios.render, title="시나리오 생성기",
             icon=":material/stacked_line_chart:", url_path="scenarios",
         ),
+        st.Page(
+            page_stochastic_test.render, title="Two-Stage 테스트",
+            icon=":material/science:", url_path="stochastic-test",
+        ),
     ])
     # 사이드바 조정은 페이지 밖(여기)에서 그려야 페이지를 옮겨도 값이 유지된다.
-    if nav.url_path != "scenarios":
+    if nav.url_path not in ("scenarios", "stochastic-test"):
         st.session_state["vpp_ctx"] = build_context()
     nav.run()
 

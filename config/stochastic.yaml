@@ -1,0 +1,20 @@
+# Two-Stage Stochastic 급전 파라미터 (docs/formulation.md 3장)
+#
+# 담당: D. 발전기 제원은 generators.yaml(C)을 그대로 쓴다. 부하차단 페널티 K 는 API 요청값
+# (shed_penalty_won_per_mwh)이다. 여기에는 3장 비가역성 규칙의 기동시간과 문서에 없는
+# 가정 항의 값만 둔다.
+
+# [가정] 1단계 예비력 확보량이 부족할 때의 페널티 (원/MW·h). 3장 S5(예비율)는 문서에서
+# 미확정이라 코드가 1단계에 두었고, 용량 자체가 모자란 날에도 해가 나오게 슬랙을 붙였다.
+reserve_short_penalty_krw_per_mw: 1000000
+
+# 3장 R1 기동시간 T^SU (h). 당일 추가 기동은 t >= ceil(T^SU) 부터 가능하다.
+# [스펙] Project.md "발전원별 파라미터 참조 (EPSIS 통계 기반 예시)": 석탄 6h, LNG 2h, 수력 0.1h,
+#        원자력 N/A(기저) → 항목을 두지 않아 당일 기동 불가.
+# anthracite 를 석탄과 같이 6h 로 둔 것은 D 의 해석이다.
+# 유류(oil)는 스펙에 기동시간이 없다 [미확정] → 항목을 두지 않아 당일 기동 불가 (가정).
+startup_time_h:
+  bituminous_coal: 6
+  anthracite: 6
+  lng: 2
+  hydro: 0.1

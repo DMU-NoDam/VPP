@@ -40,7 +40,7 @@ class UnitHour(BaseModel):
     timestamp: datetime
     unit_id: str      # generators.yaml 의 id
     on: bool          # 기동 여부 u[g,t]
-    p_mw: float       # 출력
+    p_mw: float       # 출력 (stochastic 의 first_stage 에서는 시나리오 기대 출력)
 
 
 class HourSummary(BaseModel):
@@ -58,7 +58,7 @@ class HourSummary(BaseModel):
 class CostBreakdown(BaseModel):
     fuel_won: float
     startup_won: float
-    recourse_won: float  # 2단계 조정 비용 (MILP 에서는 0)
+    recourse_won: float  # 예비력 부족 페널티 (가정 항. 부족이 없으면 0, MILP 에서는 0)
     shed_won: float      # 부하차단 페널티
     total_won: float
 
@@ -96,7 +96,7 @@ class ScenarioRequest(BaseModel):
     solar_cloud_pct: float = 10.0   # 하루 흐림 계수의 평균 감소폭 (클수록 하방 꼬리가 두꺼움)
     wind_sigma_pct: float = 25.0    # 풍력 로그정규 오차
     solar_capacity_mw: float = 12000.0
-    wind_capacity_mw: float = 3500.0
+    wind_capacity_mw: float = 8000.0  # KPX renewable(풍력+기타) 실측 최대 5.1GW 를 덮는 값
     base: ScenarioProfile | None = None  # None 이면 기본 예측 (forecast_api 연동 전)
 
 
@@ -140,6 +140,8 @@ class StochasticRequest(BaseModel):
     scenarios: list[Scenario] | None = None
     n_scenarios: int = 10
     seed: int | None = None
+    base: ScenarioProfile | None = None  # 시나리오 생성용 기준 예측. None 이면 생성기 기본값
+    compute_ws: bool = False  # True 면 WS·EVPI 도 계산 (시나리오 수만큼 더 풀어 느려짐)
     generator_ids: list[str] | None = None  # None 이면 generators.yaml 전체
     use_ess: bool = True
     reserve_ratio: float = 0.10
@@ -155,7 +157,7 @@ class ScenarioResult(BaseModel):
     probability: float
     cost: CostBreakdown
     shed_mwh: float
-    rt_adjust_mwh: float  # 1단계 계획 대비 실시간 조정량 |p_rt - p_da| 합
+    rt_adjust_mwh: float  # 기대 출력 대비 이 시나리오 출력의 편차 |P_s - E[P]| 합
     hours: list[HourSummary] | None = None
 
 

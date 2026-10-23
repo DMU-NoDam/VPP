@@ -5,3 +5,7 @@ starlette==1.7.0
 uvicorn[standard]==0.54.0
 pydantic==2.13.5
 numpy==2.4.6
+pyyaml==6.0.3
+# Two-Stage Stochastic: Pyomo 모델 + HiGHS 솔버 (pyomo.contrib.solver 의 "highs")
+pyomo==6.10.1
+highspy==1.15.1

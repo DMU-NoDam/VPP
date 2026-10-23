@@ -548,3 +548,143 @@ def test_scenario_page_helpers() -> None:
     long = page_scenarios.long_table(data)
     assert list(long["net_load_mw"]) == [7.0, 7.0] and len(long) == 2
     assert page_scenarios.scenario_frame(data).loc[0, "라벨"] == "고수요"
+
+
+# ── Two-Stage 성능 비교 (테스트) 페이지 ──────────────────────────────────────
+
+
+def _stochastic_page_script() -> None:
+    """AppTest 가 실행할 스크립트: Two-Stage 테스트 페이지만 단독으로 띄운다."""
+    import page_stochastic_test
+    import ui
+
+    ui.inject_custom_css()
+    page_stochastic_test.render()
+
+
+def _stochastic_body(req: dict, status: str = "optimal", rp: float = 9.5e10) -> dict:
+    """StochasticResponse 모양의 가짜 응답 (솔버를 돌리지 않는다)."""
+    eev = 1.0e11
+    cost = {"fuel_won": rp * 0.9, "startup_won": rp * 0.04, "recourse_won": rp * 0.06,
+            "shed_won": 0.0, "total_won": rp}
+    ws = rp * 0.99 if req.get("compute_ws") else None
+    return {
+        "status": status, "solve_time_s": 12.3, "start": req["start"],
+        "horizon_h": 2, "n_scenarios": len(req["scenarios"]),
+        "first_stage": [
+            {"timestamp": f"2026-09-22T0{t}:00:00", "unit_id": uid, "on": on, "p_mw": 100.0}
+            for uid, on in (("nuclear_1", True), ("lng_1", False)) for t in range(2)
+        ],
+        "expected_cost": cost, "expected_hours": [],
+        "scenarios": [
+            {"scenario_id": sc["scenario_id"], "probability": sc["probability"], "cost": cost,
+             "shed_mwh": 0.0, "rt_adjust_mwh": 120.0, "hours": None}
+            for sc in req["scenarios"]
+        ],
+        "vss": {"rp_won": rp, "ev_won": 9.0e10, "eev_won": eev, "vss_won": eev - rp,
+                "vss_pct": (eev - rp) / eev * 100, "ws_won": ws,
+                "evpi_won": None if ws is None else rp - ws, "target_met": True},
+    }
+
+
+def _fake_dispatch_with_stochastic(monkeypatch):
+    """/scenarios 는 생성기를 직접 부르고, /dispatch/stochastic 은 가짜 응답을 준다."""
+    sys.path.insert(0, str(DASHBOARD_DIR.parent / "dispatch_api"))
+    import scenarios
+    from shared.schemas import ScenarioRequest
+
+    calls = []
+
+    class Resp:
+        status_code = 200
+
+        def __init__(self, body):
+            self._body = body
+
+        def json(self):
+            return self._body
+
+    def fake(method, url, json=None, **kwargs):
+        calls.append((url, json, kwargs.get("timeout")))
+        if url.endswith("/dispatch/stochastic"):
+            return Resp(_stochastic_body(json))
+        return Resp(scenarios.generate(ScenarioRequest(**json)).model_dump(mode="json"))
+
+    monkeypatch.setattr(logic.requests, "request", fake)
+    return calls
+
+
+def test_stochastic_page_waits_then_runs(monkeypatch) -> None:
+    from streamlit.testing.v1 import AppTest
+
+    calls = _fake_dispatch_with_stochastic(monkeypatch)
+    monkeypatch.syspath_prepend(str(DASHBOARD_DIR))
+
+    at = AppTest.from_function(_stochastic_page_script, default_timeout=60).run()
+    assert not at.exception
+    assert at.info and not calls  # '실행'을 누르기 전에는 호출하지 않는다
+
+    next(b for b in at.button if b.label == "실행").click().run()
+    assert not at.exception
+    url, body, timeout = calls[-1]
+    assert url.endswith("/dispatch/stochastic")
+    assert len(body["scenarios"]) == 10 and body["solver"]["time_limit_s"] == 60
+    assert timeout == 60 * 3 + 60
+    assert any("VSS 목표 달성" in m.value for m in at.markdown)
+    assert len(at.session_state.sto_history) == 1
+
+    next(b for b in at.button if b.label == "이력 지우기").click().run()
+    assert not at.exception
+
+
+def test_stochastic_page_shows_error_when_dispatch_down(monkeypatch) -> None:
+    import streamlit as st
+    from streamlit.testing.v1 import AppTest
+
+    st.cache_data.clear()
+
+    def down(*a, **k):
+        raise requests.ConnectionError()
+
+    monkeypatch.setattr(logic.requests, "request", down)
+    monkeypatch.syspath_prepend(str(DASHBOARD_DIR))
+
+    at = AppTest.from_function(_stochastic_page_script, default_timeout=60)
+    at.session_state.sto_params = {"seed": 1, "n_scenarios": 10, "time_limit_s": 10,
+                                   "mip_gap_pct": 0.5, "compute_ws": False}
+    at.run()
+    assert not at.exception
+    assert at.error and "dispatch_api" in at.error[0].value
+
+
+def test_stochastic_page_helpers() -> None:
+    sys.path.insert(0, str(DASHBOARD_DIR))
+    import page_stochastic_test as page
+
+    req = {"start": "2026-09-22T00:00:00", "compute_ws": True,
+           "scenarios": [{"scenario_id": "S01", "probability": 1.0}]}
+    good = page.summarize(_stochastic_body(req), mip_gap=0.005)
+    assert good["vss_pct"] == pytest.approx(5.0) and good["order_ok"] and good["significant"]
+    assert good["evpi_won"] == pytest.approx(9.5e10 * 0.01)
+    assert page.verdict(good, 3.0)[1] == "ok"
+    assert page.verdict(good, 6.0)[1] == "critical"
+
+    # RP 가 덜 풀려 EEV 보다 비싸면 VSS 가 음수 — 판정을 보류한다
+    stuck = page.summarize(_stochastic_body(req, status="time_limit", rp=1.09e11), 0.005)
+    assert stuck["vss_pct"] < 0 and not stuck["order_ok"]
+    assert page.verdict(stuck, 3.0) == ("판정 보류 — 미수렴 (time_limit)", "warn")
+    broken = page.summarize(_stochastic_body(req, rp=1.09e11), 0.005)
+    assert page.verdict(broken, 3.0)[1] == "critical"
+    # 수렴했어도 gap x EEV 보다 작은 VSS 는 솔버 오차와 구분되지 않는다
+    tiny = page.summarize(_stochastic_body(req, rp=0.998e11), 0.005)
+    assert tiny["order_ok"] and not tiny["significant"]
+    assert page.verdict(tiny, 3.0)[1] == "warn"
+
+    body = _stochastic_body(req)
+    assert list(page.problem_frame(good)["문제"]) == ["WS", "RP", "EEV", "EV"]
+    assert page.breakdown_frame(body)["비중(%)"].sum() == pytest.approx(100.0)
+    assert page.scenario_frame(body, {"S01": "고수요"}).loc[0, "라벨"] == "고수요"
+    matrix = page.commitment_matrix(body)
+    assert list(matrix.index) == ["nuclear_1", "lng_1"]
+    assert matrix.loc["nuclear_1", 1] == 100.0 and matrix.loc["lng_1", 0] == 0.0
+    assert page.request_timeout(10, 10, True) == 10 * 13 + 60
