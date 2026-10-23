@@ -50,6 +50,8 @@
 | $w_{g,t}$ | $[0,1]$ | 정지 이벤트 |
 | $p_{g,t}$ | $[0, \kappa\overline P_g]$ | 출력 (MW). step 1시간이라 MWh 와 수치가 같다 |
 | $\sigma_t$ | $[0, D_t]$ | 부하차단 슬랙 (옵션, 기본 상한 0) |
+| $ch_t,\ dis_t$ | $[0, \overline{CH}], [0, \overline{DIS}]$ | ESS 충전·방전 출력 (MW, 5장) |
+| $soc_t$ | $[\underline S, \overline S]$ | ESS 저장 에너지 (MWh, 5장) |
 
 $v, w$ 를 이진변수로 두지 않는다. $u$ 가 이진이고 연결식 (4.2-7) 이 있으므로
 기동비 $\ge 0$ 을 최소화하는 해에서 $v_{g,t} = \max(0,\ u_{g,t} - u_{g,t-1})$ 로
@@ -230,19 +232,161 @@ VOLL 추정치로 쓸 수 있으나 국내 공식값 근거는 `[미정]` 이다
 solver 가 optimal 을 돌려주는 것과 모델이 맞는 것은 다르다. 그래서 해를 받은 뒤
 제약을 **독립적으로 다시 검사**한다 (`services/dispatch_api/validation.py`).
 수급 균형·상하한·예비율·램프업·램프다운·최소 기동/정지·수력 제한·과잉발전·
-부하차단 9종을 검사해 응답 `constraints` 로 돌려준다. 허용오차는 1 MW
+부하차단, 그리고 ESS 를 쓰면 ESS 5종(출력 한계·SOC 범위·SOC 전이식·종료 SOC·
+동시 충방전)까지 검사해 응답 `constraints` 로 돌려준다. SOC 전이식은 효율까지
+포함해 **다시 계산해서** 비교한다 — 효율을 빼먹는 실수는 비용이 그럴듯하게
+나오기 때문에 결과만 보면 잡히지 않는다. 허용오차는 1 MW
 (7만 MW 급에서 상대오차 $1.4\times10^{-5}$). baseline 도 같은 검사를 통과해야
 비교가 공정하다.
 
 ## 5. ESS 연계 `[C]`
 
-> 상태: **미구현**. `config/ess.yaml` 은 placeholder(용량 0)다. MILP 코어가
-> 완성됐으므로 ESS 변수·SoC 전이식·동시 충방전 금지를 모델에 추가하는 작업이
-> 다음 단계다. 응답 스키마에는 자리(`hours[].ess_mw`)만 잡혀 있고 현재 0 을 돌려준다.
+구현: `milp.py` 의 제약 8 (후처리가 아니라 **같은 MILP 안의 결정변수**).
+사양은 `config/ess.yaml`.
 
-- TODO: SoC 동역학, Round-trip 효율(0.85) 반영 방식 (충전/방전 효율 분할)
-- TODO: 충·방전 동시 금지 처리
-- TODO: 피크 감소율 정의식 (원 수요 피크 vs ESS 반영 순부하 피크), ESS 규모 가정
+### 5.1 변수와 파라미터
+
+| 기호 | 단위 | 뜻 |
+|---|---|---|
+| $ch_t,\ dis_t$ | MW | 충전·방전 출력 |
+| $soc_t$ | MWh | 저장 에너지 |
+| $z_t \in \{0,1\}$ | - | 동시 충·방전 금지용 (옵션) |
+| $\overline{CH},\ \overline{DIS}$ | MW | 충전·방전 출력 한계 |
+| $E$ | MWh | 에너지 용량 |
+| $\eta$ | - | 왕복효율. $\eta_{ch} = \eta_{dis} = \sqrt{\eta}$ |
+| $\underline{S},\ \overline{S}$ | MWh | SOC 하한·상한 (용량의 %로 입력) |
+| $S^0,\ S^{end}$ | MWh | 초기 SOC, 종료 SOC 하한 |
+
+SOC 는 **MWh 로 다룬다**. 비율로 다루면 "SOC 0.5" 가 50%인지 0.5 MWh인지
+구분되지 않고, 전이식에서 용량 곱을 빼먹는 버그가 생긴다. yaml 은 사람이 읽기
+쉬운 %로 받고 로더가 MWh 로 환산한다 (`EssSpec.soc_*_mwh`).
+
+### 5.2 제약
+
+**수급 균형 (1번 제약 갱신)** — 방전은 공급, 충전은 부하다.
+
+$$\sum_{g \in G} p_{g,t} + \sigma_t + (dis_t - ch_t) = D_t$$
+
+**예비율 (2번 제약 갱신)** — 분모는 발전기가 담당하는 부하다.
+
+$$\sum_{g} \kappa_g \overline P_g u_{g,t} \;\ge\; (1+r)\,\big(D_t - \sigma_t - (dis_t - ch_t)\big)$$
+
+ESS 의 남은 방전 여력을 예비력으로 셀지는 `[미정]` 이라 세지 않는다 (보수적).
+
+**SOC 전이식** — $\Delta t = 1$h
+
+$$soc_t = soc_{t-1} + \eta_{ch}\, ch_t\, \Delta t - \frac{dis_t\, \Delta t}{\eta_{dis}},
+\qquad soc_{-1} = S^0$$
+
+**SOC 범위와 출력 한계**
+
+$$\underline S \le soc_t \le \overline S, \qquad
+0 \le ch_t \le \overline{CH}, \qquad 0 \le dis_t \le \overline{DIS}$$
+
+**종료 SOC**
+
+$$soc_{H-1} \ge S^{end}$$
+
+이 제약이 **없으면 안 된다**. 없으면 MILP 가 하루 동안 배터리를 비우고 끝내
+"공짜 에너지"를 얻고, 그만큼 비용이 부당하게 낮아진다. 기본값은 $S^{end} = S^0$
+(50%)로, 하루 단위 비교가 성립하게 했다.
+
+**동시 충·방전 금지** (옵션, `enforce_exclusive`)
+
+$$ch_t \le \overline{CH}\, z_t, \qquad dis_t \le \overline{DIS}\,(1 - z_t)$$
+
+기본은 **끄는 것**이다. $\eta < 1$ 이고 음수 가격이 없으면 동시 충·방전은 항상
+손실이라 비용 최소화 해에서 저절로 배제된다 (`tests/test_ess.py` 가 확인한다).
+켜면 시간당 이진변수가 1개 늘어난다.
+
+### 5.3 운전 목적 `[모델링 선택]`
+
+| mode | 목적함수/제약 | 쓰는 곳 |
+|---|---|---|
+| `cost` (기본) | 4.1 그대로. ESS 는 비용 차익거래로만 움직인다 | baseline 과의 비용 비교 |
+| `peak_shaving` | 4.1 + 하드 제약 $peak \le (1 - \tau)\max_t D_t$ | 피크 감소율 5% KPI 판정 |
+| `combined` | 4.1 + $\lambda \cdot peak$ 가중합 | 비용과 피크의 절충 탐색 |
+
+여기서 $peak \ge D_t - \sigma_t - (dis_t - ch_t)\ \forall t$ 로 선형화한다.
+
+**cost 모드는 피크 감소를 보장하지 않는다.** 단가가 시간에 따라 다르지 않으면
+ESS 를 쓸 이유가 없어 감소율이 0 이 된다. 그래서 KPI 는 `peak_shaving` 으로
+측정하고, 목표가 물리적으로 불가능하면 infeasible 로 드러나게 둔다
+(성공 응답을 억지로 만들지 않는다).
+
+`combined` 의 $\lambda$ 는 비용이 아니라 "피크 1 MW 를 얼마로 볼지"의 선호도다.
+그래서 이 모드의 `total_cost` 는 baseline 과의 비용 비교에 그대로 쓰면 안 되고,
+목적함수-비용 교차검증에서도 제외한다.
+
+### 5.4 피크 감소율 정의식
+
+$$\text{peak reduction} = \frac{P^{before} - P^{after}}{P^{before}} \times 100\;(\%)$$
+
+- $P^{before} = \max_t D_t$ — ESS 미적용 순수요 피크. ESS 가 없으면 발전기가
+  순수요를 그대로 담당하므로 이것이 곧 피크 부하다
+- $P^{after} = \max_t \big(D_t - \sigma_t - (dis_t - ch_t)\big)$ — ESS 적용 후 발전기 부하 피크
+- 기준: $\ge 5\%$
+
+### 5.5 규모와 효율 `[미정 — 근거 있는 제안]`
+
+| 항목 | 값 | 근거 |
+|---|---:|---|
+| 충전·방전 출력 | 4,700 MW | `trading_by_fuel.capacity_mw` 의 pumped(양수) 설비. 1년 내내 일정 |
+| 에너지 용량 | 32,900 MWh | 4,700 MW x 7h. 아래 검산으로 정함 |
+| 왕복효율 | 0.75 | 양수발전 전형값 0.70~0.80 의 중간 |
+| SOC | 10 / 50 / 95 % | 하한 / 초기·종료 / 상한 |
+
+양수발전을 ESS 로 모델링한 것이다 (`generators.yaml` 은 양수를 제외한다 —
+펌핑 중 음수 출력이라 성격이 ESS와 같다). 출력은 출처 있는 값이고, 지속시간
+7h 는 다음 검산으로 정했다.
+
+1년치 253개 24h 창에서 피크를 5% 깎는 데 필요한 양:
+
+| | 중앙 | P90 | 최대 |
+|---|---:|---:|---:|
+| 출력 | 3,546 MW | 4,215 MW | 4,584 MW |
+| 에너지 | 11,167 MWh | 15,868 MWh | 27,171 MWh |
+
+출력 4,700 MW 는 전 창을 커버한다. 에너지 27,171 MWh 를 사용 가능 구간
+(SOC 10~95% = 용량의 85%)에 담으려면 약 32,000 MWh 가 필요해서 32,900 MWh
+(7h)로 잡았다. 6h(28,200 MWh)로 하면 253창 중 4창에서 에너지가 모자랐다.
+
+왕복효율 0.85 는 리튬이온 배터리 기준 예시이고 과제 고정값이 아니다. 양수를
+모델링하므로 배터리 값을 쓰면 효율을 과대평가한다.
+
+### 5.6 KPI 측정 방법 — 창 정렬에 주의
+
+피크 감소율은 **자정 정렬 24시간 창**에서 측정한다
+(`scripts/measure_dispatch_kpi.py --align-hour 0`).
+
+이유: ESS 의 SOC 정책(초기 = 종료 = 50%)은 하루 단위로 정의돼 있고, day-ahead
+급전 계획의 horizon 도 달력상 하루다. 정렬하지 않고 24시간씩 잘라 측정하면
+16시에 시작하는 창이 생기고, 그 창에서는 그날 저녁 피크가 horizon 의 1~2번째
+시간에 온다. 피크 전에 충전할 시간이 없으니 목표를 못 맞추는데, 이건 ESS 의
+한계가 아니라 창을 자른 방식의 문제다.
+
+실측으로 확인한 차이 (1년, `peak_shaving` 모드, 목표 5%):
+
+| 창 정렬 | 해가 있는 창 | 피크 감소율 평균 |
+|---|---:|---:|
+| 정렬 없음 (24h 간격으로 뒤로) | 213 / 253 | 5.25% |
+| 자정 정렬 (day-ahead) | 아래 5.7 참고 | - |
+
+정렬하지 않은 창에서 infeasible 40건은 7~9월에 30건, 창 시작이 14~16시인 경우에
+31건 몰려 있었다. 반면 연중 피크가 가장 높은 날(2025-08-25, 순수요 피크
+91,686 MW, cap 초과 에너지 14,753 MWh)은 자정 정렬에서는 현재 ESS 규모로
+5% 를 달성한다. 출력·용량·초기 SOC 를 늘려도 결과가 같아서(모두 5.00%),
+그 날의 제약은 ESS 규모가 아니라 목표 자체였음을 확인했다.
+
+### 5.7 비용·탄소에 주는 영향 (측정)
+
+- ESS 를 켜면 비용이 내려간다 (싼 시간 충전 → 비싼 시간 방전)
+- **탄소는 늘어날 수 있다.** 왕복효율 손실만큼 추가 발전이 필요하고, 그 추가
+  발전을 담당하는 건 가장 싼 발전원(석탄)이다. 비용-탄소 trade-off 가 ESS 에도
+  그대로 나타난다 (`carbon.compare` 로 전/후 비교)
+- baseline 은 ESS 를 쓰지 않는다(R6). 따라서 "ESS 포함 MILP vs ESS 없는
+  baseline" 비용 비교는 조건이 다르므로, 응답 `notes` 에 그 사실을 밝힌다.
+  공정성 판단은 `[미정]` 이다 (CLAUDE.md: baseline 에 ESS 포함 여부는 팀 확정)
 
 ## 6. 탄소 배출 `[C]`
 
@@ -354,14 +498,14 @@ k-medoids 만 쓰면 대표가 중앙으로 끌려가 꼬리가 사라지고, �
 | `loaders/config_loader.py` | yaml → 타입 객체, 연료비 결합, 원/kWh → 원/MWh (유일 지점) |
 | `loaders/data_loader.py` | CSV/REST → 1시간 집계 → 순수요 → `DispatchInput` |
 | `models.py` | 도메인 타입 (`Generator`, `DispatchInput`, `DispatchResult`, `HydroPolicy`) |
-| `milp.py` | 4장의 UC + ED MILP (PuLP) |
+| `milp.py` | 4장의 UC + ED MILP + 5장의 ESS (PuLP) |
 | `baseline.py` | 3장의 우선순위법 |
 | `schedule.py` | 결과 조립과 비용 회계 (MILP·baseline 공용), 절감률, merit order |
 | `validation.py` | 4.4 의 제약 사후 검증 |
 | `carbon.py` | 6장의 배출 계산 |
 | `scenarios.py` | 7장의 시나리오 생성 `[D]` |
 | `service.py` | 유스케이스 조립 (route 는 검증·호출·직렬화만) |
-| `scripts/measure_dispatch_kpi.py` | 절감률·응답시간·제약 위반 반복 측정 |
+| `scripts/measure_dispatch_kpi.py` | 절감률·응답시간·ESS 피크 감소율·제약 위반 반복 측정 |
 
 ### 11.2 기호 ↔ 코드
 
@@ -375,7 +519,9 @@ k-medoids 만 쓰면 대표가 중앙으로 끌려가 꼬리가 사라지고, �
 | $r$ | `inp.reserve_margin_ratio` |
 | $\kappa_g \overline P_g$ | `p_max_eff[g.id]` (`schedule.effective_p_max`) |
 | $\overline{SU}_g,\ \overline{SD}_g$ | `schedule.startup_ramp_mw`, `shutdown_ramp_mw` |
-| 제약 이름 | `balance_t`, `reserve_t`, `pmin/pmax_g_t`, `rampup/rampdown_g_t`, `minup/mindown_g_t`, `link_g_t`, `init_on/init_off_g_t` |
+| $ch_t,\ dis_t,\ soc_t$ | `charge[t]`, `discharge[t]`, `soc[t]` |
+| $peak$ | `peak_var` |
+| 제약 이름 | `balance_t`, `reserve_t`, `pmin/pmax_g_t`, `rampup/rampdown_g_t`, `minup/mindown_g_t`, `link_g_t`, `init_on/init_off_g_t`, `soc_t`, `soc_final`, `peak_def_t`, `peak_cap`, `ess_ch/dis_excl_t` |
 
 ### 11.3 solver 와 문제 크기
 
@@ -383,8 +529,11 @@ k-medoids 만 쓰면 대표가 중앙으로 끌려가 꼬리가 사라지고, �
   에서 실행되지 않는다 (`settings.yaml` 주석).
 - `solver_time_limit_s`, `solver_mip_gap` 은 `config/settings.yaml`, 요청별로는
   `solver.time_limit_s` / `solver.mip_gap` 으로 덮어쓴다.
-- 25기 x 24h 기준 실측: 변수 2,424개 (이진 600개 = $u$ 만), 제약 3,924개,
-  모델 빌드 0.02s, solve 0.13~0.35s. 10초 KPI 대비 여유가 크다.
+- 29기 x 24h 기준 실측: 변수 2,808개 (이진 696개 = $u$ 만), 제약 4,564개,
+  모델 빌드 0.03s, solve 0.09~0.56s. 10초 KPI 대비 여유가 크다.
+  ESS 를 켜면 연속변수 3H(+ peak 모드는 1)개와 제약 H+1 개가 늘고, 이진변수는
+  `enforce_exclusive` 를 켤 때만 H 개 늘어난다. 측정상 solve 시간은 오히려
+  줄기도 한다 (ESS 가 LP 완화를 느슨하게 만들어 분기가 줄어든다).
 - 매 실행마다 변수·이진변수·제약 수와 빌드/풀이 시간을 로그와 응답
   (`model_size`)에 남긴다.
 
