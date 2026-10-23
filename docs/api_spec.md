@@ -69,7 +69,9 @@
 ## POST /api/v1/dispatch/stochastic (초안)
 
 스키마: `shared/schemas.py` 의 `StochasticRequest` / `StochasticResponse`.
-정식화와 VSS 정의는 [formulation.md](formulation.md) 8~9절.
+정식화와 VSS 정의는 [formulation.md](formulation.md) 3장.
+1단계 변수는 기동계획뿐이라 `first_stage[].p_mw` 는 시나리오 기대 출력이고, `rt_adjust_mwh` 는 그 기대 출력 대비
+시나리오 출력의 편차 합이다. `recourse_won` 에는 예비력 부족 페널티(가정 항)만 들어간다.
 
 요청 — `scenarios` 를 비우면 dispatch_api 가 예측값+잔차로 `n_scenarios` 개를 만든다.
 
