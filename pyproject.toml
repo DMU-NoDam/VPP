@@ -15,6 +15,8 @@ dependencies = [
   "highspy>=1.7",
   # Two-Stage Stochastic (선택 A): 과제 제약상 Pyomo 사용, 솔버는 위 HiGHS 공용
   "pyomo>=6.8",
+  # forecast_api (B 담당): LightGBM / LSTM 예측 모델
+  "lightgbm>=4.0", "torch>=2.2", "scikit-learn>=1.4",
 ]
 
 [project.optional-dependencies]
