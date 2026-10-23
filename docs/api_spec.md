@@ -190,3 +190,30 @@
   }
 }
 ```
+
+## GET /api/v1/dispatch/stochastic/latest
+
+대시보드 VSS 타일용. dispatch_api 가 켜질 때와 `refresh_hours` 마다 백그라운드로 Two-Stage 를 한 번 풀어 두고,
+이 엔드포인트는 마지막 결과를 바로 돌려준다 (풀이 자체는 1분 안팎). 계산 조건은 `config/stochastic.yaml` 의
+`precompute` 블록이고, 현재 값은 formulation.md 3장 측정표의 seed 1 행과 같다 (시나리오 10개, 예비율 10%,
+문제당 60초, gap 0.1%). 환경변수 `PRECOMPUTE_ENABLED=false` 면 계산하지 않는다.
+
+스키마: `shared/schemas.py` 의 `StochasticLatest`.
+
+| 필드 | 설명 |
+|---|---|
+| `state` | `pending` 시작 전 · `running` 계산 중 · `done` · `error` · `disabled` |
+| `computed_at` | 마지막으로 성공한 계산 시각 (KST) |
+| `seed`, `n_scenarios`, `reserve_ratio`, `shed_penalty_won_per_mwh`, `time_limit_s`, `mip_gap` | 계산 조건 |
+| `result` | `StochasticResponse`. 아직 없으면 `null`. 계산 중이거나 실패해도 이전 결과는 남는다 |
+| `error` | 마지막 실패 메시지 |
+
+```json
+{
+  "state": "done", "computed_at": "2026-10-23T15:40:26+09:00",
+  "seed": 1, "n_scenarios": 10, "reserve_ratio": 0.1, "shed_penalty_won_per_mwh": 10000000.0,
+  "time_limit_s": 60.0, "mip_gap": 0.001,
+  "result": { "status": "optimal", "solve_time_s": 58.1, "vss": { "vss_pct": 0.002, "...": "..." }, "...": "..." },
+  "error": null
+}
+```

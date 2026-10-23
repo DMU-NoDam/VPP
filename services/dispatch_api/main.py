@@ -1,23 +1,46 @@
 """dispatch_api — 급전 최적화 API (:8002).
 
 현재 라우트: /health, POST /api/v1/scenarios (시나리오 생성기),
-POST /api/v1/dispatch/stochastic (Two-Stage + VSS). MILP 는 추후 추가.
+POST /api/v1/dispatch/stochastic (Two-Stage + VSS),
+GET /api/v1/dispatch/stochastic/latest (대시보드용 미리 계산 결과, precompute.py).
+MILP 는 추후 추가.
 """
+
+import threading
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 
+import precompute
 import stochastic
 from scenarios import generate
 from shared.constants import API_PREFIX
 from shared.schemas import (
     ScenarioRequest,
     ScenarioSetResponse,
+    StochasticLatest,
     StochasticRequest,
     StochasticResponse,
 )
 from units import load_units
 
-app = FastAPI(title="VPP Dispatch API", version="0.1.0")
+try:
+    _PRECOMPUTE = precompute.LatestStore(precompute.load_config())
+except FileNotFoundError:  # config/stochastic.yaml 이 없으면 미리 계산을 끈다
+    _PRECOMPUTE = precompute.LatestStore(precompute.PrecomputeConfig(enabled=False))
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    """서버가 뜰 때 VSS 미리 계산 스레드를 띄우고, 내려갈 때 멈춘다."""
+    stop = threading.Event()
+    precompute.start_background(_PRECOMPUTE, stop)
+    yield
+    stop.set()
+
+
+app = FastAPI(title="VPP Dispatch API", version="0.1.0", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -57,3 +80,9 @@ def dispatch_stochastic(req: StochasticRequest) -> StochasticResponse:
         raise HTTPException(422, str(e)) from e
     except RuntimeError as e:
         raise HTTPException(500, str(e)) from e
+
+
+@app.get(f"{API_PREFIX}/dispatch/stochastic/latest", response_model=StochasticLatest)
+def dispatch_stochastic_latest() -> StochasticLatest:
+    """서버가 미리 계산해 둔 마지막 Two-Stage 결과 (대시보드 VSS 타일용). 계산 조건 포함."""
+    return _PRECOMPUTE.snapshot()

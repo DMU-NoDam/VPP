@@ -268,3 +268,62 @@ def test_api_rejects_ragged_scenarios() -> None:
         "/api/v1/dispatch/stochastic", json={"start": "2026-09-22T00:00:00", "scenarios": bad}
     )
     assert r.status_code == 422
+
+
+# ── 미리 계산 (precompute.py) ────────────────────────────────────────────────
+
+
+def test_precompute_config_reads_yaml(tmp_path, monkeypatch) -> None:
+    precompute = _load("precompute")
+    f = tmp_path / "stochastic.yaml"
+    f.write_text("precompute:\n  seed: 7\n  reserve_ratio: 0.0\n  unknown: 1\n", encoding="utf-8")
+    monkeypatch.delenv("PRECOMPUTE_ENABLED", raising=False)
+    cfg = precompute.load_config(f)
+    assert cfg.seed == 7 and cfg.reserve_ratio == 0.0 and cfg.enabled
+    monkeypatch.setenv("PRECOMPUTE_ENABLED", "false")
+    assert not precompute.load_config(f).enabled
+
+
+def test_precompute_repo_config_matches_measurement_table() -> None:
+    cfg = _load("precompute").load_config()
+    assert (cfg.seed, cfg.n_scenarios, cfg.reserve_ratio) == (1, 10, 0.10)
+
+
+def test_precompute_compute_once_done_then_error_keeps_result(result, monkeypatch) -> None:
+    precompute = _load("precompute")
+    store = precompute.LatestStore(precompute.PrecomputeConfig())
+    assert store.snapshot().state == "pending"
+    monkeypatch.setattr(precompute, "load_units", lambda: FLEET)
+    monkeypatch.setattr(precompute.stochastic, "run", lambda *a, **k: result)
+    precompute.compute_once(store, now=datetime(2026, 10, 23, 15, 30))
+    snap = store.snapshot()
+    assert snap.state == "done" and snap.result.vss.vss_pct == result.vss.vss_pct
+    assert snap.computed_at is not None
+
+    def boom(*a, **k):
+        raise RuntimeError("RP 를 풀지 못했다")
+
+    monkeypatch.setattr(precompute.stochastic, "run", boom)
+    precompute.compute_once(store)
+    snap = store.snapshot()
+    assert snap.state == "error" and "RP" in snap.error
+    assert snap.result is not None  # 이전 결과는 남는다
+
+
+def test_precompute_disabled_starts_no_thread() -> None:
+    import threading
+
+    precompute = _load("precompute")
+    store = precompute.LatestStore(precompute.PrecomputeConfig(enabled=False))
+    assert precompute.start_background(store, threading.Event()) is None
+    assert store.snapshot().state == "disabled"
+
+
+def test_api_stochastic_latest(monkeypatch) -> None:
+    monkeypatch.setenv("PRECOMPUTE_ENABLED", "false")
+    main = _load("main")
+    r = TestClient(main.app).get("/api/v1/dispatch/stochastic/latest")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["state"] == "disabled" and data["result"] is None
+    assert data["seed"] == 1 and data["reserve_ratio"] == 0.10

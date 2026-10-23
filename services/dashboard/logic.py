@@ -69,16 +69,31 @@ class Settings:
         return {f.code: f for f in self.fleet}
 
 
-def _config_candidates() -> list[Path]:
+def _config_candidates(name: str = "dashboard.yaml", env: str = "DASHBOARD_CONFIG") -> list[Path]:
     """설정 파일을 찾을 경로. 환경변수 → 컨테이너 마운트 → 레포 루트 순."""
     paths: list[Path] = []
-    if os.getenv("DASHBOARD_CONFIG"):
-        paths.append(Path(os.environ["DASHBOARD_CONFIG"]))
-    paths.append(Path("/app/config/dashboard.yaml"))
+    if os.getenv(env):
+        paths.append(Path(os.environ[env]))
+    paths.append(Path("/app/config") / name)
     here = Path(__file__).resolve()
     if len(here.parents) > 2:
-        paths.append(here.parents[2] / "config" / "dashboard.yaml")
+        paths.append(here.parents[2] / "config" / name)
     return paths
+
+
+def load_fuel_co2(path: Path | None = None) -> dict[str, float]:
+    """generators.yaml(C 담당) 의 연료별 배출계수 (tCO2/MWh). 못 찾으면 빈 dict.
+
+    키는 collector trading_by_fuel 과 같은 연료 코드다. 같은 연료의 유닛은 값이 같다.
+    값의 출처와 [미정] 항목(유류·무연탄은 출처 없음)은 generators.yaml 주석에 있다.
+    """
+    if path is None:
+        path = next((p for p in _config_candidates("generators.yaml", "GENERATORS_CONFIG")
+                     if p.exists()), None)
+        if path is None:
+            return {}
+    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    return {g["fuel"]: float(g["co2_ton_per_mwh"]) for g in raw.get("generators", [])}
 
 
 def load_settings(path: Path | None = None) -> Settings:
@@ -227,6 +242,190 @@ def parse_stochastic(data: dict) -> dict:
         "vss_won": float(vss["vss_won"]),
         "vss_pct": float(vss["vss_pct"]),
     }
+
+
+def parse_stochastic_latest(data: dict) -> dict | None:
+    """StochasticLatest(GET /dispatch/stochastic/latest) → 화면 값 + 계산 조건. 결과가 없으면 None.
+
+    계산 중(running)이거나 실패(error)여도 이전 결과가 남아 있으면 그 값을 쓴다.
+    """
+    if not data.get("result"):
+        return None
+    out = parse_stochastic(data["result"])
+    out.update({
+        "state": data["state"],
+        "computed_at": pd.Timestamp(data["computed_at"]) if data.get("computed_at") else None,
+        "seed": int(data["seed"]),
+        "reserve_ratio": float(data["reserve_ratio"]),
+        "time_limit_s": float(data["time_limit_s"]),
+    })
+    return out
+
+
+# ── collector 실측 (수요 게이지 · 실측 발전 믹스) ─────────────────────────────
+
+# 실측 발전 믹스를 연료비 순으로 쌓을 때 쓰는 구분 (collector trading_by_fuel 코드).
+# 가정: 재생·수력은 연료비 0원으로 맨 앞, 양수는 저장설비라 맨 뒤에 둔다.
+ZERO_COST_FUELS = ("solar", "wind", "renewable", "hydro")
+STORAGE_FUELS = ("pumped",)
+# 이 셋이 24시간 모두 있어야 하루치 실측으로 쓴다 (최근 날짜는 일부 발전원이 늦게 들어온다)
+CORE_FUELS = ("nuclear", "bituminous_coal", "lng")
+
+
+def rows_frame(result: ApiResult, numeric: tuple[str, ...]) -> pd.DataFrame:
+    """collector /data 응답 → DataFrame. 결측 표기("None")는 NaN 으로 바꾼다."""
+    if not result.ok or not result.data:
+        return pd.DataFrame()
+    df = pd.DataFrame(result.data.get("rows") or [])
+    for col in numeric:
+        if col in df:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
+def latest_demand(result: ApiResult) -> dict | None:
+    """collector power_demand(5분) 의 최신 수요와 1시간 전 수요 (없으면 None)."""
+    df = rows_frame(result, ("demand_mw",))
+    if df.empty:
+        return None
+    df = df.dropna(subset=["demand_mw"], ignore_index=True)
+    if df.empty:
+        return None
+    df["ts"] = pd.to_datetime(df["ts"])
+    last = df.iloc[-1]
+    hour_ago = df.loc[df.ts == last.ts - pd.Timedelta(hours=1), "demand_mw"]
+    return {
+        "ts": last.ts,
+        "mw": float(last.demand_mw),
+        "prev_mw": float(hour_ago.iloc[0]) if len(hour_ago) else None,
+    }
+
+
+def latest_full_day(trading: pd.DataFrame) -> date | None:
+    """trading_by_fuel 에서 CORE_FUELS 가 24시간 모두 있는 가장 최근 날."""
+    if trading.empty:
+        return None
+    core = trading[trading.fuel.isin(CORE_FUELS) & trading.trade_mwh.notna()]
+    counts = core.groupby([pd.to_datetime(core.ts).dt.date, "fuel"]).size().unstack()
+    counts = counts.reindex(columns=list(CORE_FUELS))
+    full = counts[(counts >= 24).all(axis=1)]
+    return max(full.index) if len(full) else None
+
+
+def merit_fuel_order(fuels: list[str], fuel_cost: pd.DataFrame) -> list[str]:
+    """발전원을 연료비 순으로 정렬. 연료비는 fuel_cost 의 가장 최근 달 값.
+
+    연료비가 없는 발전원은 ZERO_COST_FUELS 면 맨 앞, STORAGE_FUELS 면 맨 뒤,
+    그 밖에는 연료비가 있는 발전원 뒤에 둔다.
+    """
+    cost: dict[str, float] = {}
+    if not fuel_cost.empty:
+        last = fuel_cost[fuel_cost.month == fuel_cost.month.max()]
+        cost = dict(zip(last.fuel, last.cost_won_per_kwh, strict=True))
+
+    def key(f: str) -> tuple[int, float]:
+        if f in ZERO_COST_FUELS:
+            return 0, 0.0
+        if f in STORAGE_FUELS:
+            return 3, 0.0
+        return (1, cost[f]) if f in cost else (2, 0.0)
+
+    return sorted(fuels, key=key)
+
+
+def real_mix(trading: pd.DataFrame, demand: pd.DataFrame, day: date) -> pd.DataFrame:
+    """그날 시간대별 발전원 출력(trade_mwh = 그 시간 평균 MW)과 실측 수요(5분 값의 시간 평균).
+
+    반환: hour, fuel, mw, capacity_mw(설비용량) (긴 표) + 시간별 demand_mw 열.
+    """
+    t = trading[pd.to_datetime(trading.ts).dt.date == day].copy()
+    t["hour"] = pd.to_datetime(t.ts).dt.hour
+    if "capacity_mw" not in t:
+        t["capacity_mw"] = float("nan")
+    mix = t.groupby(["hour", "fuel"], as_index=False).agg(
+        mw=("trade_mwh", lambda v: v.sum(min_count=1)), capacity_mw=("capacity_mw", "max"),
+    ).dropna(subset=["mw"])
+    if not demand.empty:
+        d = demand.assign(hour=pd.to_datetime(demand.ts).dt.hour)
+        hourly = d.groupby("hour")["demand_mw"].mean()
+        mix["demand_mw"] = mix.hour.map(hourly)
+    else:
+        mix["demand_mw"] = float("nan")
+    return mix
+
+
+def real_carbon_by_hour(mix: pd.DataFrame, co2: dict[str, float]) -> pd.Series:
+    """시간별 배출량 (tCO2) = 발전원별 실측 출력 x 배출계수.
+
+    가정: 배출계수가 없는 발전원(태양광·풍력·기타 재생·양수)은 0 으로 본다.
+    양수는 충전 전력을 만든 발전원 쪽에서 이미 배출이 잡힌다.
+    """
+    coef = mix.fuel.map(co2).fillna(0.0)
+    return (mix.mw * coef).groupby(mix.hour).sum()
+
+
+def real_carbon_by_fuel(
+    mix: pd.DataFrame, co2: dict[str, float], names: dict[str, str], order: list[str],
+) -> pd.DataFrame:
+    """발전원별 하루 발전량(MWh)·배출계수·배출량(tCO2). 1시간 간격이라 MW 합 = MWh."""
+    energy = mix.groupby("fuel").mw.sum()
+    rows = []
+    for f in order:
+        if f not in energy:
+            continue
+        mwh = float(energy[f])
+        coef = co2.get(f, 0.0)
+        rows.append({
+            "발전원": names.get(f, f),
+            "발전량(MWh)": round(mwh),
+            "배출계수(tCO2/MWh)": coef,
+            "배출량(tCO2)": round(mwh * coef),
+        })
+    return pd.DataFrame(rows)
+
+
+def real_utilization(mix: pd.DataFrame, hour: int, top: int = 6) -> pd.DataFrame:
+    """그 시각 발전원별 출력과 이용률(출력 / 설비용량). 출력 큰 순 top 개 + 나머지는 '기타'."""
+    h = mix[mix.hour == hour].sort_values("mw", ascending=False)
+    head, rest = h.head(top), h.iloc[top:]
+    out = head[["fuel", "mw", "capacity_mw"]].copy()
+    if len(rest):
+        out.loc[len(out)] = {
+            "fuel": "기타", "mw": rest.mw.sum(), "capacity_mw": rest.capacity_mw.sum(),
+        }
+    out["util_pct"] = (out.mw / out.capacity_mw * 100).clip(upper=100).fillna(0.0)
+    return out.reset_index(drop=True)
+
+
+def parse_forecast(data: dict) -> tuple[pd.DataFrame, dict]:
+    """forecast_api POST /forecast 응답 → (수요 예측 시계열, 화면 지표).
+
+    응답 스키마는 services/forecast_api/schemas.py (shared 와 아직 다름, B 담당).
+    미래 예측이라 실측 열은 없다. 지표는 forecast_api 가 보정 구간에서 잰 값이라
+    목업의 forecast_metrics 와 정의가 다르다:
+      - mape: 1시간 앞 예측 (lag 에 실측 사용). 24h·168h ahead 가 아니다
+      - nmae: MAE / 실측 평균. 대시보드 기준(설비용량)과 다르다
+      - coverage: 컨포멀 구간을 맞춘 같은 구간에서 잰 값
+    """
+    fcs = data["forecasts"]
+    pts = fcs["demand"]["points"]
+    fc = pd.DataFrame({
+        "hour": range(len(pts)),
+        "ts": pd.to_datetime([p["datetime"] for p in pts]),
+        "demand_fc_mw": [float(p["predicted"]) for p in pts],
+        "demand_lo_mw": [float(p["lower_bound"]) for p in pts],
+        "demand_hi_mw": [float(p["upper_bound"]) for p in pts],
+    })
+    metrics = {
+        "mape_1h_pct": float(fcs["demand"]["metrics"]["mape"]),
+        "pi_coverage_pct": float(fcs["demand"]["metrics"]["coverage"]),
+        "model": fcs["demand"]["model_used"],
+    }
+    for code in ("solar", "wind"):
+        if code in fcs:
+            metrics[f"nmae_{code}_pct"] = float(fcs[code]["metrics"]["nmae"])
+            metrics[f"{code}_start"] = pd.Timestamp(fcs[code]["points"][0]["datetime"])
+    return fc, metrics
 
 
 # ── 목업 데이터 ──────────────────────────────────────────────────────────────

@@ -33,7 +33,7 @@ select = ["E", "F", "I", "N", "UP"]
 known-first-party = [
   "shared",
   "collector", "data_api", "domain", "sources", "store",
-  "constants", "models", "loaders", "scenarios", "units", "stochastic",
+  "constants", "models", "loaders", "scenarios", "units", "stochastic", "precompute",
   "logic", "ui", "page_scenarios", "page_stochastic_test",
 ]
 

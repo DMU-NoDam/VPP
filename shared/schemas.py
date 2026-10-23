@@ -185,3 +185,22 @@ class StochasticResponse(BaseModel):
     expected_hours: list[HourSummary]     # 확률 가중 평균 수급
     scenarios: list[ScenarioResult]
     vss: VssReport
+
+
+class StochasticLatest(BaseModel):
+    """GET /dispatch/stochastic/latest. 서버가 미리 계산해 둔 마지막 Two-Stage 결과.
+
+    state: pending(아직 시작 전) / running(계산 중, 이전 결과가 있으면 result 에 남아 있다)
+           / done / error / disabled
+    """
+
+    state: Literal["pending", "running", "done", "error", "disabled"]
+    computed_at: datetime | None = None
+    seed: int
+    n_scenarios: int
+    reserve_ratio: float
+    shed_penalty_won_per_mwh: float
+    time_limit_s: float
+    mip_gap: float
+    result: StochasticResponse | None = None
+    error: str | None = None
