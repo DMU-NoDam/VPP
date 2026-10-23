@@ -28,6 +28,9 @@ from shared.schemas import (
 # forecast_api 연동 전 기본 예측 (MW). 2026-09-21(월) 실측의 시간 평균:
 # 수요 = data/csv/power_demand.csv, 태양광 = generation_by_fuel 의 solar,
 # 풍력 = generation_by_fuel 의 renewable (KPX 분류상 풍력+기타 재생).
+# generation_by_fuel.csv 는 A 가 삭제했고 (커밋 6263828) 지금은 trading_by_fuel.csv 가
+# 연료별 시계열을 맡는다. trading_by_fuel 은 2026-09-18 까지라 위 값을 다시 만들 수 없고,
+# solar·wind 를 따로 둔다. 기준일·출처 교체는 forecast_api 연동 때 정한다.
 # 순부하 피크 약 72.8GW 로 generators.yaml(C) 설비 85.6GW 와 맞물린다.
 DEFAULT_BASE = ScenarioProfile(
     demand_mw=[
