@@ -13,7 +13,6 @@ dependencies = [
   "pyyaml>=6.0",
   # MILP solver: PuLP 기본 CBC 외에 HiGHS 사용 (C 담당 성능 KPI 10초)
   "highspy>=1.7",
-  "plotly>=5.20",
 ]
 
 [project.optional-dependencies]
@@ -29,13 +28,25 @@ select = ["E", "F", "I", "N", "UP"]
 # dispatch_api 도 같은 관례를 따른다 (constants, models, loaders).
 known-first-party = [
   "shared",
+  # collector
   "collector", "data_api", "domain", "sources", "store",
-  "constants", "models", "loaders",
+  # dispatch_api
+  "main", "constants", "models", "loaders",
+  "milp", "baseline", "schedule", "validation", "carbon", "scenarios", "service",
+  # dashboard
+  "logic", "ui", "page_scenarios",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--cov=services --cov-report=term-missing"
+# PuLP 3.x 가 4.0 API 변경을 미리 경고한다. 의존성을 <4 로 핀해 둔 상태이므로
+# (pyproject dependencies 주석 참고) 테스트 출력에서만 숨긴다. 핀을 올릴 때
+# 이 필터를 먼저 지우고 경고를 다시 확인할 것.
+filterwarnings = [
+  "ignore:Constructing LpVariable:DeprecationWarning",
+  "ignore:Using LpProblem.constraints as a dict mapping:DeprecationWarning",
+]
 
 [build-system]
 requires = ["setuptools>=68"]
