@@ -1,7 +1,20 @@
 # 버전을 고정한다 — 범위(>=)만 두면 빌드 시점의 PyPI 최신판 조합에 따라
 # pip 의존성 해석이 실패할 수 있다 (2026-10-02 실제 발생). 올릴 때는 함께 검증한다.
-fastapi==0.142.2
+fastapi==0.141.1
 starlette==1.7.0
 uvicorn[standard]==0.54.0
 pydantic==2.13.5
-numpy==2.4.6
+numpy==2.5.3
+
+# 최적화 코어
+# PuLP 4.0 은 Rust 코어로 재작성되며 LpVariable.dicts 등 기존 API 가 제거됐다.
+# UC 모델의 u[g,t] 인덱싱 관용구를 유지하기 위해 3.x 계열에 고정한다.
+pulp==3.3.2
+# MILP solver. CBC 번들 바이너리는 Apple Silicon 에서 실행되지 않아 HiGHS 를 쓴다
+# (config/settings.yaml 주석 참고). 리눅스 컨테이너에서는 둘 다 동작한다.
+highspy==1.15.1
+
+# 로더: config/*.yaml, CSV 리샘플, collector data_api 호출
+pyyaml==6.0.3
+pandas==3.0.6
+requests==2.34.2
