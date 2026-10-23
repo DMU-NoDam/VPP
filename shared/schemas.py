@@ -55,6 +55,14 @@ class HourSummary(BaseModel):
     co2_t: float
 
 
+class CheckItem(BaseModel):
+    """검증 1건. 제약 위반 검사와 시나리오 검증이 같이 쓴다."""
+
+    name: str
+    ok: bool
+    detail: str
+
+
 class CostBreakdown(BaseModel):
     fuel_won: float
     startup_won: float
@@ -116,10 +124,8 @@ class Band(BaseModel):
     p95: list[float]
 
 
-class ScenarioCheck(BaseModel):
-    name: str
-    ok: bool
-    detail: str
+class ScenarioCheck(CheckItem):
+    """시나리오 생성 검증 1건. 공용 CheckItem 과 모양이 같다 (이름은 호환 유지)."""
 
 
 class ScenarioSetResponse(BaseModel):
@@ -183,3 +189,93 @@ class StochasticResponse(BaseModel):
     expected_hours: list[HourSummary]     # 확률 가중 평균 수급
     scenarios: list[ScenarioResult]
     vss: VssReport
+
+
+# --- POST /api/v1/dispatch/milp -------------------------------------------------
+# 정식화는 docs/formulation.md 4장, 예시 JSON 은 docs/api_spec.md.
+
+
+class MilpRequest(BaseModel):
+    """모든 필드에 기본값이 있어 `{}` 만 보내도 된다.
+
+    수요는 두 경로로 들어온다.
+      - `net_demand_mw` 를 주면 그 값을 쓴다 (forecast_api 연동·시나리오 재실행)
+      - 비우면 수집 데이터의 **최신 연속 구간** horizon_h 시간을 쓴다
+    """
+
+    horizon_h: int = Field(24, ge=1, le=168)
+    net_demand_mw: list[float] | None = None   # 순수요 = 수요 - (태양광+풍력+신재생)
+    start: datetime | None = None              # net_demand_mw 의 첫 시각 (없으면 데이터 기준)
+    reserve_ratio: float | None = Field(None, ge=0, le=1)      # None 이면 settings.yaml
+    storage_rate_pct: float | None = Field(None, ge=0, le=100)  # None 이면 dam_status 최신값
+    p_init_mw: dict[str, float] | None = None  # 유닛별 직전 출력. 없으면 t=0 램프 제약 생략
+    unit_ids: list[str] | None = None          # None 이면 generators.yaml 전체
+    allow_load_shedding: bool = False          # [모델링 선택] 과제 필수 아님
+    shed_penalty_won_per_mwh: float | None = None
+    include_baseline: bool = True              # Rule-based 비교와 절감률을 같이 계산
+    include_units: bool = True                 # 유닛 x 시간 급전값 (응답이 커진다)
+    solver: SolverOptions | None = None
+
+
+class ModelSizeOut(BaseModel):
+    """문제 크기와 소요 시간. 10초 KPI 를 응답에서 바로 확인한다."""
+
+    n_variables: int
+    n_binaries: int
+    n_constraints: int
+    build_time_s: float
+    solve_time_s: float
+    total_time_s: float
+
+
+class MeritOrderEntry(BaseModel):
+    """발전원별 급전 순위와 투입량. Merit Order Stack 시각화용."""
+
+    rank: int
+    fuel: str
+    fuel_cost_krw_per_mwh: float
+    capacity_mw: float
+    energy_mwh: float
+    unit_hours_on: float
+    n_units: float
+    co2_ton: float
+
+
+class CarbonSummary(BaseModel):
+    total_ton: float
+    hourly_ton: list[float]
+    by_fuel_ton: dict[str, float]
+    intensity_ton_per_mwh: float
+
+
+class BaselineComparison(BaseModel):
+    """Rule-based baseline 과의 비교. KPI 기준 cost_reduction_pct >= 10."""
+
+    method: str
+    rules: list[str]
+    total_cost_won: float
+    fuel_won: float
+    startup_won: float
+    carbon_total_ton: float
+    peak_mw: float
+    cost_reduction_pct: float
+    target_met: bool
+    constraints: list[CheckItem]
+
+
+class MilpResponse(BaseModel):
+    status: SolveStatus
+    method: str = "milp"
+    horizon_h: int
+    timestamps: list[datetime]
+    model_size: ModelSizeOut
+    cost: CostBreakdown
+    hours: list[HourSummary]
+    units: list[UnitHour] | None = None
+    merit_order: list[MeritOrderEntry]
+    carbon: CarbonSummary
+    constraints: list[CheckItem]          # 필수 제약 위반 검사 (해를 다시 검증한 결과)
+    baseline: BaselineComparison | None = None
+    reserve_ratio: float
+    hydro_factor: float                   # 수력 상한에 곱한 계수 (1.0 = 제한 없음)
+    notes: list[str]                      # 모델링 선택·가정·경고

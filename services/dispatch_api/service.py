@@ -1,0 +1,289 @@
+"""dispatch_api 유스케이스 계층.
+
+FastAPI route 는 검증·호출·직렬화만 한다 (CLAUDE.md 코드 규칙). 여기서
+config/데이터 로딩 -> 최적화 -> 제약 재검증 -> 응답 조립을 순서대로 한다.
+
+데이터 경로는 환경변수로 바꿀 수 있다 (docker-compose 는 볼륨으로 마운트한다).
+  VPP_CONFIG_DIR  기본 config
+  VPP_CSV_DIR     기본 data/csv
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from datetime import datetime, timedelta
+from functools import lru_cache
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import baseline
+import carbon
+import milp
+import validation
+from loaders.config_loader import (
+    ConfigError,
+    load_generator_specs,
+    load_settings,
+    resolve_fuel_costs,
+)
+from loaders.data_loader import DataError, build_dispatch_input, read_csv_dataset
+from models import DispatchInput, DispatchResult, Generator, Settings
+from schedule import cost_reduction_pct, merit_order
+from shared.schemas import (
+    BaselineComparison,
+    CarbonSummary,
+    CheckItem,
+    CostBreakdown,
+    HourSummary,
+    MeritOrderEntry,
+    MilpRequest,
+    MilpResponse,
+    ModelSizeOut,
+    UnitHour,
+)
+
+logger = logging.getLogger(__name__)
+
+CONFIG_DIR = Path(os.getenv("VPP_CONFIG_DIR", "config"))
+CSV_DIR = Path(os.getenv("VPP_CSV_DIR", "data/csv"))
+
+# 절감률 KPI (CLAUDE.md 정량 기준). 응답의 target_met 판정에 쓴다.
+COST_REDUCTION_TARGET_PCT = 10.0
+
+# baseline 규칙을 응답에 그대로 싣는다. "규칙을 문서로 명확히 고정한다"
+# (CLAUDE.local.md) 를 코드에서도 보이게 하려는 것이다. baseline.py 의
+# 모듈 docstring 과 같은 내용이다.
+BASELINE_RULES: tuple[str, ...] = (
+    "R1 우선순위: 연료비 오름차순 (동률이면 큰 유닛 먼저)",
+    "R2 시야: 매 시간 독립 결정, lookahead 없음",
+    "R3 기동: 그 시간의 (1+r)x수요를 채울 때까지 우선순위대로 투입",
+    "R4 정지: 빼도 예비율이 유지되고 최소시간·램프가 허용하면 비싼 유닛부터 뺀다",
+    "R5 급전: 투입된 유닛을 우선순위대로 상한까지 채운다",
+    "R6 ESS·예측 사용 없음. 비용 회계는 MILP 와 동일 (연료비 + 기동비)",
+)
+
+
+def _stamp(path: Path) -> tuple[str, float, int]:
+    """파일 변경 감지용 키. 파일이 바뀌면 캐시가 자동으로 갱신된다."""
+    stat = path.stat()
+    return (str(path), stat.st_mtime, stat.st_size)
+
+
+@lru_cache(maxsize=8)
+def _settings_cached(stamp: tuple[str, float, int]) -> Settings:
+    return load_settings(stamp[0])
+
+
+@lru_cache(maxsize=8)
+def _specs_cached(stamp: tuple[str, float, int]):
+    return load_generator_specs(stamp[0])
+
+
+@lru_cache(maxsize=16)
+def _csv_cached(stamp: tuple[str, float, int]) -> tuple[dict, ...]:
+    """CSV 를 행 목록으로 캐시한다. 요청마다 다시 읽으면 10초 예산을 깎는다."""
+    return tuple(read_csv_dataset(Path(stamp[0]).parent, Path(stamp[0]).stem))
+
+
+def settings() -> Settings:
+    return _settings_cached(_stamp(CONFIG_DIR / "settings.yaml"))
+
+
+def generators(cfg: Settings) -> list[Generator]:
+    """연료비까지 결합된 발전기 목록."""
+    specs = _specs_cached(_stamp(CONFIG_DIR / "generators.yaml"))
+    fuel_cost = _csv_cached(_stamp(CSV_DIR / "fuel_cost.csv"))
+    return resolve_fuel_costs(list(specs), [dict(r) for r in fuel_cost], cfg.fuel_cost_month)
+
+
+def _dataset(name: str) -> list[dict]:
+    return [dict(r) for r in _csv_cached(_stamp(CSV_DIR / f"{name}.csv"))]
+
+
+def _hourly_timestamps(start: datetime | None, horizon_h: int, timezone: str) -> list[datetime]:
+    """net_demand_mw 를 직접 받을 때 쓸 시각 배열.
+
+    start 를 주지 않으면 "지금 시(時)"부터 시작한다 (tz-aware, Asia/Seoul).
+    """
+    tz = ZoneInfo(timezone)
+    first = start.astimezone(tz) if start else datetime.now(tz).replace(
+        minute=0, second=0, microsecond=0
+    )
+    return [first + timedelta(hours=h) for h in range(horizon_h)]
+
+
+def build_input(req: MilpRequest, cfg: Settings, fleet: list[Generator]) -> DispatchInput:
+    """요청 -> DispatchInput. 수요를 직접 받았는지에 따라 경로가 갈린다."""
+    units = fleet
+    if req.unit_ids is not None:
+        chosen = set(req.unit_ids)
+        units = [g for g in fleet if g.id in chosen]
+        unknown = sorted(chosen - {g.id for g in units})
+        if unknown:
+            raise ConfigError(f"generators.yaml 에 없는 unit_ids: {unknown}")
+        if not units:
+            raise ConfigError("unit_ids 가 비어 있다 — 발전기 없이는 풀 수 없다")
+
+    reserve = cfg.reserve_margin_ratio if req.reserve_ratio is None else req.reserve_ratio
+
+    if req.net_demand_mw is not None:
+        if len(req.net_demand_mw) != req.horizon_h:
+            raise DataError(
+                f"net_demand_mw 길이 {len(req.net_demand_mw)} != horizon_h {req.horizon_h}"
+            )
+        return DispatchInput(
+            generators=units,
+            timestamps=_hourly_timestamps(req.start, req.horizon_h, cfg.timezone),
+            net_demand_mw=[float(v) for v in req.net_demand_mw],
+            reserve_margin_ratio=reserve,
+            storage_rate_pct=req.storage_rate_pct,
+            p_init_mw=req.p_init_mw,
+        )
+
+    data_input = build_dispatch_input(
+        units,
+        cfg,
+        _dataset("power_demand"),
+        _dataset("trading_by_fuel"),
+        _dataset("dam_status"),
+        horizon_h=req.horizon_h,
+    )
+    return DispatchInput(
+        generators=units,
+        timestamps=data_input.timestamps,
+        net_demand_mw=data_input.net_demand_mw,
+        reserve_margin_ratio=reserve,
+        storage_rate_pct=(
+            data_input.storage_rate_pct if req.storage_rate_pct is None
+            else req.storage_rate_pct
+        ),
+        p_init_mw=req.p_init_mw,
+    )
+
+
+def _solver_config(req: MilpRequest, cfg: Settings) -> milp.SolverConfig:
+    base = milp.SolverConfig.from_settings(cfg)
+    if req.solver is None:
+        return base
+    return milp.SolverConfig(
+        name=base.name,
+        msg=base.msg,
+        time_limit_s=req.solver.time_limit_s,
+        mip_gap=req.solver.mip_gap,
+    )
+
+
+def _hours(result: DispatchResult) -> list[HourSummary]:
+    co2 = carbon.hourly_ton(result.units)
+    return [
+        HourSummary(
+            timestamp=result.timestamps[t],
+            demand_mw=result.net_demand_mw[t],
+            supply_mw=result.supply_mw(t),
+            reserve_pct=result.reserve_pct(t),
+            shed_mw=result.shed_mw[t],
+            ess_mw=0.0,  # ESS 미구현 — 연계 후 교체
+            co2_t=co2[t],
+        )
+        for t in range(result.horizon_h)
+    ]
+
+
+def _units(result: DispatchResult) -> list[UnitHour]:
+    return [
+        UnitHour(
+            timestamp=result.timestamps[t],
+            unit_id=unit.unit_id,
+            on=unit.on[t],
+            p_mw=unit.p_mw[t],
+        )
+        for unit in result.units
+        for t in range(result.horizon_h)
+    ]
+
+
+def _cost(result: DispatchResult) -> CostBreakdown:
+    return CostBreakdown(
+        fuel_won=result.fuel_cost_krw,
+        startup_won=result.startup_cost_krw,
+        recourse_won=0.0,  # 결정론적 MILP 에는 2단계가 없다
+        shed_won=result.shed_cost_krw,
+        total_won=result.total_cost_krw,
+    )
+
+
+def _checks(
+    result: DispatchResult, fleet: list[Generator], inp: DispatchInput
+) -> list[CheckItem]:
+    return [
+        CheckItem(name=c.name, ok=c.ok, detail=c.detail)
+        for c in validation.report(result, fleet, inp.p_init_mw)
+    ]
+
+
+def run_milp(req: MilpRequest) -> MilpResponse:
+    """`POST /api/v1/dispatch/milp` 본체.
+
+    status 가 optimal 이 아니면 급전값 대신 진단용 notes 를 채워 돌려준다.
+    성공 응답을 억지로 만들지 않는다 (CLAUDE.local.md infeasible 처리).
+    """
+    cfg = settings()
+    fleet = generators(cfg)
+    inp = build_input(req, cfg, fleet)
+
+    penalty = (
+        cfg.shed_penalty_krw_per_mwh if req.shed_penalty_won_per_mwh is None
+        else req.shed_penalty_won_per_mwh
+    )
+    result = milp.solve(
+        inp,
+        solver_config=_solver_config(req, cfg),
+        hydro_policy=cfg.hydro_policy,
+        allow_load_shedding=req.allow_load_shedding,
+        shed_penalty_krw_per_mwh=penalty,
+    )
+
+    comparison: BaselineComparison | None = None
+    if req.include_baseline:
+        # baseline 은 페널티 없이 돈다. 규칙으로 못 채운 양은 shed_mw 로 남기고
+        # 비용에는 섞지 않는다 (섞으면 절감률이 페널티 크기에 좌우된다).
+        rule = baseline.run(inp, hydro_policy=cfg.hydro_policy, shed_penalty_krw_per_mwh=0.0)
+        reduction = cost_reduction_pct(rule, result) if result.status == "optimal" else 0.0
+        comparison = BaselineComparison(
+            method=rule.method,
+            rules=list(BASELINE_RULES),
+            total_cost_won=rule.total_cost_krw,
+            fuel_won=rule.fuel_cost_krw,
+            startup_won=rule.startup_cost_krw,
+            carbon_total_ton=carbon.total_ton(rule.units),
+            peak_mw=max((rule.supply_mw(t) for t in range(rule.horizon_h)), default=0.0),
+            cost_reduction_pct=reduction,
+            target_met=reduction >= COST_REDUCTION_TARGET_PCT,
+            constraints=_checks(rule, list(inp.generators), inp),
+        )
+
+    size = result.size
+    return MilpResponse(
+        status=result.status,
+        horizon_h=result.horizon_h,
+        timestamps=result.timestamps,
+        model_size=ModelSizeOut(
+            n_variables=size.n_variables if size else 0,
+            n_binaries=size.n_binaries if size else 0,
+            n_constraints=size.n_constraints if size else 0,
+            build_time_s=size.build_time_s if size else 0.0,
+            solve_time_s=size.solve_time_s if size else 0.0,
+            total_time_s=size.total_time_s if size else 0.0,
+        ),
+        cost=_cost(result),
+        hours=_hours(result),
+        units=_units(result) if req.include_units else None,
+        merit_order=[MeritOrderEntry(**row) for row in merit_order(result)],
+        carbon=CarbonSummary(**carbon.summary(result)),
+        constraints=_checks(result, list(inp.generators), inp),
+        baseline=comparison,
+        reserve_ratio=inp.reserve_margin_ratio,
+        hydro_factor=result.hydro_factor,
+        notes=result.notes,
+    )
