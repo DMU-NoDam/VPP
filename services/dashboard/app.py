@@ -30,11 +30,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, timedelta
+from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 from plotly.subplots import make_subplots
 from streamlit.delta_generator import DeltaGenerator
 
@@ -1273,9 +1275,45 @@ def page_data() -> None:
         render_hourly_table(ctx.settings, ctx.df)
 
 
+LOADER_HTML = Path(__file__).with_name("loader.html")
+
+
+def show_loader() -> DeltaGenerator | None:
+    """세션 첫 실행에만 전체 화면 로딩 그림을 띄운다. 지울 자리(placeholder)를 돌려준다.
+
+    첫 실행은 서비스 상태 확인·실측 데이터 호출로 몇 초 걸리는데, 그동안 빈 화면이 보이지
+    않게 한다. 그림은 JS 로 그리므로 iframe(components.html)에 넣고, 그 iframe 을 감싼
+    컨테이너(st-key-vpp-loader)를 화면 전체에 고정한다. 페이지가 다 그려지면 main 이 지운다.
+    """
+    if st.session_state.get("vpp_loaded") or not LOADER_HTML.exists():
+        return None
+    slot = st.empty()
+    with slot.container(key="vpp-loader"):
+        st.markdown(
+            "<style>.st-key-vpp-loader{position:fixed;inset:0;z-index:1000000;"
+            "background:#17181c}.st-key-vpp-loader iframe{position:fixed;inset:0;"
+            "width:100vw;height:100vh;border:0}</style>",
+            unsafe_allow_html=True,
+        )
+        components.html(LOADER_HTML.read_text(encoding="utf-8"), height=600)
+    return slot
+
+
 def main() -> None:
     """페이지 설정·테마를 한 번 적용하고 페이지를 띄운다."""
     st.set_page_config(page_title="VPP 통합 관제 대시보드", page_icon="⚡", layout="wide")
+    loader = show_loader()
+    try:
+        _run_pages()
+    finally:
+        # 페이지가 예외로 끝나도 로딩 그림이 오류를 가리지 않게 지운다
+        if loader is not None:
+            loader.empty()
+            st.session_state["vpp_loaded"] = True
+
+
+def _run_pages() -> None:
+    """테마 CSS·내비게이션·공용 컨텍스트를 만들고 고른 페이지를 그린다."""
     inject_custom_css()
     nav = st.navigation([
         st.Page(page_overview, title="통합 관제", icon=":material/monitoring:", default=True),
