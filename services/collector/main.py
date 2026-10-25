@@ -88,6 +88,11 @@ def _fill(tables: domain.Tables, gap: domain.Gap) -> None:
             logger.exception("%s 수집 실패 (%s ~ %s)", gap.dataset, start, end)
             return
 
+        if not rows:
+            # 이 조각이 비면 뒷 조각도 아직 없다고 보고 멈춘다. 다음 틱에 같은 곳부터 다시 묻는다.
+            logger.info("%s 0행 수신 (%s ~ %s) — 이후 구간은 다음 틱에", gap.dataset, start, end)
+            return
+
         added = tables.add(gap.dataset, rows)
         logger.info("%s %d행 수신, %d행 추가", gap.dataset, len(rows), added)
         if added:
