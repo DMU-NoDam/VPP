@@ -86,6 +86,35 @@ def compute_horizon_margins(abs_residuals: np.ndarray, confidence: float = 0.9,
     return np.maximum.accumulate(margins)
 
 
+def compute_hourly_margins(abs_residuals: np.ndarray, hours: np.ndarray,
+                           confidence: float = 0.9, pool: int = 1) -> np.ndarray:
+    """하루 중 시간대(0~23시)별 margin 24개.
+
+    태양광/풍력은 이어서 예측하지 않아서(direct) "몇 시간 뒤"와 오차가 무관하고,
+    대신 "몇 시"에 따라 오차 크기가 크게 다르다 (태양광은 밤 0, 한낮 최대).
+    h시 margin은 h±pool시 오차를 묶어서(자정 넘어 순환) 분위수를 구한다.
+    """
+    r = np.asarray(abs_residuals, dtype=float)
+    hrs = np.asarray(hours, dtype=int)
+    margins = np.empty(24)
+    for h in range(24):
+        near = [(h + d) % 24 for d in range(-pool, pool + 1)]
+        window = r[np.isin(hrs, near)]
+        margins[h] = conformal_quantile(window[~np.isnan(window)], confidence)
+    return margins
+
+
+def apply_hourly_pi(y_pred: np.ndarray, margins_by_hour: np.ndarray, hours: np.ndarray,
+                    floor: float | None = 0.0) -> tuple[np.ndarray, np.ndarray]:
+    """i번째 예측값에 그 시각(hours[i])의 margin을 씌운다."""
+    y_pred = np.asarray(y_pred, dtype=float)
+    m = np.asarray(margins_by_hour, dtype=float)[np.asarray(hours, dtype=int)]
+    lower, upper = y_pred - m, y_pred + m
+    if floor is not None:
+        lower = np.maximum(lower, floor)
+    return lower, upper
+
+
 def apply_horizon_pi(y_pred: np.ndarray, margins: np.ndarray,
                      floor: float | None = 0.0) -> tuple[np.ndarray, np.ndarray]:
     """i번째 예측값에 margins[i]를 씌운다. floor가 있으면 하한을 그 값 아래로 내리지 않는다
@@ -114,12 +143,12 @@ if __name__ == "__main__":
     print("실제 저장된 demand LightGBM 모델로 conformal PI 검증")
     print("=" * 60)
 
-    target_col = "demand_mw"
-    feature_cols = ["hour", "dayofweek", "is_weekend",
-                     "demand_mw_lag_1h", "demand_mw_lag_24h", "demand_mw_lag_168h",
-                     "demand_mw_roll_mean_24h"]
+    from features import feature_columns
 
-    raw = get_mock_data("demand", start="2025-06-01", end="2026-01-01")
+    target_col = "demand_mw"
+    feature_cols = feature_columns("demand")
+
+    raw = get_mock_data("demand", start="2025-07-01", end="2026-10-01")
     df = build_features(raw, target_col)
 
     # 3구간으로 시간순 분할: train(학습) / calib(PI margin 계산용) / test(최종 검증)
@@ -131,11 +160,11 @@ if __name__ == "__main__":
 
     model = lgb.Booster(model_file=str(Path(__file__).parent / "models/saved/demand_lgbm.txt"))
 
-    calib_pred = model.predict(calib[feature_cols])
+    calib_pred = model.predict(calib[feature_cols].to_numpy(dtype=float))
     predict_with_pi = fit_conformal(calib[target_col].values, calib_pred, confidence=0.9)
     print(f"conformal margin: {predict_with_pi.margin:.1f} MW")
 
-    test_pred = model.predict(test[feature_cols])
+    test_pred = model.predict(test[feature_cols].to_numpy(dtype=float))
     lower, upper = predict_with_pi(test_pred)
 
     cov = coverage(test[target_col].values, lower, upper)

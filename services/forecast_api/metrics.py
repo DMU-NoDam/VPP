@@ -9,6 +9,10 @@ train_lgbm.py, train_lstm.py에 중복으로 들어있던 평가 함수를 여�
     태양광 예측  : nMAE ≤ 12%
     풍력 예측    : nMAE ≤ 15%
     90% PI       : Coverage ≥ 85%
+
+nMAE 정의: 평균 절대오차 ÷ 설비용량 × 100 (재생에너지 예측 업계 표준, 대시보드와 동일).
+과제 문서에 정의가 따로 없어서 이 정의를 쓰고 docs/api_spec.md에 명시한다.
+설비용량을 안 주면(capacity=None) 실제값 평균으로 나눈다 (참고용 nmae_mean).
 """
 
 from __future__ import annotations
@@ -43,11 +47,19 @@ def mape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return float(np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100)
 
 
-def nmae(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """정규화 평균절대오차(%) = MAE / 실제값 평균. 0이 섞여 있어도 안전하다."""
+def nmae(y_true: np.ndarray, y_pred: np.ndarray,
+         capacity: float | np.ndarray | None = None) -> float:
+    """정규화 평균절대오차(%) = MAE / 설비용량 × 100.
+
+    capacity: 설비용량(MW). 시점별 배열이면 평균을 쓴다.
+              None이면 실제값 평균으로 나눈다 (설비용량이 없는 수요 등 참고용).
+    """
     y_true = np.asarray(y_true, dtype=float)
     y_pred = np.asarray(y_pred, dtype=float)
-    denom = np.mean(np.abs(y_true))
+    if capacity is not None:
+        denom = float(np.mean(capacity))
+    else:
+        denom = np.mean(np.abs(y_true))
     if denom == 0:
         return float("nan")
     return float(np.mean(np.abs(y_true - y_pred)) / denom * 100)
@@ -68,11 +80,16 @@ def evaluate(
     y_pred: np.ndarray,
     lower: np.ndarray | None = None,
     upper: np.ndarray | None = None,
+    capacity: float | np.ndarray | None = None,
 ) -> dict[str, float]:
-    """forecast_api 응답의 "metrics" 필드에 그대로 넣을 수 있는 dict를 만든다."""
+    """forecast_api 응답의 "metrics" 필드에 그대로 넣을 수 있는 dict를 만든다.
+
+    capacity를 주면 nmae는 설비용량 기준, nmae_mean은 실제값 평균 기준(참고용).
+    """
     result = {
         "mape": mape(y_true, y_pred),
-        "nmae": nmae(y_true, y_pred),
+        "nmae": nmae(y_true, y_pred, capacity),
+        "nmae_mean": nmae(y_true, y_pred),
     }
     if lower is not None and upper is not None:
         result["coverage"] = coverage(y_true, lower, upper)

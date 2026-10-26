@@ -27,6 +27,7 @@ from torch import nn
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from data_client import available_range, get_mock_data
+from metrics import mape, nmae
 
 SAVED_DIR = Path(__file__).resolve().parent / "saved"
 SAVED_DIR.mkdir(exist_ok=True)
@@ -39,15 +40,7 @@ WEATHER_COLUMN = {"solar": "irradiance", "wind": "wind_speed"}
 LOOKBACK = 24  # 최근 24시간을 보고 다음 1시간을 예측
 
 
-def mape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    return float(np.mean(np.abs((y_true - y_pred) / y_true)) * 100)
-
-
-def nmae(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    return float(np.mean(np.abs(y_true - y_pred)) / np.mean(y_true) * 100)
-
-
-METRIC_FN = {"demand": mape, "solar": nmae, "wind": nmae}
+# 평가지표는 metrics.py와 같은 정의를 쓴다 (nMAE = MAE / 설비용량, LightGBM과 공정 비교)
 METRIC_NAME = {"demand": "MAPE", "solar": "nMAE", "wind": "nMAE"}
 
 
@@ -155,9 +148,13 @@ def train_one(target: str, start: str | None = None, end: str | None = None,
     actual = y_test * target_std + target_mean
     pred = np.clip(pred, 0, None)  # 발전량/수요는 음수 불가
 
-    metric_fn = METRIC_FN[target]
-    score = metric_fn(actual, pred)
-    print(f"Test {METRIC_NAME[target]}: {score:.2f}%  (학습시간 {elapsed:.1f}초)")
+    if target == "demand":
+        score = mape(actual, pred)
+        print(f"Test MAPE: {score:.2f}%  (학습시간 {elapsed:.1f}초)")
+    else:
+        score = nmae(actual, pred, test_raw["capacity_mw"].to_numpy())  # 설비용량 기준
+        score_mean = nmae(actual, pred)
+        print(f"Test nMAE: {score:.2f}% (실제평균 기준 {score_mean:.1f}%)  (학습시간 {elapsed:.1f}초)")
 
     compare = pd.DataFrame({
         "actual": actual[:5].round(1),
