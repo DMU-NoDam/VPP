@@ -4,7 +4,7 @@ fastapi==0.141.1
 starlette==1.7.0
 uvicorn[standard]==0.54.0
 pydantic==2.13.5
-numpy==2.5.3
+numpy==2.4.6
 
 # 최적화 코어
 # PuLP 4.0 은 Rust 코어로 재작성되며 LpVariable.dicts 등 기존 API 가 제거됐다.
