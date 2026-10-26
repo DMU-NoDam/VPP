@@ -96,6 +96,20 @@ def load_fuel_co2(path: Path | None = None) -> dict[str, float]:
     return {g["fuel"]: float(g["co2_ton_per_mwh"]) for g in raw.get("generators", [])}
 
 
+def load_unit_fuels(path: Path | None = None) -> dict[str, str]:
+    """generators.yaml 의 유닛 id → 연료 코드 (MILP 유닛별 출력을 발전원으로 묶는 데 쓴다).
+
+    못 찾으면 빈 dict. MilpResponse 의 units 에는 연료가 없어서 이 표가 필요하다.
+    """
+    if path is None:
+        path = next((p for p in _config_candidates("generators.yaml", "GENERATORS_CONFIG")
+                     if p.exists()), None)
+        if path is None:
+            return {}
+    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    return {g["id"]: g["fuel"] for g in raw.get("generators", [])}
+
+
 def load_settings(path: Path | None = None) -> Settings:
     """dashboard.yaml 을 읽는다. path 를 안 주면 _config_candidates() 에서 찾는다."""
     if path is None:
@@ -294,7 +308,43 @@ def parse_milp(data: dict, latency_s: float | None = None) -> dict | None:
         "carbon_by_fuel_ton": {k: float(v) for k, v in data["carbon"]["by_fuel_ton"].items()},
         "carbon_intensity": float(data["carbon"]["intensity_ton_per_mwh"]),
         "rule_carbon_ton": float(base["carbon_total_ton"]),  # Rule-based 는 ESS 를 쓰지 않는다
+        # Merit Order 스택용. units 는 include_units 로 요청했을 때만 있다
+        "timestamps": [pd.Timestamp(ts) for ts in data["timestamps"]],
+        "fuel_order": [m["fuel"] for m in sorted(data["merit_order"], key=lambda m: m["rank"])],
+        "demand_mw": [float(h["demand_mw"]) for h in data["hours"]],
+        "ess_mw": [float(h["ess_mw"]) for h in data["hours"]],
+        "units": data.get("units") or [],
     }
+
+
+def milp_fuel_stack(milp: dict, unit_fuel: dict[str, str]) -> pd.DataFrame:
+    """MILP 유닛 x 시간 출력 → 발전원별 시간대 출력 (hour, fuel, mw) + ESS 충·방전.
+
+    발전원 순서는 응답의 merit_order(연료비 순위)다. ESS 는 방전을 공급(+), 충전을 부하(−)로
+    둔다 — 균형식 Σp + (방전 − 충전) = 순수요 (formulation.md 5.2). 연료를 모르는 유닛은
+    "unknown" 으로 묶는다. units 가 없으면 빈 표.
+    """
+    if not milp["units"]:
+        return pd.DataFrame(columns=["hour", "fuel", "mw"])
+    start = milp["timestamps"][0]
+    units = pd.DataFrame(milp["units"])
+    units["hour"] = ((pd.to_datetime(units["timestamp"]) - start)
+                     / pd.Timedelta(hours=1)).round().astype(int)
+    units["fuel"] = units["unit_id"].map(unit_fuel).fillna("unknown")
+    stack = units.groupby(["hour", "fuel"], as_index=False)["p_mw"].sum()
+    stack = stack.rename(columns={"p_mw": "mw"})
+    order = [*milp["fuel_order"], "unknown"]
+    stack["rank"] = stack["fuel"].map({f: i for i, f in enumerate(order)})
+    stack = stack.sort_values(["rank", "hour"]).drop(columns="rank")
+    ess = pd.Series(milp["ess_mw"])
+    extra = pd.DataFrame({
+        "hour": list(ess.index) * 2,
+        "fuel": ["ess_discharge"] * len(ess) + ["ess_charge"] * len(ess),
+        "mw": list(ess.clip(lower=0)) + list(ess.clip(upper=0)),
+    })
+    if (extra["mw"] != 0).any():
+        stack = pd.concat([stack, extra[extra["mw"] != 0]], ignore_index=True)
+    return stack.reset_index(drop=True)
 
 
 def _pct(after: float, before: float) -> float:

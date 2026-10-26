@@ -244,6 +244,16 @@ def _milp_response(status: str = "optimal", hours: int = 24, carbon: float = 744
             "peak_reduction_pct": 5.0, "target_met": True,
         },
         "notes": ["mode=cost"],
+        "merit_order": [{"rank": 2, "fuel": "lng"}, {"rank": 1, "fuel": "nuclear"}],
+        # 0시 충전 500 MW, 1시 방전 300 MW, 나머지 0 → Σp + ESS = 순수요
+        "hours": [{"demand_mw": 50_000.0, "ess_mw": {0: -500.0, 1: 300.0}.get(h, 0.0)}
+                  for h in range(hours)],
+        "units": [
+            {"timestamp": f"2026-09-17T{h:02d}:00:00+09:00", "unit_id": uid, "on": True,
+             "p_mw": mw + {0: 500.0, 1: -300.0}.get(h, 0.0) * (uid == "lng_1")}
+            for h in range(hours)
+            for uid, mw in (("nuclear_1", 30_000.0), ("lng_1", 20_000.0))
+        ],
     }
 
 
@@ -303,6 +313,31 @@ def test_milp_carbon_by_fuel() -> None:
     table = logic.milp_carbon_by_fuel(with_ess, no_ess, {"lng": "가스"})
     assert list(table["발전원"]) == ["bituminous_coal", "가스"]
     assert table["차이(tCO2)"].sum() == 6000
+
+
+def test_load_unit_fuels_reads_repo_config() -> None:
+    fuels = logic.load_unit_fuels(CONFIG.parent / "generators.yaml")
+    assert fuels["nuclear_1"] == "nuclear"
+    assert set(fuels.values()) <= {"nuclear", "bituminous_coal", "anthracite", "lng", "oil",
+                                   "hydro"}
+
+
+def test_milp_fuel_stack_balances_net_demand() -> None:
+    milp = logic.parse_milp(_milp_response())
+    stack = logic.milp_fuel_stack(milp, {"nuclear_1": "nuclear", "lng_1": "lng"})
+    # merit order 순 (rank 1 원자력 먼저), ESS 는 뒤에
+    assert list(dict.fromkeys(stack.fuel)) == ["nuclear", "lng", "ess_discharge", "ess_charge"]
+    # 시간마다 발전 + (방전 − 충전) = 순수요
+    by_hour = stack.groupby("hour")["mw"].sum()
+    assert by_hour.tolist() == pytest.approx(milp["demand_mw"])
+    assert stack.loc[stack.fuel == "ess_charge", "mw"].tolist() == [-500.0]
+
+
+def test_milp_fuel_stack_unknown_unit_and_no_units() -> None:
+    milp = logic.parse_milp(_milp_response())
+    assert "unknown" in set(logic.milp_fuel_stack(milp, {"nuclear_1": "nuclear"}).fuel)
+    milp["units"] = []
+    assert logic.milp_fuel_stack(milp, {}).empty
 
 
 def test_milp_ess_frame() -> None:
@@ -529,8 +564,10 @@ def test_app_renders_with_milp(monkeypatch, fresh_cache) -> None:
     assert "MILP 09/17 계획" in page          # 최적화 결과 (cost 모드)
     assert "MILP·peak 09/17 계획" in page     # ESS (peak_shaving 모드)
     assert "Rule-based 대비" in page          # 탄소 (ESS 연계 / ESS 없음)
-    assert {(c.get("ess_mode"), c.get("use_ess", True)) for c in calls} == {
-        (None, True), ("peak_shaving", True), (None, False)}
+    assert "순수요 기준" in page              # Merit Order 계획 스택
+    # 기본 계획만 유닛 출력을 받는다
+    assert {(c.get("ess_mode"), c.get("use_ess", True), c["include_units"]) for c in calls} == {
+        (None, True, True), ("peak_shaving", True, False), (None, False, False)}
 
 
 def test_app_adjust_controls(monkeypatch) -> None:

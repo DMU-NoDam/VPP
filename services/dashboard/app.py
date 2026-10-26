@@ -95,6 +95,9 @@ COLLECTOR_FUEL_COLOR = {
     "hydro": FUEL_COLOR["hydro"], "pumped": "#60a5fa", "solar": FUEL_COLOR["solar"],
     "wind": FUEL_COLOR["wind"], "renewable": "#4ade80",
 }
+# MILP 계획 스택에만 있는 항목 (logic.milp_fuel_stack)
+PLAN_EXTRA_KO = {"ess_discharge": "ESS 방전", "ess_charge": "ESS 충전", "unknown": "기타"}
+PLAN_EXTRA_COLOR = {"ess_discharge": "#e879f9", "ess_charge": "#a21caf", "unknown": C_TEXT}
 # 실측 발전원 → 아이콘 (gen_icon 은 6종만 있다)
 REAL_ICON = {
     "nuclear": "nuclear", "bituminous_coal": "coal", "anthracite": "coal", "lng": "lng",
@@ -308,12 +311,13 @@ def stochastic_result(ctx: Context, label: str = "") -> tuple[dict, str]:
 
 @st.cache_data(ttl=300, show_spinner="MILP 급전 계획 계산 중…")
 def fetch_milp(base_url: str, ess_mode: str | None, timeout: float,
-               use_ess: bool = True) -> ApiResult:
+               use_ess: bool = True, include_units: bool = False) -> ApiResult:
     """POST /dispatch/milp. 수요를 주지 않으면 dispatch_api 가 수집 데이터의 최신 연속 24h 를 쓴다.
 
-    ess_mode None 은 config/ess.yaml 기본(cost). 유닛 x 시간 급전값은 화면에서 안 써서 뺀다.
+    ess_mode None 은 config/ess.yaml 기본(cost). 유닛 x 시간 급전값(응답 ~70KB)은 Merit Order
+    스택이 쓰는 기본 계획에서만 받는다.
     """
-    payload: dict = {"include_units": False}
+    payload: dict = {"include_units": include_units}
     if ess_mode:
         payload["ess_mode"] = ess_mode
     if not use_ess:
@@ -331,7 +335,9 @@ def milp_result(ctx: Context, ess_mode: str | None = None, use_ess: bool = True)
     """
     if not ctx.health["dispatch_api"].ok:
         return None
-    res = fetch_milp(ctx.urls["dispatch_api"], ess_mode, ctx.settings.timeout_s, use_ess)
+    # 기본 계획(cost 모드 + ESS)만 유닛 출력을 받는다 — 같은 인자라야 캐시를 같이 쓴다
+    units = ess_mode is None and use_ess
+    res = fetch_milp(ctx.urls["dispatch_api"], ess_mode, ctx.settings.timeout_s, use_ess, units)
     try:
         return logic.parse_milp(res.data, res.latency_s) if res.ok else None
     except (KeyError, TypeError, ValueError):
@@ -760,10 +766,33 @@ def render_realtime_card(ctx: Context) -> None:
         ) + "</div>")
 
 
+MERIT_PLAN, MERIT_REAL = "MILP 계획", "KPX 실측"
+
+
 def render_merit_order(ctx: Context) -> None:
-    """시간대별 발전원 스택 (연료비 순) + 수요선. collector 실측이 있으면 실측 하루치."""
-    if ctx.real is not None:
-        _render_real_mix(ctx.real)
+    """시간대별 발전원 스택 (연료비 순) + 수요선.
+
+    MILP 계획과 collector 실측이 둘 다 있으면 카드 안에서 고른다 (기본 MILP 계획).
+    하나만 있으면 그것, 둘 다 없으면 목업.
+    """
+    plan = milp_result(ctx)
+    if plan is not None and not plan["units"]:
+        plan = None
+    sources = [name for name, ok in ((MERIT_PLAN, plan), (MERIT_REAL, ctx.real)) if ok]
+    if sources:
+        with card():
+            head = st.empty()  # 제목은 고른 출처에 따라 달라서 토글 뒤에 채운다
+            choice = sources[0]
+            if len(sources) > 1:
+                choice = st.segmented_control(
+                    "Merit Order 출처", sources, default=sources[0], key="merit_source",
+                    label_visibility="collapsed",
+                ) or sources[0]
+            height = H_MERIT - (40 if len(sources) > 1 else 0)
+            if choice == MERIT_PLAN:
+                _render_plan_mix(head, plan, height)
+            else:
+                _render_real_mix(head, ctx.real, height)
         return
     s, df = ctx.settings, ctx.df
     fleet = sorted(s.fleet, key=lambda f: f.fuel_cost_won_per_kwh)
@@ -787,30 +816,67 @@ def render_merit_order(ctx: Context) -> None:
                         config=NO_BAR)
 
 
-def _render_real_mix(real: RealMix) -> None:
+@st.cache_data(show_spinner=False)
+def unit_fuels() -> dict[str, str]:
+    """유닛 id → 연료 코드 (config/generators.yaml, C 담당)."""
+    return logic.load_unit_fuels()
+
+
+def _render_plan_mix(head: DeltaGenerator, plan: dict, height: int) -> None:
+    """MILP 계획의 발전원별 출력을 merit order(연료비 순)로 쌓고 순수요선.
+
+    ESS 는 방전을 위(+), 충전을 아래(−)로 쌓는다. 태양광·풍력은 순수요에서 이미 빠져 있다.
+    """
+    stack = logic.milp_fuel_stack(plan, unit_fuels())
+    codes = list(dict.fromkeys(stack["fuel"]))
+    ko = {**COLLECTOR_FUEL_KO, **PLAN_EXTRA_KO}
+    colors = {**COLLECTOR_FUEL_COLOR, **PLAN_EXTRA_COLOR}
+    names = [ko.get(f, f) for f in codes]
+    fuels = [ko.get(f, f) for f in plan["fuel_order"]]
+    with head.container():
+        html(f'<div class="vpp-kpi-head"><span>Merit Order 스택{milp_tag(plan)}</span>'
+             f'<small>{" < ".join(fuels)} (연료비 순) · 순수요 기준</small></div>')
+    fig = px.bar(
+        stack.assign(발전원=stack.fuel.map(lambda f: ko.get(f, f))),
+        x="hour", y="mw", color="발전원",
+        category_orders={"발전원": names},
+        color_discrete_map={ko.get(f, f): colors.get(f, C_TEXT) for f in codes},
+        labels={"hour": "시간", "mw": "MW", "발전원": ""},
+    )
+    fig.add_scatter(
+        x=list(range(len(plan["demand_mw"]))), y=plan["demand_mw"], mode="lines",
+        name="순수요", line=dict(color=C_BRIGHT, width=2, dash="dot"),
+    )
+    fig.update_traces(marker_line_width=0, selector=dict(type="bar"))
+    fig.update_layout(barmode="relative", bargap=0.22)
+    st.plotly_chart(_compact_chart(fig, height), width="stretch", key="c_merit",
+                    config=NO_BAR)
+
+
+def _render_real_mix(head: DeltaGenerator, real: RealMix, height: int) -> None:
     """실측 발전 믹스 (collector trading_by_fuel) 를 연료비 순으로 쌓고 같은 날 실측 수요선."""
     names = [COLLECTOR_FUEL_KO.get(f, f) for f in real.order]
     mix = real.mix.assign(발전원=real.mix.fuel.map(lambda f: COLLECTOR_FUEL_KO.get(f, f)))
     demand = mix.groupby("hour")["demand_mw"].first()
-    with card():
+    with head.container():
         html(f'<div class="vpp-kpi-head"><span>Merit Order 스택{real.tag}</span>'
              f'<small>{" < ".join(names)} (연료비 순)</small></div>')
-        fig = px.bar(
-            mix, x="hour", y="mw", color="발전원",
-            category_orders={"발전원": names},
-            color_discrete_map={COLLECTOR_FUEL_KO.get(f, f): COLLECTOR_FUEL_COLOR.get(f, C_TEXT)
-                                for f in real.order},
-            labels={"hour": "시간", "mw": "MW", "발전원": ""},
+    fig = px.bar(
+        mix, x="hour", y="mw", color="발전원",
+        category_orders={"발전원": names},
+        color_discrete_map={COLLECTOR_FUEL_KO.get(f, f): COLLECTOR_FUEL_COLOR.get(f, C_TEXT)
+                            for f in real.order},
+        labels={"hour": "시간", "mw": "MW", "발전원": ""},
+    )
+    if demand.notna().any():
+        fig.add_scatter(
+            x=demand.index, y=demand.values, mode="lines", name="수요",
+            line=dict(color=C_BRIGHT, width=2, dash="dot"),
         )
-        if demand.notna().any():
-            fig.add_scatter(
-                x=demand.index, y=demand.values, mode="lines", name="수요",
-                line=dict(color=C_BRIGHT, width=2, dash="dot"),
-            )
-        fig.update_traces(marker_line_width=0, selector=dict(type="bar"))
-        fig.update_layout(barmode="stack", bargap=0.22)
-        st.plotly_chart(_compact_chart(fig, H_MERIT), width="stretch", key="c_merit",
-                        config=NO_BAR)
+    fig.update_traces(marker_line_width=0, selector=dict(type="bar"))
+    fig.update_layout(barmode="stack", bargap=0.22)
+    st.plotly_chart(_compact_chart(fig, height), width="stretch", key="c_merit",
+                    config=NO_BAR)
 
 
 def render_optimization(ctx: Context) -> None:
