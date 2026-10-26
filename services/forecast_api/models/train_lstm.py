@@ -33,6 +33,8 @@ SAVED_DIR.mkdir(exist_ok=True)
 
 TARGET_COLUMN = {"demand": "demand_mw", "solar": "solar_mw", "wind": "wind_mw"}
 # target 자신 외에 같이 넣어줄 날씨 covariate. 없으면(demand) 단변량으로 학습.
+# LSTM은 입력 차원이 너무 커지지 않게 지점 "평균" 컬럼 하나만 쓴다
+# (LightGBM은 지점별 컬럼까지 전부 사용 — train_lgbm.FEATURE_COLUMNS).
 WEATHER_COLUMN = {"solar": "irradiance", "wind": "wind_speed"}
 LOOKBACK = 24  # 최근 24시간을 보고 다음 1시간을 예측
 

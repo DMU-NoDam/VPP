@@ -12,8 +12,9 @@ collector의 domain.py 기준 실제 컬럼:
 
 target별로 반환되는 DataFrame은 항상 아래 형태를 따른다.
 - demand : columns = ["datetime", "demand_mw"]
-- solar  : columns = ["datetime", "solar_mw", "irradiance"]
-- wind   : columns = ["datetime", "wind_mw", "wind_speed"]
+- solar  : columns = ["datetime", "solar_mw", "irradiance_108", ..., "irradiance_143", "irradiance"]
+- wind   : columns = ["datetime", "wind_mw", "wind_speed_100", ..., "wind_speed_252", "wind_speed"]
+  (지점별 컬럼 + 마지막은 지점 평균. 지점 목록은 SOLAR_STATIONS / WIND_STATIONS)
 
 단위 메모:
 - trade_mwh 는 1시간 거래량(MWh)이라 그 시간의 평균 출력(MW)과 수치가 같다 → solar_mw/wind_mw로 그대로 사용
@@ -27,6 +28,7 @@ target별로 반환되는 DataFrame은 항상 아래 형태를 따른다.
 from __future__ import annotations
 
 import os
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -60,13 +62,27 @@ MIN_HOURS_REQUIRED = 24 * 10  # 168h + 여유 72h
 
 SOLAR_FUEL_CODE = "solar"
 WIND_FUEL_CODE = "wind"
-WEATHER_STATION_ID = 108  # 서울, weather.csv에 있는 유일한 지점
 
-# target -> (발전원 코드, weather 원본 컬럼, 반환 컬럼명)
+# 기상 관측 지점 (collector sources/kma_weather.py 의 STATION_IDS 와 맞춘다)
+# 태양광: 설비가 많은 지역의 일사량 / 풍력: 풍력단지 근처의 풍속
+SOLAR_STATIONS = (108, 165, 156, 146, 129, 136, 143)  # 서울, 목포, 광주, 전주, 서산, 안동, 대구
+WIND_STATIONS = (100, 216, 277, 185, 188, 252)        # 대관령, 태백, 영덕, 고산, 성산, 영광군
+
+# target -> (발전원 코드, weather 원본 컬럼, 반환 컬럼 접두어, 지점 목록)
+# 반환 컬럼: 지점별 "{접두어}_{지점번호}" + 지점 평균 "{접두어}"
+#   예) irradiance_165, ..., irradiance(평균)
 _RENEWABLE = {
-    "solar": (SOLAR_FUEL_CODE, "solar_radiation_mj", "irradiance"),
-    "wind": (WIND_FUEL_CODE, "wind_speed_ms", "wind_speed"),
+    "solar": (SOLAR_FUEL_CODE, "solar_radiation_mj", "irradiance", SOLAR_STATIONS),
+    "wind": (WIND_FUEL_CODE, "wind_speed_ms", "wind_speed", WIND_STATIONS),
 }
+
+
+def weather_columns(target: str) -> list[str]:
+    """target이 쓰는 기상 컬럼 이름 목록 (지점별 + 평균). demand는 빈 목록."""
+    if target not in _RENEWABLE:
+        return []
+    _, _, prefix, stations = _RENEWABLE[target]
+    return [f"{prefix}_{s}" for s in stations] + [prefix]
 
 
 def _hourly_index(start: str, end: str) -> pd.DatetimeIndex:
@@ -125,10 +141,17 @@ def _read_trading_by_fuel(fuel: str) -> pd.DataFrame:
     return df.rename(columns={"ts": "datetime", "trade_mwh": "mw"})
 
 
-def _read_weather() -> pd.DataFrame:
-    df = pd.read_csv(DATA_DIR / "weather.csv", parse_dates=["observed_at"], na_values=[MISSING])
-    df = df[df["station_id"] == WEATHER_STATION_ID]
+@lru_cache(maxsize=2)
+def _read_weather_cached(path: str, mtime: float) -> pd.DataFrame:
+    """weather.csv는 13개 지점 × 1시간이라 커서(15만 행+) 매번 읽으면 느리다.
+    파일 수정시각(mtime)을 키로 캐시해서, collector가 파일을 갱신하면 자동으로 다시 읽는다."""
+    df = pd.read_csv(path, parse_dates=["observed_at"], na_values=[MISSING])
     return df.rename(columns={"observed_at": "datetime"})
+
+
+def _read_weather() -> pd.DataFrame:
+    path = DATA_DIR / "weather.csv"
+    return _read_weather_cached(str(path), path.stat().st_mtime)
 
 
 def _filter_range(df: pd.DataFrame, start: str, end: str) -> pd.DataFrame:
@@ -145,23 +168,40 @@ def _to_hourly(df: pd.DataFrame, col: str) -> pd.DataFrame:
 def _fallback(target: str, n_hours: int, start: str, end: str) -> pd.DataFrame:
     print(f"[data_client] 경고: {target} 실데이터가 {n_hours}시간뿐 "
           f"(최소 {MIN_HOURS_REQUIRED}시간 필요) → 목업으로 대체")
-    return _SYNTHETIC[target](start, end)
+    df = _SYNTHETIC[target](start, end)
+    if target in _RENEWABLE:
+        # 목업은 평균 컬럼 하나뿐이라, 지점별 컬럼은 같은 값으로 채워 컬럼 구성을 맞춘다
+        prefix = _RENEWABLE[target][2]
+        for col in weather_columns(target)[:-1]:
+            df[col] = df[prefix]
+    return df
 
 
-def get_weather(target: str, start: str, end: str) -> pd.Series:
-    """solar/wind 예측에 쓰는 기상 변수(irradiance / wind_speed)를 시간 단위 Series로 반환.
+def get_weather(target: str, start: str, end: str) -> pd.DataFrame:
+    """solar/wind 예측에 쓰는 기상 변수를 시간 단위 DataFrame(index=datetime)으로 반환.
 
-    forecast_engine이 "미래 구간의 기상 예보" 자리에 쓴다. 지금은 예보 API가 없어서
-    해당 시각의 관측값을 예보값 대용으로 쓰고, 관측값도 없으면 빈 Series를 돌려준다.
+    컬럼: 지점별 "{접두어}_{지점}" + 지점 평균 "{접두어}" (weather_columns 참고)
+    forecast_engine이 "미래 구간의 기상 예보" 자리에도 쓴다. 지금은 예보 API가 없어서
+    해당 시각의 관측값을 예보값 대용으로 쓰고, 관측값도 없으면 빈 DataFrame을 돌려준다.
     """
-    _, src_col, out_col = _RENEWABLE[target]
-    w = _filter_range(_read_weather(), start, end)[["datetime", src_col]]
+    _, src_col, prefix, stations = _RENEWABLE[target]
+    cols = weather_columns(target)
+
+    w = _filter_range(_read_weather(), start, end)
+    w = w[w["station_id"].isin(stations)]
+    if w.empty:
+        return pd.DataFrame(columns=cols, index=pd.DatetimeIndex([], name="datetime"))
+
+    wide = w.pivot_table(index="datetime", columns="station_id", values=src_col, aggfunc="mean",
+                         dropna=False)
+    wide = wide.reindex(columns=list(stations))
     if target == "solar":
-        w[src_col] = w[src_col].fillna(0.0)  # 밤 일사량 "None" → 0
-    s = w.set_index("datetime")[src_col].resample("h").mean()
-    s = s.interpolate(limit_direction="both")
-    s.name = out_col
-    return s
+        wide = wide.fillna(0.0)  # 밤 일사량 "None" → 0
+    wide = wide.resample("h").mean().interpolate(limit_direction="both")
+    wide.columns = [f"{prefix}_{s}" for s in stations]
+    wide[prefix] = wide.mean(axis=1)  # 지점 평균
+    wide.index.name = "datetime"
+    return wide[cols]
 
 
 def get_demand(start: str, end: str) -> pd.DataFrame:
@@ -174,8 +214,9 @@ def get_demand(start: str, end: str) -> pd.DataFrame:
 
 
 def _get_renewable(target: str, start: str, end: str) -> pd.DataFrame:
-    fuel, _, weather_col = _RENEWABLE[target]
+    fuel = _RENEWABLE[target][0]
     target_col = f"{target}_mw"
+    cols = weather_columns(target)
 
     gen = _filter_range(_read_trading_by_fuel(fuel), start, end)
     gen_hourly = _to_hourly(gen, "mw").rename(columns={"mw": target_col}) if len(gen) else gen
@@ -185,8 +226,8 @@ def _get_renewable(target: str, start: str, end: str) -> pd.DataFrame:
     gen_hourly[target_col] = gen_hourly[target_col].clip(lower=0)
     weather = get_weather(target, start, end).reset_index()
     merged = pd.merge(gen_hourly, weather, on="datetime", how="left")
-    merged[weather_col] = merged[weather_col].interpolate(limit_direction="both").fillna(0.0)
-    return merged[["datetime", target_col, weather_col]]
+    merged[cols] = merged[cols].interpolate(limit_direction="both").fillna(0.0)
+    return merged[["datetime", target_col, *cols]]
 
 
 def get_solar(start: str, end: str) -> pd.DataFrame:

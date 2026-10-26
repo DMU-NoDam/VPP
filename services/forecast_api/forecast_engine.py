@@ -14,7 +14,7 @@ import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
-from data_client import get_mock_data, get_weather
+from data_client import get_mock_data, get_weather, weather_columns
 from features import build_features
 from metrics import evaluate
 from models.train_lgbm import FEATURE_COLUMNS, TARGET_COLUMN
@@ -25,7 +25,7 @@ SAVED_DIR = Path(__file__).resolve().parent / "models" / "saved"
 # 미래 시점의 날씨(irradiance/wind_speed)는 원래 기상청 "예보"를 써야 하지만,
 # 예보 API가 아직 없어서 data_client.get_weather로 해당 시각의 "관측값"을
 # 예보값 대용으로 쓴다. 예보 API가 생기면 get_weather만 바꿔치기하면 된다.
-WEATHER_COLUMN = {"solar": "irradiance", "wind": "wind_speed"}
+# 기상 컬럼(지점별 + 평균)은 data_client.weather_columns(target)으로 가져온다.
 
 
 def _load_model(target: str, model_name: str) -> tuple[lgb.Booster, str]:
@@ -70,17 +70,17 @@ def _recursive_forecast(
     # 값 조회를 빠르게 하기 위해 datetime -> target_col 값 dict로 관리
     values: dict[pd.Timestamp, float] = dict(zip(history["datetime"], history[target_col]))
 
-    weather_col = WEATHER_COLUMN.get(target)
+    weather_cols = weather_columns(target)  # demand면 빈 목록
     future_start = history["datetime"].max() + pd.Timedelta(hours=1)
 
     future_weather = None
     hourly_profile = None
-    if weather_col is not None:
+    if weather_cols:
         # 미래 구간의 "예보값" 자리 — 예보 API가 없어서 해당 시각의 관측값을 대용으로 쓴다.
         future_end = future_start + pd.Timedelta(hours=horizon_hours)
         future_weather = get_weather(target, start=str(future_start), end=str(future_end))
         # 관측값도 없는 시각(데이터 끝 이후)은 과거 데이터의 "시간대별 평균"으로 채운다.
-        hourly_profile = history.groupby(history["datetime"].dt.hour)[weather_col].mean()
+        hourly_profile = history.groupby(history["datetime"].dt.hour)[weather_cols].mean()
 
     rows = []
     for step in range(horizon_hours):
@@ -94,11 +94,13 @@ def _recursive_forecast(
         recent_24 = [values[ts - pd.Timedelta(hours=h)] for h in range(1, 25)]
         row[f"{target_col}_roll_mean_24h"] = float(np.mean(recent_24))
 
-        if weather_col is not None:
-            value = future_weather.get(ts, np.nan)
-            if pd.isna(value):
-                value = hourly_profile.get(ts.hour, 0.0)
-            row[weather_col] = float(value)
+        if weather_cols:
+            observed = future_weather.loc[ts] if ts in future_weather.index else None
+            for c in weather_cols:
+                value = np.nan if observed is None else observed[c]
+                if pd.isna(value):
+                    value = hourly_profile.at[ts.hour, c] if ts.hour in hourly_profile.index else 0.0
+                row[c] = float(value)
 
         # DataFrame을 매 스텝 만들면 느려서(백테스트에서 수만 번 호출) numpy 1행으로 넘긴다.
         X = np.array([[row[c] for c in feature_cols]], dtype=float)

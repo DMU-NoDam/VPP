@@ -35,7 +35,7 @@ import pandas as pd
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))  # forecast_api/ 를 import 경로에 추가
 
-from data_client import available_range, get_mock_data
+from data_client import available_range, get_mock_data, weather_columns
 from features import build_features
 from metrics import PRIMARY_METRIC, mape, nmae
 from pi import apply_horizon_pi, compute_horizon_margins
@@ -43,19 +43,20 @@ from pi import apply_horizon_pi, compute_horizon_margins
 SAVED_DIR = Path(__file__).resolve().parent / "saved"
 SAVED_DIR.mkdir(exist_ok=True)
 
-# feature 컬럼 정의: target별로 쓸 수 있는 컬럼이 조금씩 다르다
-FEATURE_COLUMNS = {
-    "demand": ["hour", "dayofweek", "is_weekend",
-               "demand_mw_lag_1h", "demand_mw_lag_24h", "demand_mw_lag_168h",
-               "demand_mw_roll_mean_24h"],
-    "solar": ["hour", "dayofweek", "is_weekend", "irradiance",
-              "solar_mw_lag_1h", "solar_mw_lag_24h", "solar_mw_lag_168h",
-              "solar_mw_roll_mean_24h"],
-    "wind": ["hour", "dayofweek", "is_weekend", "wind_speed",
-             "wind_mw_lag_1h", "wind_mw_lag_24h", "wind_mw_lag_168h",
-             "wind_mw_roll_mean_24h"],
-}
 TARGET_COLUMN = {"demand": "demand_mw", "solar": "solar_mw", "wind": "wind_mw"}
+
+
+def _feature_columns(target: str) -> list[str]:
+    """시간 피처 + 기상(지점별 + 평균, solar/wind만) + lag/rolling 피처."""
+    col = TARGET_COLUMN[target]
+    return (["hour", "dayofweek", "is_weekend"]
+            + weather_columns(target)
+            + [f"{col}_lag_1h", f"{col}_lag_24h", f"{col}_lag_168h", f"{col}_roll_mean_24h"])
+
+
+# feature 컬럼 정의: target별로 쓸 수 있는 컬럼이 조금씩 다르다
+# (solar: 일사량 7개 지점 + 평균 / wind: 풍속 6개 지점 + 평균 — data_client.weather_columns)
+FEATURE_COLUMNS = {t: _feature_columns(t) for t in TARGET_COLUMN}
 
 # target별로 어떤 평가지표를 쓸지 (스펙 기준: 수요=MAPE, 재생에너지=nMAE)
 METRIC_FN = {"demand": mape, "solar": nmae, "wind": nmae}
