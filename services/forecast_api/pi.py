@@ -50,6 +50,54 @@ def fit_conformal(y_true_calib: np.ndarray, y_pred_calib: np.ndarray,
     return predict_with_pi
 
 
+# --- 예측 시간대별(horizon-wise) conformal --------------------------------------
+#
+# 위 방식은 "1시간 앞 예측"의 오차로 margin을 정한다. 그런데 API는 1시간씩 이어서
+# 24~168시간을 예측하므로(recursive), 먼 미래일수록 오차가 쌓여 margin이 모자란다.
+# 그래서 calibration 구간에서 실제로 이어서 예측해보고, "h시간 뒤 예측"의 오차로
+# h번째 margin을 따로 정한다 → 가까운 미래는 좁고, 먼 미래는 넓은 구간이 된다.
+
+
+def conformal_quantile(residuals: np.ndarray, confidence: float = 0.9) -> float:
+    """split conformal의 유한표본 보정 분위수: ceil((n+1)·conf)/n 지점.
+    단순 np.quantile(conf)보다 살짝 보수적이라 커버리지가 목표 아래로 덜 떨어진다."""
+    r = np.sort(np.asarray(residuals, dtype=float))
+    n = len(r)
+    if n == 0:
+        return float("nan")
+    q = min(1.0, np.ceil((n + 1) * confidence) / n)
+    return float(np.quantile(r, q, method="higher"))
+
+
+def compute_horizon_margins(abs_residuals: np.ndarray, confidence: float = 0.9,
+                            pool: int = 3) -> np.ndarray:
+    """(n_origins, H) 절대오차 행렬 -> 길이 H의 margin 배열.
+
+    - h번째 margin은 h±pool 시간 오차를 묶어서 분위수를 구한다 (표본 수 확보 + 매끄럽게).
+    - 먼 미래가 가까운 미래보다 좁아지지 않도록 누적 최댓값으로 단조 증가시킨다.
+    """
+    R = np.asarray(abs_residuals, dtype=float)
+    H = R.shape[1]
+    margins = np.empty(H)
+    for h in range(H):
+        lo, hi = max(0, h - pool), min(H, h + pool + 1)
+        window = R[:, lo:hi].ravel()
+        margins[h] = conformal_quantile(window[~np.isnan(window)], confidence)
+    return np.maximum.accumulate(margins)
+
+
+def apply_horizon_pi(y_pred: np.ndarray, margins: np.ndarray,
+                     floor: float | None = 0.0) -> tuple[np.ndarray, np.ndarray]:
+    """i번째 예측값에 margins[i]를 씌운다. floor가 있으면 하한을 그 값 아래로 내리지 않는다
+    (수요/발전량은 음수가 될 수 없음)."""
+    y_pred = np.asarray(y_pred, dtype=float)
+    m = np.asarray(margins, dtype=float)[: len(y_pred)]
+    lower, upper = y_pred - m, y_pred + m
+    if floor is not None:
+        lower = np.maximum(lower, floor)
+    return lower, upper
+
+
 if __name__ == "__main__":
     import sys
     from pathlib import Path

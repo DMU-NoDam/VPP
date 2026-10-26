@@ -69,7 +69,11 @@
 }
 ```
 
-- `metrics`는 과거 데이터 마지막 15%(calibration 구간)로 계산한 값. `primary_value`는 스펙 판정 지표(수요=MAPE, 태양광/풍력=nMAE).
+- `metrics`는 학습·PI 계산에 쓰지 않은 시험 구간(데이터 마지막 2주)에서 실제로 이어서 예측한 성적이다
+  (`horizon_hours` ≤ 24면 24h 성적, 그보다 길면 168h 성적). `primary_value`는 스펙 판정 지표(수요=MAPE, 태양광/풍력=nMAE),
+  `coverage`는 90% 예측구간 커버리지(%), `interval_width_mean`은 평균 구간 폭(MW), `n_origins`는 평가에 쓴 예측 시작 시점 수.
+- 예측구간은 시간대별 conformal 방식이다. 시험 구간 직전 4주(calibration)에서 168시간 이어서 예측한 오차로
+  "h시간 뒤" margin을 따로 정하므로, 먼 미래일수록 구간이 넓어진다 (`saved/{target}_pi.json`).
 - 단위: `demand`·`solar`·`wind` 모두 MW (발전량은 `trading_by_fuel.trade_mwh` 1시간 거래량 = 평균 MW).
 - `trading_by_fuel`이 2025-12-31까지만 있어서, 태양광/풍력 예측은 그 다음 시간부터 시작한다.
 - 미래 기상(일사량·풍속)은 예보 API가 없어서 해당 시각의 관측값을 대용으로 쓰고, 관측값도 없으면 과거 시간대별 평균을 쓴다.

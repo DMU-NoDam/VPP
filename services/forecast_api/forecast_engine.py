@@ -7,6 +7,7 @@ router.py는 이 모듈을 호출하기만 하고, HTTP 관련 코드는 여기 
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import lightgbm as lgb
@@ -17,7 +18,7 @@ from data_client import get_mock_data, get_weather
 from features import build_features
 from metrics import evaluate
 from models.train_lgbm import FEATURE_COLUMNS, TARGET_COLUMN
-from pi import fit_conformal
+from pi import apply_horizon_pi, fit_conformal
 
 SAVED_DIR = Path(__file__).resolve().parent / "models" / "saved"
 
@@ -99,7 +100,8 @@ def _recursive_forecast(
                 value = hourly_profile.get(ts.hour, 0.0)
             row[weather_col] = float(value)
 
-        X = pd.DataFrame([row])[feature_cols]
+        # DataFrame을 매 스텝 만들면 느려서(백테스트에서 수만 번 호출) numpy 1행으로 넘긴다.
+        X = np.array([[row[c] for c in feature_cols]], dtype=float)
         pred = float(model.predict(X)[0])
         pred = max(pred, 0.0)  # 발전량/수요는 음수가 될 수 없음
 
@@ -109,32 +111,71 @@ def _recursive_forecast(
     return pd.DataFrame(rows)
 
 
+def recursive_backtest(target: str, model, raw: pd.DataFrame,
+                       origins: list[pd.Timestamp], horizon_hours: int) -> dict[str, np.ndarray]:
+    """여러 시작 시점(origin)에서 실제로 horizon_hours만큼 이어서 예측해보고 결과를 모은다.
+
+    origin 이전 데이터만 보고 예측하므로 API가 실제로 하는 일과 똑같은 조건이다.
+    반환: {"pred": (n_origins, H), "actual": (n_origins, H)} — 실제값이 없는 칸은 NaN
+    """
+    target_col = TARGET_COLUMN[target]
+    feature_cols = FEATURE_COLUMNS[target]
+    actual = raw.set_index("datetime")[target_col]
+
+    preds, actuals = [], []
+    for origin in origins:
+        hist = raw[raw["datetime"] < origin]
+        f = _recursive_forecast(target, target_col, feature_cols, model, hist, horizon_hours)
+        preds.append(f["predicted"].to_numpy())
+        actuals.append(actual.reindex(f["datetime"]).to_numpy())
+    return {"pred": np.array(preds), "actual": np.array(actuals)}
+
+
+def _load_pi(target: str) -> dict | None:
+    """train_lgbm.py가 저장한 시간대별 PI margin + 시험구간 성적을 읽는다. 없으면 None."""
+    path = SAVED_DIR / f"{target}_pi.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def run_forecast(target: str, start_date: str, end_date: str,
                   horizon_hours: int, model_name: str = "auto",
                   pi_method: str = "conformal") -> dict:
-    """단일 target에 대한 예측 + PI + metrics를 전부 만들어서 반환."""
+    """단일 target에 대한 예측 + PI + metrics를 전부 만들어서 반환.
+
+    PI: saved/{target}_pi.json(학습 때 계산한 시간대별 margin)이 있으면 그걸 쓰고,
+        없으면 예전 방식(1시간 앞 예측 오차 기반 단일 margin)으로 대체한다.
+    metrics: pi.json이 있으면 "학습에 안 쓴 시험 구간에서 이어서 예측한" 성적
+             (24h 이하 요청이면 24h 성적, 그보다 길면 168h 성적)을 돌려준다.
+    """
     target_col = TARGET_COLUMN[target]
     feature_cols = FEATURE_COLUMNS[target]
 
     model, model_used = _load_model(target, model_name)
-
     raw = get_mock_data(target, start=start_date, end=end_date)
-    df = build_features(raw, target_col)
-
-    # calib/test로 나눠 conformal margin 계산 + 그 margin의 신뢰도(coverage) 검증
-    n = len(df)
-    calib = df.iloc[int(n * 0.85):]
-    calib_pred = model.predict(calib[feature_cols])
-    predict_with_pi = fit_conformal(calib[target_col].values, calib_pred, confidence=0.9)
-
-    # 검증용으로 calib 자체 coverage도 같이 계산해서 metrics에 포함
-    calib_lower, calib_upper = predict_with_pi(calib_pred)
-    metrics = evaluate(target, calib[target_col].values, calib_pred, calib_lower, calib_upper)
 
     # 실제 미래 예측 (recursive)
     forecast_df = _recursive_forecast(target, target_col, feature_cols, model, raw, horizon_hours)
-    lower, upper = predict_with_pi(forecast_df["predicted"].values)
-    forecast_df["lower_bound"] = np.maximum(lower, 0.0)
+    preds = forecast_df["predicted"].to_numpy()
+
+    pi_info = _load_pi(target)
+    if pi_info is not None and len(pi_info["margins"]) >= horizon_hours:
+        lower, upper = apply_horizon_pi(preds, np.array(pi_info["margins"]))
+        key = "24h" if horizon_hours <= 24 else "168h"
+        metrics = dict(pi_info["test_metrics"][key])
+    else:
+        # 폴백: 1시간 앞 예측 오차 기반 (먼 미래에서는 구간이 좁게 나온다)
+        df = build_features(raw, target_col)
+        calib = df.iloc[int(len(df) * 0.85):]
+        calib_pred = model.predict(calib[feature_cols])
+        predict_with_pi = fit_conformal(calib[target_col].values, calib_pred, confidence=0.9)
+        calib_lower, calib_upper = predict_with_pi(calib_pred)
+        metrics = evaluate(target, calib[target_col].values, calib_pred, calib_lower, calib_upper)
+        lower, upper = predict_with_pi(preds)
+        lower = np.maximum(lower, 0.0)
+
+    forecast_df["lower_bound"] = lower
     forecast_df["upper_bound"] = upper
 
     points = [
@@ -156,9 +197,7 @@ def run_forecast(target: str, start_date: str, end_date: str,
 
 
 if __name__ == "__main__":
-    import json
-
-    result = run_forecast("demand", start_date="2025-06-01", end_date="2026-01-01", horizon_hours=24)
+    result = run_forecast("demand", start_date="2025-07-01", end_date="2026-10-01", horizon_hours=24)
     print(f"model_used: {result['model_used']}")
     print(f"metrics: {result['metrics']}")
     print(f"points[:3]: {json.dumps(result['points'][:3], indent=2, default=str)}")
