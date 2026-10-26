@@ -18,12 +18,16 @@ config/dashboard.yaml 에 있다.
     forecast_api  GET  /health                         연결 상태
                   POST /api/v1/forecast                168h 수요 예측·90% PI (분석 상세)
     dispatch_api  GET  /health                         연결 상태
+                  POST /api/v1/dispatch/milp           MILP 절감률·비용·제약 (cost 모드),
+                                                       ESS 충방전·피크 감소 (peak_shaving 모드)
                   GET  /api/v1/dispatch/stochastic/latest  VSS (미리 계산, StochasticLatest)
                   POST /api/v1/scenarios               시나리오 생성기 페이지 (page_scenarios.py)
 응답이 없거나 계약이 아직 없는 패널은 목업으로 그린다. 서비스 응답을 쓴 패널에는 LIVE,
 목업으로 그린 패널에는 목업 태그를 단다 (ui.source_tag, ui.mock_tag).
 
-TODO(통합): /dispatch/milp 응답 계약이 정해지면 logic.sample_* 대신 파서를 붙인다.
+TODO(통합): 수급 게이지의 공급능력·예비율, 위기 시나리오는 아직 목업이다. MILP 계획은
+수집 데이터의 최신 연속 24h(관측 시각과 다른 날일 수 있음) 기준이라 실시간 게이지에 바로
+쓰지 않았다.
 """
 
 from __future__ import annotations
@@ -299,6 +303,39 @@ def stochastic_result(ctx: Context, label: str = "") -> tuple[dict, str]:
     if res.ok and res.data.get("state") in ("pending", "running"):
         return mock, mock_tag(f"{prefix}계산 중 · 목업")
     return mock, mock_tag(f"{prefix}목업")
+
+
+@st.cache_data(ttl=300, show_spinner="MILP 급전 계획 계산 중…")
+def fetch_milp(base_url: str, ess_mode: str | None, timeout: float) -> ApiResult:
+    """POST /dispatch/milp. 수요를 주지 않으면 dispatch_api 가 수집 데이터의 최신 연속 24h 를 쓴다.
+
+    ess_mode None 은 config/ess.yaml 기본(cost). 유닛 x 시간 급전값은 화면에서 안 써서 뺀다.
+    """
+    payload: dict = {"include_units": False}
+    if ess_mode:
+        payload["ess_mode"] = ess_mode
+    return logic.call_api("POST", f"{base_url}{API_PREFIX}/dispatch/milp", payload=payload,
+                          timeout=timeout)
+
+
+def milp_result(ctx: Context, ess_mode: str | None = None) -> dict | None:
+    """MILP 요약 (logic.parse_milp). 서비스가 없거나 해가 없으면 None — 호출한 쪽이 목업을 쓴다.
+
+    비용 비교는 기본 모드(cost), ESS 피크 감소 KPI 는 peak_shaving 으로 잰다
+    (formulation.md 5.3: cost 모드는 피크 감소를 보장하지 않는다).
+    """
+    if not ctx.health["dispatch_api"].ok:
+        return None
+    res = fetch_milp(ctx.urls["dispatch_api"], ess_mode, ctx.settings.timeout_s)
+    try:
+        return logic.parse_milp(res.data, res.latency_s) if res.ok else None
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def milp_tag(milp: dict, label: str = "MILP") -> str:
+    """MILP 계획 태그. 계획 날짜(수집 데이터의 최신 연속 24h)를 같이 쓴다."""
+    return real_tag(f"{label} {milp['day']:%m/%d} 계획")
 
 
 # ── 작은 그리기 도구 ─────────────────────────────────────────────────────────
@@ -765,9 +802,12 @@ def _render_real_mix(real: RealMix) -> None:
 
 
 def render_optimization(ctx: Context) -> None:
-    """최적화 결과 — MILP 절감률·비용·응답·제약 6종 + Two-Stage VSS."""
+    """최적화 결과 — MILP 절감률·비용·응답·제약 + Two-Stage VSS. dispatch_api 가 없으면 목업."""
     s = ctx.settings
-    milp = logic.sample_dispatch_summary(ctx.df)
+    live = milp_result(ctx)
+    milp = live or logic.sample_dispatch_summary(ctx.df)
+    tag = milp_tag(live) if live else mock_tag("MILP 목업")
+    latency_sub = f'풀이 {live["solve_s"]:.1f}초' if live else "MILP 풀이 시간"
     vss, vss_tag = stochastic_result(ctx)
     ok_saving = logic.meets(s, "milp_saving_pct", milp["saving_pct"])
     constraints = milp["constraints"]
@@ -791,16 +831,16 @@ def render_optimization(ctx: Context) -> None:
     with card():
         html(
             '<div class="vpp-kpi-head">'
-            f'<span>최적화 결과{mock_tag("MILP 목업")}</span><small>MILP · Two-Stage</small></div>'
+            f'<span>최적화 결과{tag}</span><small>MILP · Two-Stage</small></div>'
             '<div class="vpp-kpi-row">'
             f'<span class="vpp-kpi-value" style="color:{C_GREEN if ok_saving else C_RED}">'
             f'{milp["saving_pct"]:.1f}<span class="u">%</span></span>'
             '<span class="vpp-hero-sub">비용 절감'
             f'{chip("milp_saving_pct", milp["saving_pct"])}</span></div>'
             '<div class="vpp-tiles">'
-            + tile("MILP 연료비", won(milp["milp_cost_won"]),
+            + tile("MILP 비용" if live else "MILP 연료비", won(milp["milp_cost_won"]),
                    f'Rule-based {won(milp["rule_cost_won"])}')
-            + tile("API 응답", f'{milp["latency_s"]:.1f}초', "MILP 풀이 시간",
+            + tile("API 응답", f'{milp["latency_s"]:.1f}초', latency_sub,
                    "milp_latency_s", milp["latency_s"])
             + tile(f"VSS{vss_tag}", f'{vss["vss_pct"]:.1f}%',
                    f'Two-Stage · 시나리오 {vss["n_scenarios"]}개'
@@ -932,14 +972,30 @@ def render_carbon(ctx: Context) -> None:
 
 
 def render_ess(ctx: Context) -> None:
-    """분석 기간의 ESS 충/방전·SoC 와 피크 감소율 (기간 최대 피크 기준)."""
-    s, df, x = ctx.settings, ctx.period, _period_x(ctx)
-    before, after, cut_pct = logic.peak_reduction(df)
+    """ESS 충/방전·SoC 와 피크 감소율.
+
+    dispatch_api 가 있으면 MILP(peak_shaving) 계획 하루치, 없으면 분석 기간 목업
+    (기간 최대 피크 기준).
+    """
+    s = ctx.settings
+    live = milp_result(ctx, "peak_shaving")
+    planned = bool(live and live["ess"])
+    if planned:
+        ess = live["ess"]
+        df = logic.milp_ess_frame(ess)
+        x = df["hour"]
+        before, after = ess["peak_before_mw"], ess["peak_after_mw"]
+        cut_pct = ess["peak_reduction_pct"]
+        tag, period = milp_tag(live, "MILP·peak"), f'{live["day"]:%m/%d} 하루'
+    else:
+        df, x = ctx.period, _period_x(ctx)
+        before, after, cut_pct = logic.peak_reduction(df)
+        tag, period = mock_tag(), ctx.period_label
     ok = logic.meets(s, "ess_peak_cut_pct", cut_pct)
     with card():
         html(
-            f'<div class="vpp-kpi-head"><span>ESS 충/방전 · SoC{mock_tag()}</span>'
-            f'<small>{ctx.period_label} · {logic.target_text(s, "ess_peak_cut_pct")}</small></div>'
+            f'<div class="vpp-kpi-head"><span>ESS 충/방전 · SoC{tag}</span>'
+            f'<small>{period} · {logic.target_text(s, "ess_peak_cut_pct")}</small></div>'
             '<div class="vpp-kpi-row">'
             f'<span class="vpp-kpi-value sm" style="color:{C_GREEN if ok else C_RED}">'
             f'{cut_pct:.1f}%</span>'
@@ -953,8 +1009,10 @@ def render_ess(ctx: Context) -> None:
             line=dict(color=C_YELLOW, width=2, shape="spline"), secondary_y=True,
         )
         fig.update_traces(marker_line_width=0, marker_cornerradius=3, selector=dict(type="bar"))
-        fig.update_layout(barmode="relative", bargap=0.2 if ctx.days == 1 else 0)
-        fig = _period_axis(_compact_chart(fig, H_SMALL), ctx)
+        fig.update_layout(barmode="relative", bargap=0.2 if planned or ctx.days == 1 else 0)
+        fig = _compact_chart(fig, H_SMALL)
+        if not planned:
+            fig = _period_axis(fig, ctx)
         fig.update_yaxes(range=[0, 100], secondary_y=True, gridcolor="rgba(0,0,0,0)",
                          showticklabels=False)
         st.plotly_chart(fig, width="stretch", key="c_ess", config=NO_BAR)
@@ -1089,12 +1147,14 @@ def render_forecast(ctx: Context) -> None:
 def render_optimization_detail(ctx: Context) -> None:
     """MILP 비용·제약과 Two-Stage RP/EV/EEV."""
     s = ctx.settings
-    milp = logic.sample_dispatch_summary(ctx.df)
+    live = milp_result(ctx)
+    milp = live or logic.sample_dispatch_summary(ctx.df)
+    tag = milp_tag(live) if live else mock_tag("MILP 목업")
     vss, vss_tag = stochastic_result(ctx, "VSS")
-    panel_title("최적화 상세 (MILP · Two-Stage)", mock_tag("MILP 목업") + vss_tag)
+    panel_title("최적화 상세 (MILP · Two-Stage)", tag + vss_tag)
     c1, c2, c3 = st.columns(3)
-    c1.metric("MILP 연료비 (일간)", won(milp["milp_cost_won"]))
-    c2.metric("Rule-based 연료비", won(milp["rule_cost_won"]))
+    c1.metric("MILP 비용 (일간)" if live else "MILP 연료비 (일간)", won(milp["milp_cost_won"]))
+    c2.metric("Rule-based 비용" if live else "Rule-based 연료비", won(milp["rule_cost_won"]))
     c3.metric("불확실성 시나리오", f"{vss['n_scenarios']}개")  # Two-Stage 시나리오 수
     c4, c5, c6 = st.columns(3)
     c4.metric("EV", won(vss["ev_won"]))
@@ -1116,6 +1176,9 @@ def render_optimization_detail(ctx: Context) -> None:
         "VSS = EEV − RP, VSS% = VSS / EEV. EEV 는 평균 시나리오(EV) 해의 1단계를 고정하고 "
         "전 시나리오로 평가한 기대비용 (docs/formulation.md 3장)." + cond
     )
+    if live:
+        # dispatch_api 가 남긴 모델링 선택·가정 (절감률 비교 조건 등). 그대로 보여 준다
+        st.caption("MILP 조건: " + " · ".join(live["notes"]))
 
 
 def render_crisis_detail(ctx: Context) -> None:

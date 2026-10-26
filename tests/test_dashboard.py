@@ -221,6 +221,63 @@ def test_parse_stochastic_sample_matches_schema_sample() -> None:
     assert data["vss_pct"] == pytest.approx(3.51, abs=0.01)
 
 
+def _milp_response(status: str = "optimal", hours: int = 24) -> dict:
+    """MilpResponse(shared/schemas.py) 에서 대시보드가 읽는 필드만 채운 응답."""
+    return {
+        "status": status,
+        "horizon_h": hours,
+        "timestamps": [f"2026-09-17T{h:02d}:00:00+09:00" for h in range(hours)],
+        "model_size": {"n_variables": 2880, "n_binaries": 696, "n_constraints": 4589,
+                       "build_time_s": 0.2, "solve_time_s": 1.4, "total_time_s": 1.6},
+        "cost": {"fuel_won": 7.8e10, "startup_won": 3.3e8, "recourse_won": 0.0,
+                 "shed_won": 0.0, "total_won": 7.86e10},
+        "baseline": {"total_cost_won": 8.16e10, "cost_reduction_pct": 3.7},
+        "constraints": [{"name": "수급 균형", "ok": True, "detail": ""},
+                        {"name": "예비율", "ok": False, "detail": "t=3"}],
+        "ess": {
+            "charge_mw": [100.0] * hours, "discharge_mw": [0.0] * hours,
+            "soc_pct": [50.0] * hours, "peak_before_mw": 71930.0, "peak_after_mw": 68334.0,
+            "peak_reduction_pct": 5.0, "target_met": True,
+        },
+        "notes": ["mode=cost"],
+    }
+
+
+def test_parse_milp_reads_baseline_and_constraints() -> None:
+    data = logic.parse_milp(_milp_response(), latency_s=2.9)
+    assert data["day"] == date(2026, 9, 17)
+    assert data["milp_cost_won"] == pytest.approx(7.86e10)
+    assert data["rule_cost_won"] == pytest.approx(8.16e10)
+    assert data["saving_pct"] == pytest.approx(3.7)
+    assert data["latency_s"] == pytest.approx(2.9)
+    assert data["solve_s"] == pytest.approx(1.4)
+    assert data["constraints"] == {"수급 균형": True, "예비율": False}
+    # 목업과 키가 같아야 화면 코드가 둘을 바꿔 쓸 수 있다
+    assert set(logic.sample_dispatch_summary(pd.DataFrame({"fuel_cost_won": [1.0]}))) - {
+        "n_scenarios"} <= set(data)
+
+
+def test_parse_milp_latency_falls_back_to_server_time() -> None:
+    assert logic.parse_milp(_milp_response())["latency_s"] == pytest.approx(1.6)
+
+
+@pytest.mark.parametrize("status", ["infeasible", "error"])
+def test_parse_milp_without_solution_is_none(status: str) -> None:
+    assert logic.parse_milp(_milp_response(status)) is None
+
+
+def test_parse_milp_without_baseline_is_none() -> None:
+    data = _milp_response()
+    data["baseline"] = None
+    assert logic.parse_milp(data) is None
+
+
+def test_milp_ess_frame() -> None:
+    frame = logic.milp_ess_frame(_milp_response(hours=24)["ess"])
+    assert list(frame.columns) == ["hour", "ess_charge_mw", "ess_discharge_mw", "ess_soc_pct"]
+    assert len(frame) == 24 and frame.hour.iloc[-1] == 23
+
+
 # ── REST ─────────────────────────────────────────────────────────────────────
 
 
@@ -403,6 +460,35 @@ def test_app_renders_without_services(monkeypatch) -> None:
     at.selectbox(key="crisis_scenario").select(at.selectbox(key="crisis_scenario").options[1]).run()
     at.sidebar.slider[0].set_value(3).run()
     assert not at.exception
+
+
+def test_app_renders_with_milp(monkeypatch) -> None:
+    """dispatch_api 만 살아 있으면 최적화 결과·ESS 패널이 MILP 응답으로 그려진다."""
+    from streamlit.testing.v1 import AppTest
+
+    calls: list[dict] = []
+
+    def fake(method, url, json=None, params=None, timeout=None):
+        if url.endswith(":8002/health"):
+            return _FakeResponse(200, {"status": "ok"})
+        if url.endswith("/dispatch/milp"):
+            calls.append(json)
+            return _FakeResponse(200, _milp_response())
+        raise requests.ConnectionError()
+
+    monkeypatch.setattr(logic.requests, "request", fake)
+    monkeypatch.delenv("DISPATCH_URL", raising=False)
+    monkeypatch.syspath_prepend(str(DASHBOARD_DIR))
+    # 앞 테스트가 캐시해 둔 "서비스 꺼짐" 결과를 지운다 (st.cache_data 는 프로세스 단위)
+    import streamlit as st
+    st.cache_data.clear()
+
+    at = AppTest.from_file(str(DASHBOARD_DIR / "app.py"), default_timeout=60).run()
+    assert not at.exception
+    page = "".join(m.value for m in at.markdown)
+    assert "MILP 09/17 계획" in page          # 최적화 결과 (cost 모드)
+    assert "MILP·peak 09/17 계획" in page     # ESS (peak_shaving 모드)
+    assert {c.get("ess_mode") for c in calls} == {None, "peak_shaving"}
 
 
 def test_app_adjust_controls(monkeypatch) -> None:

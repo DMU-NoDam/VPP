@@ -262,6 +262,48 @@ def parse_stochastic_latest(data: dict) -> dict | None:
     return out
 
 
+# 해가 있는 MILP 상태 (shared/schemas.py SolveStatus). infeasible·error 면 화면은 목업으로 둔다.
+MILP_SOLVED = ("optimal", "feasible", "time_limit")
+
+
+def parse_milp(data: dict, latency_s: float | None = None) -> dict | None:
+    """MilpResponse(POST /dispatch/milp) → 화면 값. 해가 없거나 baseline 이 없으면 None.
+
+    키는 sample_dispatch_summary 와 같게 맞추고 (milp_cost_won, rule_cost_won, saving_pct,
+    latency_s, constraints) 계획 날짜·풀이 시간·ESS 를 덧붙인다. 비용은 연료비 + 기동비
+    (+ 부하차단) 총비용이다 — 절감률(baseline.cost_reduction_pct)이 같은 정의를 쓴다.
+    """
+    if data["status"] not in MILP_SOLVED or not data.get("baseline"):
+        return None
+    base = data["baseline"]
+    size = data["model_size"]
+    return {
+        "status": data["status"],
+        "day": pd.Timestamp(data["timestamps"][0]).date(),
+        "milp_cost_won": float(data["cost"]["total_won"]),
+        "rule_cost_won": float(base["total_cost_won"]),
+        "saving_pct": float(base["cost_reduction_pct"]),
+        # 대시보드가 잰 HTTP 왕복 (데이터 로드 포함). 없으면 서버의 빌드+풀이 시간
+        "latency_s": float(latency_s if latency_s is not None else size["total_time_s"]),
+        "solve_s": float(size["solve_time_s"]),
+        "constraints": {c["name"]: bool(c["ok"]) for c in data["constraints"]},
+        "ess": data.get("ess"),
+        "notes": list(data.get("notes", [])),
+    }
+
+
+def milp_ess_frame(ess: dict) -> pd.DataFrame:
+    """MilpResponse.ess 의 시간대별 충·방전·SoC → 표 (hour, ess_charge_mw, ess_discharge_mw,
+    ess_soc_pct). 열 이름은 목업 시계열과 같게 둔다 (app.render_ess 가 같은 그리기 코드를 쓴다).
+    """
+    return pd.DataFrame({
+        "hour": range(len(ess["charge_mw"])),
+        "ess_charge_mw": [float(v) for v in ess["charge_mw"]],
+        "ess_discharge_mw": [float(v) for v in ess["discharge_mw"]],
+        "ess_soc_pct": [float(v) for v in ess["soc_pct"]],
+    })
+
+
 # ── collector 실측 (수요 게이지 · 실측 발전 믹스) ─────────────────────────────
 
 # 실측 발전 믹스를 연료비 순으로 쌓을 때 쓰는 구분 (collector trading_by_fuel 코드).
@@ -703,7 +745,7 @@ def forecast_metrics(fc: pd.DataFrame, settings: Settings) -> dict[str, float]:
 
 
 def sample_dispatch_summary(df: pd.DataFrame) -> dict:
-    """MILP 요약 목업. /dispatch/milp 응답 계약(C 담당)이 정해지면 파서로 교체."""
+    """MILP 요약 목업. dispatch_api 가 응답하지 않을 때 쓴다 (응답이 있으면 parse_milp)."""
     milp_cost = float(df.fuel_cost_won.sum())
     rule_cost = milp_cost / (1 - 0.124)
     return {
