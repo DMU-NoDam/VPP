@@ -289,7 +289,68 @@ def parse_milp(data: dict, latency_s: float | None = None) -> dict | None:
         "constraints": {c["name"]: bool(c["ok"]) for c in data["constraints"]},
         "ess": data.get("ess"),
         "notes": list(data.get("notes", [])),
+        "carbon_ton": float(data["carbon"]["total_ton"]),
+        "carbon_hourly_ton": [float(v) for v in data["carbon"]["hourly_ton"]],
+        "carbon_by_fuel_ton": {k: float(v) for k, v in data["carbon"]["by_fuel_ton"].items()},
+        "carbon_intensity": float(data["carbon"]["intensity_ton_per_mwh"]),
+        "rule_carbon_ton": float(base["carbon_total_ton"]),  # Rule-based 는 ESS 를 쓰지 않는다
     }
+
+
+def _pct(after: float, before: float) -> float:
+    """before 대비 증감률 (%). before 가 0 이면 0."""
+    return (after - before) / before * 100 if before else 0.0
+
+
+def carbon_tradeoff(with_ess: dict, no_ess: dict) -> dict:
+    """같은 날 MILP 두 번(ESS 연계 / ESS 없음)의 parse_milp 결과로 탄소 비교 수치를 만든다.
+
+    ess_pct  = ESS 연계가 배출을 얼마나 바꾸는가 (MILP+ESS vs MILP ESS 없음)
+    rule_pct = 최적화가 배출을 얼마나 바꾸는가. Rule-based 는 ESS 가 없으므로 ESS 없는 MILP 와
+               비교한다 (조건을 맞춘 비교). 양수면 MILP 가 더 많이 배출한다.
+    """
+    return {
+        "with_ess_ton": with_ess["carbon_ton"],
+        "no_ess_ton": no_ess["carbon_ton"],
+        "rule_ton": no_ess["rule_carbon_ton"],
+        "ess_pct": _pct(with_ess["carbon_ton"], no_ess["carbon_ton"]),
+        "rule_pct": _pct(no_ess["carbon_ton"], no_ess["rule_carbon_ton"]),
+    }
+
+
+def carbon_plan_table(with_ess: dict, no_ess: dict) -> pd.DataFrame:
+    """계획 3종의 배출량·비용 (비용-탄소 Trade-off 표). Rule-based 의 배출집약도는 응답에 없다."""
+    rows = [
+        ("Rule-based (ESS 없음)", no_ess["rule_carbon_ton"], None, no_ess["rule_cost_won"]),
+        ("MILP (ESS 없음)", no_ess["carbon_ton"], no_ess["carbon_intensity"],
+         no_ess["milp_cost_won"]),
+        ("MILP + ESS", with_ess["carbon_ton"], with_ess["carbon_intensity"],
+         with_ess["milp_cost_won"]),
+    ]
+    rule_ton, rule_cost = rows[0][1], rows[0][3]
+    return pd.DataFrame([
+        {
+            "계획": name,
+            "배출량(tCO2)": round(t),
+            "Rule-based 대비 배출": round(_pct(t, rule_ton), 2),
+            "배출집약도(tCO2/MWh)": None if i is None else round(i, 4),
+            "비용(억원)": round(c / 1e8, 1),
+            "Rule-based 대비 비용": round(_pct(c, rule_cost), 2),
+        }
+        for name, t, i, c in rows
+    ])
+
+
+def milp_carbon_by_fuel(with_ess: dict, no_ess: dict, names: dict[str, str]) -> pd.DataFrame:
+    """발전원별 배출량 (MILP ESS 없음 / MILP+ESS) 과 차이. names 는 발전원 코드 → 표시 이름."""
+    fuels = list(dict.fromkeys([*no_ess["carbon_by_fuel_ton"], *with_ess["carbon_by_fuel_ton"]]))
+    out = []
+    for f in fuels:
+        a = no_ess["carbon_by_fuel_ton"].get(f, 0.0)
+        b = with_ess["carbon_by_fuel_ton"].get(f, 0.0)
+        out.append({"발전원": names.get(f, f), "ESS 없음(tCO2)": round(a),
+                    "ESS 연계(tCO2)": round(b), "차이(tCO2)": round(b - a)})
+    return pd.DataFrame(out)
 
 
 def milp_ess_frame(ess: dict) -> pd.DataFrame:

@@ -221,7 +221,7 @@ def test_parse_stochastic_sample_matches_schema_sample() -> None:
     assert data["vss_pct"] == pytest.approx(3.51, abs=0.01)
 
 
-def _milp_response(status: str = "optimal", hours: int = 24) -> dict:
+def _milp_response(status: str = "optimal", hours: int = 24, carbon: float = 744_000.0) -> dict:
     """MilpResponse(shared/schemas.py) 에서 대시보드가 읽는 필드만 채운 응답."""
     return {
         "status": status,
@@ -231,7 +231,11 @@ def _milp_response(status: str = "optimal", hours: int = 24) -> dict:
                        "build_time_s": 0.2, "solve_time_s": 1.4, "total_time_s": 1.6},
         "cost": {"fuel_won": 7.8e10, "startup_won": 3.3e8, "recourse_won": 0.0,
                  "shed_won": 0.0, "total_won": 7.86e10},
-        "baseline": {"total_cost_won": 8.16e10, "cost_reduction_pct": 3.7},
+        "baseline": {"total_cost_won": 8.16e10, "cost_reduction_pct": 3.7,
+                     "carbon_total_ton": 716_000.0},
+        "carbon": {"total_ton": carbon, "hourly_ton": [carbon / hours] * hours,
+                   "by_fuel_ton": {"bituminous_coal": carbon - 4000.0, "lng": 4000.0},
+                   "intensity_ton_per_mwh": 0.5},
         "constraints": [{"name": "수급 균형", "ok": True, "detail": ""},
                         {"name": "예비율", "ok": False, "detail": "t=3"}],
         "ess": {
@@ -270,6 +274,35 @@ def test_parse_milp_without_baseline_is_none() -> None:
     data = _milp_response()
     data["baseline"] = None
     assert logic.parse_milp(data) is None
+
+
+def test_carbon_tradeoff_compares_like_with_like() -> None:
+    with_ess = logic.parse_milp(_milp_response(carbon=750_000.0))
+    no_ess = logic.parse_milp(_milp_response(carbon=744_000.0))
+    t = logic.carbon_tradeoff(with_ess, no_ess)
+    assert t["ess_pct"] == pytest.approx((750_000 - 744_000) / 744_000 * 100)
+    # Rule-based(ESS 없음) 는 ESS 없는 MILP 와 비교한다
+    assert t["rule_pct"] == pytest.approx((744_000 - 716_000) / 716_000 * 100)
+    assert t["rule_ton"] == pytest.approx(716_000)
+
+
+def test_carbon_plan_table() -> None:
+    with_ess = logic.parse_milp(_milp_response(carbon=750_000.0))
+    no_ess = logic.parse_milp(_milp_response(carbon=744_000.0))
+    table = logic.carbon_plan_table(with_ess, no_ess)
+    assert list(table["계획"]) == ["Rule-based (ESS 없음)", "MILP (ESS 없음)", "MILP + ESS"]
+    assert table["Rule-based 대비 배출"].iloc[0] == 0
+    assert table["Rule-based 대비 배출"].iloc[1] == pytest.approx(3.91, abs=0.01)
+    assert table["Rule-based 대비 비용"].iloc[2] == pytest.approx(-3.68, abs=0.01)
+    assert pd.isna(table["배출집약도(tCO2/MWh)"].iloc[0])
+
+
+def test_milp_carbon_by_fuel() -> None:
+    with_ess = logic.parse_milp(_milp_response(carbon=750_000.0))
+    no_ess = logic.parse_milp(_milp_response(carbon=744_000.0))
+    table = logic.milp_carbon_by_fuel(with_ess, no_ess, {"lng": "가스"})
+    assert list(table["발전원"]) == ["bituminous_coal", "가스"]
+    assert table["차이(tCO2)"].sum() == 6000
 
 
 def test_milp_ess_frame() -> None:
@@ -462,8 +495,18 @@ def test_app_renders_without_services(monkeypatch) -> None:
     assert not at.exception
 
 
-def test_app_renders_with_milp(monkeypatch) -> None:
-    """dispatch_api 만 살아 있으면 최적화 결과·ESS 패널이 MILP 응답으로 그려진다."""
+@pytest.fixture
+def fresh_cache():
+    """st.cache_data 는 프로세스 단위라 AppTest 끼리 공유된다. 앞뒤 테스트에 결과가 새지 않게
+    시작과 끝에 비운다."""
+    import streamlit as st
+    st.cache_data.clear()
+    yield
+    st.cache_data.clear()
+
+
+def test_app_renders_with_milp(monkeypatch, fresh_cache) -> None:
+    """dispatch_api 만 살아 있으면 최적화 결과·ESS·탄소 패널이 MILP 응답으로 그려진다."""
     from streamlit.testing.v1 import AppTest
 
     calls: list[dict] = []
@@ -479,16 +522,15 @@ def test_app_renders_with_milp(monkeypatch) -> None:
     monkeypatch.setattr(logic.requests, "request", fake)
     monkeypatch.delenv("DISPATCH_URL", raising=False)
     monkeypatch.syspath_prepend(str(DASHBOARD_DIR))
-    # 앞 테스트가 캐시해 둔 "서비스 꺼짐" 결과를 지운다 (st.cache_data 는 프로세스 단위)
-    import streamlit as st
-    st.cache_data.clear()
 
     at = AppTest.from_file(str(DASHBOARD_DIR / "app.py"), default_timeout=60).run()
     assert not at.exception
     page = "".join(m.value for m in at.markdown)
     assert "MILP 09/17 계획" in page          # 최적화 결과 (cost 모드)
     assert "MILP·peak 09/17 계획" in page     # ESS (peak_shaving 모드)
-    assert {c.get("ess_mode") for c in calls} == {None, "peak_shaving"}
+    assert "Rule-based 대비" in page          # 탄소 (ESS 연계 / ESS 없음)
+    assert {(c.get("ess_mode"), c.get("use_ess", True)) for c in calls} == {
+        (None, True), ("peak_shaving", True), (None, False)}
 
 
 def test_app_adjust_controls(monkeypatch) -> None:

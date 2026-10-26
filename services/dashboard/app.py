@@ -19,7 +19,8 @@ config/dashboard.yaml 에 있다.
                   POST /api/v1/forecast                168h 수요 예측·90% PI (분석 상세)
     dispatch_api  GET  /health                         연결 상태
                   POST /api/v1/dispatch/milp           MILP 절감률·비용·제약 (cost 모드),
-                                                       ESS 충방전·피크 감소 (peak_shaving 모드)
+                                                       ESS 충방전·피크 감소 (peak_shaving 모드),
+                                                       탄소 ESS 전/후·Rule-based 대비 (use_ess 끔)
                   GET  /api/v1/dispatch/stochastic/latest  VSS (미리 계산, StochasticLatest)
                   POST /api/v1/scenarios               시나리오 생성기 페이지 (page_scenarios.py)
 응답이 없거나 계약이 아직 없는 패널은 목업으로 그린다. 서비스 응답을 쓴 패널에는 LIVE,
@@ -306,7 +307,8 @@ def stochastic_result(ctx: Context, label: str = "") -> tuple[dict, str]:
 
 
 @st.cache_data(ttl=300, show_spinner="MILP 급전 계획 계산 중…")
-def fetch_milp(base_url: str, ess_mode: str | None, timeout: float) -> ApiResult:
+def fetch_milp(base_url: str, ess_mode: str | None, timeout: float,
+               use_ess: bool = True) -> ApiResult:
     """POST /dispatch/milp. 수요를 주지 않으면 dispatch_api 가 수집 데이터의 최신 연속 24h 를 쓴다.
 
     ess_mode None 은 config/ess.yaml 기본(cost). 유닛 x 시간 급전값은 화면에서 안 써서 뺀다.
@@ -314,23 +316,33 @@ def fetch_milp(base_url: str, ess_mode: str | None, timeout: float) -> ApiResult
     payload: dict = {"include_units": False}
     if ess_mode:
         payload["ess_mode"] = ess_mode
+    if not use_ess:
+        payload["use_ess"] = False
     return logic.call_api("POST", f"{base_url}{API_PREFIX}/dispatch/milp", payload=payload,
                           timeout=timeout)
 
 
-def milp_result(ctx: Context, ess_mode: str | None = None) -> dict | None:
+def milp_result(ctx: Context, ess_mode: str | None = None, use_ess: bool = True) -> dict | None:
     """MILP 요약 (logic.parse_milp). 서비스가 없거나 해가 없으면 None — 호출한 쪽이 목업을 쓴다.
 
     비용 비교는 기본 모드(cost), ESS 피크 감소 KPI 는 peak_shaving 으로 잰다
-    (formulation.md 5.3: cost 모드는 피크 감소를 보장하지 않는다).
+    (formulation.md 5.3: cost 모드는 피크 감소를 보장하지 않는다). use_ess=False 는 탄소의
+    ESS 전/후 비교용이다.
     """
     if not ctx.health["dispatch_api"].ok:
         return None
-    res = fetch_milp(ctx.urls["dispatch_api"], ess_mode, ctx.settings.timeout_s)
+    res = fetch_milp(ctx.urls["dispatch_api"], ess_mode, ctx.settings.timeout_s, use_ess)
     try:
         return logic.parse_milp(res.data, res.latency_s) if res.ok else None
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def milp_carbon_pair(ctx: Context) -> tuple[dict, dict] | None:
+    """(MILP+ESS, MILP ESS 없음) — 같은 날 cost 모드 두 번. 하나라도 없으면 None."""
+    with_ess = milp_result(ctx)
+    no_ess = milp_result(ctx, use_ess=False) if with_ess else None
+    return (with_ess, no_ess) if with_ess and no_ess else None
 
 
 def milp_tag(milp: dict, label: str = "MILP") -> str:
@@ -938,8 +950,49 @@ def _render_real_carbon(real: RealMix) -> None:
                         config=NO_BAR)
 
 
+def _signed_pct(value: float) -> str:
+    """증감률을 색과 부호를 붙여 표시한다 (배출이 늘면 빨강)."""
+    return (f'<b style="color:{C_RED if value > 0 else C_GREEN}">'
+            f'{"+" if value > 0 else ""}{value:.2f}%</b>')
+
+
+def _render_milp_carbon(with_ess: dict, no_ess: dict) -> None:
+    """MILP 계획 하루의 시간대별 배출 (ESS 연계 / ESS 없음) 과 Rule-based 대비 증감."""
+    t = logic.carbon_tradeoff(with_ess, no_ess)
+    hours = list(range(len(with_ess["carbon_hourly_ton"])))
+    with card():
+        html(
+            f'<div class="vpp-kpi-head"><span>탄소 배출량 추이{milp_tag(with_ess)}</span>'
+            '<small>MILP 급전 x 배출계수</small></div>'
+            '<div class="vpp-kpi-row">'
+            f'<span class="vpp-kpi-value sm">{ton(t["with_ess_ton"])}</span>'
+            f'<span class="vpp-kpi-sub">일간 · ESS 연계 {_signed_pct(t["ess_pct"])}'
+            f' · Rule-based 대비 {_signed_pct(t["rule_pct"])}</span></div>'
+        )
+        fig = go.Figure()
+        fig.add_scatter(
+            x=hours, y=with_ess["carbon_hourly_ton"], mode="lines", name="ESS 연계",
+            fill="tozeroy", line=dict(color=C_ORANGE, width=2.5, shape="spline"),
+            fillgradient=dict(type="vertical", colorscale=[[0, "rgba(251,146,60,0)"],
+                                                           [1, "rgba(251,146,60,.35)"]]),
+        )
+        fig.add_scatter(
+            x=hours, y=no_ess["carbon_hourly_ton"], mode="lines", name="ESS 없음",
+            line=dict(color=C_TEXT, width=1.4, dash="dot", shape="spline"),
+        )
+        st.plotly_chart(_compact_chart(fig, H_SMALL), width="stretch", key="c_carbon",
+                        config=NO_BAR)
+
+
 def render_carbon(ctx: Context) -> None:
-    """시간대별 탄소 배출량. 실측이 있으면 실측 하루, 없으면 분석 기간 목업(ESS 반영 전/후)."""
+    """시간대별 탄소 배출량.
+
+    우선순위: MILP 계획(ESS 연계 / ESS 없음 비교) → collector 실측 하루 → 분석 기간 목업.
+    """
+    pair = milp_carbon_pair(ctx)
+    if pair is not None:
+        _render_milp_carbon(*pair)
+        return
     if ctx.real is not None:
         _render_real_carbon(ctx.real)
         return
@@ -1203,7 +1256,28 @@ def render_crisis_detail(ctx: Context) -> None:
 
 
 def render_carbon_detail(ctx: Context) -> None:
-    """발전원별 배출 내역. 실측이 있으면 실측 하루, 없으면 분석 기간 목업과 Trade-off 설명."""
+    """비용-탄소 Trade-off (MILP 계획) + 발전원별 배출 내역 (실측 하루, 없으면 분석 기간 목업)."""
+    pair = milp_carbon_pair(ctx)
+    if pair is not None:
+        with_ess, no_ess = pair
+        t = logic.carbon_tradeoff(with_ess, no_ess)
+        panel_title(f"비용-탄소 Trade-off ({with_ess['day']:%m/%d} 계획)", milp_tag(with_ess))
+        st.dataframe(
+            logic.carbon_plan_table(with_ess, no_ess), hide_index=True, width="stretch",
+            column_config={
+                "Rule-based 대비 배출": st.column_config.NumberColumn(format="%+.2f%%"),
+                "Rule-based 대비 비용": st.column_config.NumberColumn(format="%+.2f%%"),
+            },
+        )
+        st.dataframe(logic.milp_carbon_by_fuel(with_ess, no_ess, COLLECTOR_FUEL_KO),
+                     hide_index=True, width="stretch")
+        st.caption(
+            "같은 날·같은 수요로 푼 세 계획의 배출과 비용 (/dispatch/milp, cost 모드). "
+            f"최적화(ESS 없음)는 Rule-based 대비 배출 {t['rule_pct']:+.2f}%, ESS 연계는 "
+            f"{t['ess_pct']:+.2f}%. 연료비가 싼 석탄을 더 쓰면 비용은 줄고 배출은 늘 수 있고, "
+            "ESS 는 왕복효율 손실만큼 추가 발전이 필요하다 (formulation.md 5.7). Rule-based 는 "
+            "ESS 를 쓰지 않아 ESS 없는 MILP 와 같은 조건이다."
+        )
     if ctx.real is not None:
         real = ctx.real
         panel_title("탄소 분석 (발전원별 배출)", real.tag)
