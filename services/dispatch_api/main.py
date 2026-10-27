@@ -59,7 +59,8 @@ def dispatch_stochastic(req: StochasticRequest) -> StochasticResponse:
     """Two-Stage Stochastic 급전 계획과 VSS(= EEV - RP)를 돌려준다."""
     scenarios = req.scenarios
     if scenarios is None:
-        gen = ScenarioRequest(n_scenarios=req.n_scenarios, seed=req.seed or 42, base=req.base)
+        seed = 42 if req.seed is None else req.seed  # seed=0 도 그대로 쓴다
+        gen = ScenarioRequest(n_scenarios=req.n_scenarios, seed=seed, base=req.base)
         scenarios = generate(gen).scenarios
     if len({len(s.demand_mw) for s in scenarios}) != 1:
         raise HTTPException(422, "시나리오 길이가 서로 다르다")

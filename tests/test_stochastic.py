@@ -3,6 +3,7 @@
 솔버 시간을 줄이려고 작은 계통(4유닛 x 6시간 x 3시나리오)으로 성질만 확인한다.
 """
 
+import dataclasses
 import importlib.util
 import sys
 from datetime import datetime
@@ -234,6 +235,22 @@ def test_load_params_reads_yaml() -> None:
     assert p.rt_start_hour(unit("y", "hydro", 1, 0, 0)) == 1  # ceil(0.1)
 
 
+def test_status_reports_non_optimal_ev(params, monkeypatch) -> None:
+    """RP 가 optimal 이어도 EV 가 시간 제한에 걸리면 VSS 를 믿을 수 없으니 status 로 드러낸다."""
+    real_solve = stochastic.solve
+    calls = []
+
+    def solve(m, opts):
+        sol = real_solve(m, opts)
+        calls.append(sol)
+        return dataclasses.replace(sol, status="time_limit") if len(calls) == 2 else sol
+
+    monkeypatch.setattr(stochastic, "solve", solve)
+    res = stochastic.run(FLEET, SCENARIOS, params, START, opts=TIGHT, compute_ws=False)
+    assert calls[0].status == "optimal"
+    assert res.status == "time_limit"
+
+
 def test_response_shape(result) -> None:
     assert len(result.first_stage) == len(FLEET) * 6
     assert len(result.scenarios) == 3 and result.n_scenarios == 3
@@ -259,6 +276,25 @@ def test_api_stochastic(monkeypatch) -> None:
     data = r.json()
     assert data["n_scenarios"] == 3 and len(data["scenarios"][0]["hours"]) == 6
     assert {"rp_won", "eev_won", "vss_pct", "target_met"} <= data["vss"].keys()
+
+
+@pytest.mark.parametrize(("seed", "expected"), [(0, 0), (7, 7), (None, 42)])
+def test_api_generated_scenarios_use_given_seed(seed, expected, result, monkeypatch) -> None:
+    main = _load("main")
+    real_generate, seen = main.generate, []
+
+    def generate(req):
+        seen.append(req.seed)
+        return real_generate(req)
+
+    monkeypatch.setattr(main, "generate", generate)
+    monkeypatch.setattr(main, "load_units", lambda ids=None: FLEET)
+    monkeypatch.setattr(main.stochastic, "run", lambda *a, **k: result)
+    r = TestClient(main.app).post(
+        "/api/v1/dispatch/stochastic", json={"start": "2026-09-22T00:00:00", "seed": seed}
+    )
+    assert r.status_code == 200, r.text
+    assert seen == [expected]
 
 
 def test_api_rejects_ragged_scenarios() -> None:

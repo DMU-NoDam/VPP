@@ -448,8 +448,9 @@ def run(
     vss_won = eev.objective - rp.objective
     # 가정: VSS% 의 분모는 EEV (문서에서 [검증 필요])
     vss_pct = vss_won / eev.objective * 100 if eev.objective else 0.0
+    # RP·EV·EEV 중 하나라도 optimal 이 아니면 VSS 를 믿을 수 없다. 처음 걸린 상태를 보고한다
     statuses = [rp.status, ev.status, eev.status]
-    status = "optimal" if all(s == "optimal" for s in statuses) else rp.status
+    status = next((s for s in statuses if s != "optimal"), "optimal")
 
     return StochasticResponse(
         status=status,

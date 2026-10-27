@@ -63,7 +63,7 @@ class CostBreakdown(BaseModel):
     total_won: float
 
 
-# --- POST /api/v1/dispatch/stochastic (초안) -------------------------------------
+# --- POST /api/v1/dispatch/stochastic ------------------------------------------
 
 
 class Scenario(BaseModel):
