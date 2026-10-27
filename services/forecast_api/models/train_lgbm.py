@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 import lightgbm as lgb
@@ -151,7 +152,9 @@ def train_one(target: str, start: str | None = None, end: str | None = None) -> 
               f"18시 {m[18]:.0f} MW")
 
     # 2차 학습(train + calib) → 최종 모델
+    t0 = time.time()
     booster = _fit(target, df[df["datetime"] < test_start])
+    train_seconds = time.time() - t0
 
     # test: 매일 0시에 예측 시작 → 24h / 168h 성적 + PI 커버리지
     pi_info = {"pi_type": cal["pi_type"], "margins": m}
@@ -177,6 +180,7 @@ def train_one(target: str, start: str | None = None, end: str | None = None) -> 
         "strategy": STRATEGY[target],
         "target_mode": TARGET_MODE[target],
         "confidence": CONFIDENCE,
+        "train_seconds": round(train_seconds, 1),
         "train_period": [str(raw["datetime"].min()), str(test_start)],
         "calib_period": [str(calib_start), str(test_start)],
         "calib_origins": cal["calib_origins"],

@@ -4,6 +4,7 @@
   "strategy": "direct",
   "target_mode": "cf",
   "confidence": 0.9,
+  "train_seconds": 0.3,
   "train_period": [
     "2025-07-01 00:00:00",
     "2026-09-13 00:00:00"
