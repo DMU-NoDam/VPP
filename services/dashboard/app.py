@@ -50,8 +50,11 @@ import page_scenarios
 import page_stochastic_test
 from logic import API_PREFIX, ApiResult, Settings
 from ui import (
+    C_BG,
+    C_BLUE,
     C_BRIGHT,
     C_GREEN,
+    C_INDIGO,
     C_ORANGE,
     C_RED,
     C_TEXT,
@@ -76,11 +79,11 @@ from ui import (
 
 # 발전원 코드 → 색 (logic 목업 설비와 같은 코드)
 FUEL_COLOR = {
-    "nuclear": "#a3e635",
-    "hydro": "#2dd4bf",
+    "nuclear": "#a78bfa",
+    "hydro": "#3b82f6",
     "solar": "#facc15",
-    "wind": "#86efac",
-    "coal": "#6b7280",
+    "wind": "#2dd4bf",
+    "coal": "#64748b",
     "lng": "#fb923c",
 }
 # collector trading_by_fuel 의 발전원 코드 → 표시 이름
@@ -92,9 +95,9 @@ COLLECTOR_FUEL_KO = {
 # collector trading_by_fuel 발전원 색 (실측 발전 믹스). 6종과 겹치는 건 FUEL_COLOR 와 같게
 COLLECTOR_FUEL_COLOR = {
     "nuclear": FUEL_COLOR["nuclear"], "bituminous_coal": FUEL_COLOR["coal"],
-    "anthracite": "#4b5563", "lng": FUEL_COLOR["lng"], "oil": "#c084fc",
-    "hydro": FUEL_COLOR["hydro"], "pumped": "#60a5fa", "solar": FUEL_COLOR["solar"],
-    "wind": FUEL_COLOR["wind"], "renewable": "#4ade80",
+    "anthracite": "#475569", "lng": FUEL_COLOR["lng"], "oil": "#f472b6",
+    "hydro": FUEL_COLOR["hydro"], "pumped": "#93c5fd", "solar": FUEL_COLOR["solar"],
+    "wind": FUEL_COLOR["wind"], "renewable": "#5eead4",
 }
 # MILP 계획 스택에만 있는 항목 (logic.milp_fuel_stack)
 PLAN_EXTRA_KO = {"ess_discharge": "ESS 방전", "ess_charge": "ESS 충전", "unknown": "기타"}
@@ -108,7 +111,7 @@ STATUS_COLOR = {"ok": C_GREEN, "warn": C_YELLOW, "critical": C_RED}
 # collector 수집 주기 (services/collector/main.py INTERVAL_SEC=300). 바꾸면 같이 바꾼다.
 COLLECTOR_INTERVAL_MIN = 5
 # 한 화면 배치를 위한 차트 높이 (1080p 기준 스크롤 없음)
-H_MERIT, H_SMALL = 282, 188
+H_MERIT, H_SMALL = 372, 232
 NO_BAR = {"displayModeBar": False}
 
 
@@ -397,7 +400,7 @@ def _delta(value: float, unit: str = "%") -> str:
 def _gauge_figure(
     value: float, value_max: float, suffix: str = "",
     steps: list[dict] | None = None, value_min: float = 0.0,
-    show_number: bool = True, height: int = 215, bar_color: str = C_GREEN,
+    show_number: bool = True, height: int = 215, bar_color: str = C_BLUE,
 ) -> go.Figure:
     """게이지 도형만 그린다.
 
@@ -415,7 +418,7 @@ def _gauge_figure(
                     "tickvals": [value_min, value_max],
                     "showticklabels": show_number,  # 작은 게이지는 폭이 좁아 눈금 숫자가 잘린다
                     "tickcolor": "rgba(0,0,0,0)",
-                    "tickfont": {"size": 9, "color": C_TEXT},
+                    "tickfont": {"size": 11, "color": C_TEXT},
                 },
                 "bar": {"color": bar_color, "thickness": 0.42},
                 "bgcolor": "rgba(255,255,255,.06)",
@@ -435,7 +438,7 @@ def _reserve_steps(settings: Settings, value_min: float = 0.0) -> list[dict]:
     return [
         {"range": [value_min, crit], "color": "rgba(248,113,113,.30)"},
         {"range": [crit, warn], "color": "rgba(250,204,21,.28)"},
-        {"range": [warn, 30], "color": "rgba(163,230,53,.16)"},
+        {"range": [warn, 30], "color": "rgba(34,197,94,.16)"},
     ]
 
 
@@ -447,15 +450,25 @@ def _melt_by_fuel(settings: Settings, df: pd.DataFrame) -> pd.DataFrame:
     return melted
 
 
+def _legend_right(fig: go.Figure) -> go.Figure:
+    """범례를 차트 오른쪽에 세로로 (항목이 많은 Merit Order 용). 위 → 아래 = 연료비 낮은 순."""
+    fig.update_layout(
+        legend=dict(orientation="v", x=1.01, xanchor="left", y=1, yanchor="top",
+                    font=dict(size=12), traceorder="normal"),
+        margin=dict(l=4, r=4, t=8, b=4),
+    )
+    return fig
+
+
 def _compact_chart(fig: go.Figure, height: int) -> go.Figure:
     """한 화면용 작은 차트: 범례는 위 오른쪽, 축 제목 없음, 여백 최소."""
     fig = style_dark(fig, height=height)
     fig.update_layout(
         margin=dict(l=4, r=4, t=22, b=4),
-        legend=dict(orientation="h", x=1, xanchor="right", y=1.12, font=dict(size=10)),
+        legend=dict(orientation="h", x=1, xanchor="right", y=1.12, font=dict(size=12)),
     )
-    fig.update_xaxes(title=None, tickfont=dict(size=10))
-    fig.update_yaxes(title=None, tickfont=dict(size=10))
+    fig.update_xaxes(title=None, tickfont=dict(size=11))
+    fig.update_yaxes(title=None, tickfont=dict(size=11))
     return fig
 
 
@@ -621,9 +634,9 @@ def render_compare_table(ctx: Context) -> None:
 
     def color_verdict(v: str) -> str:
         if v.startswith("✓"):
-            return "color:#a3e635;font-weight:600"
+            return f"color:{C_GREEN};font-weight:600"
         if v.startswith("✗"):
-            return "color:#f87171;font-weight:600"
+            return f"color:{C_RED};font-weight:600"
         return ""
 
     st.dataframe(
@@ -631,9 +644,15 @@ def render_compare_table(ctx: Context) -> None:
     )
 
 
-def card() -> DeltaGenerator:
-    """한 화면용 카드. 같은 줄의 카드끼리 높이를 맞춘다."""
-    return st.container(border=True, height="stretch")
+def card(stretch: bool = True, key: str | None = None) -> DeltaGenerator:
+    """한 화면용 카드. stretch 면 같은 줄의 카드끼리 높이를 맞춘다.
+
+    한 칸 안에 세로로 쌓는 카드는 stretch=False (내용 높이). key 를 주면 CSS 로 꾸밀 수 있다
+    (.st-key-<key>).
+    """
+    if stretch:
+        return st.container(border=True, height="stretch", key=key)
+    return st.container(border=True, key=key)
 
 
 def _bullet(
@@ -669,13 +688,13 @@ def _bullet(
 
 def _bullet_card(
     title: str, value: str, unit: str, delta_html: str, bullet: str, sub: str,
-    value_color: str = C_GREEN, tag: str | None = None,
+    value_color: str = C_BLUE, tag: str | None = None, stretch: bool = True,
 ) -> None:
     """수급 게이지 카드: 큰 값·변화 한 줄, 그 아래 카드 폭 전체를 쓰는 불릿 게이지.
 
     tag 를 주지 않으면 목업 태그를 단다.
     """
-    with card():
+    with card(stretch):
         html(
             f'<div class="vpp-kpi-head"><span>{title}{mock_tag() if tag is None else tag}'
             "</span></div>"
@@ -687,63 +706,86 @@ def _bullet_card(
         )
 
 
-def render_supply_gauges(ctx: Context) -> None:
-    """수요·공급능력·예비율 불릿 게이지 (기능 요구 10: 게이지로 표시).
-
-    공급능력 = 가용 설비 + 재생 + ESS 출력 (KPX 정의: 예비력 = 공급능력 − 수요).
-    """
-    s, now, prev = ctx.settings, ctx.now, ctx.prev
+def render_demand_card(ctx: Context) -> None:
+    """전력 수요 불릿 게이지 (기능 요구 10). collector 실측 최신값(5분)이 있으면 그것."""
+    now, prev = ctx.now, ctx.prev
     scale = 1000 if compact() else 1
     gmax = 110000 / scale
     ticks = [0, 55000 / scale, gmax]
+    res = fetch_collector(ctx.urls["collector"], "power_demand", 13)
+    real = logic.latest_demand(res)
+    if real:
+        d_now, d_prev = real["mw"], real["prev_mw"]
+        tag = real_tag(f'실측 {real["ts"]:%m/%d %H:%M}')
+        delta = _delta(_pct_change(d_now, d_prev)) if d_prev else ""
+    else:
+        d_now, tag = now.demand_mw, None
+        delta = _delta(_pct_change(now.demand_mw, prev.demand_mw))
+    value, unit = pw(d_now).split(" ")
+    _bullet_card(
+        "전력 수요", value, unit, delta, _bullet(d_now / scale, gmax, C_BLUE, ticks),
+        "1시간 전 대비" if real and d_prev else "", tag=tag, stretch=False,
+    )
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        # 수요는 collector 실측 최신값 (5분). 공급능력·예비율은 collector 에 없어 목업이다.
-        res = fetch_collector(ctx.urls["collector"], "power_demand", 13)
-        real = logic.latest_demand(res)
-        if real:
-            d_now, d_prev = real["mw"], real["prev_mw"]
-            tag = real_tag(f'실측 {real["ts"]:%m/%d %H:%M}')
-            delta = _delta(_pct_change(d_now, d_prev)) if d_prev else ""
-        else:
-            d_now, tag = now.demand_mw, None
-            delta = _delta(_pct_change(now.demand_mw, prev.demand_mw))
-        value, unit = pw(d_now).split(" ")
-        _bullet_card(
-            "전력 수요", value, unit, delta, _bullet(d_now / scale, gmax, C_GREEN, ticks),
-            "1시간 전 대비" if real and d_prev else "", tag=tag,
-        )
-    with c2:
-        cap, cap_prev = now.available_capacity_mw, prev.available_capacity_mw
-        value, unit = pw(cap).split(" ")
-        _bullet_card(
-            "공급 능력", value, unit, _delta(_pct_change(cap, cap_prev)),
-            _bullet(cap / scale, gmax, C_YELLOW, ticks, marker=now.demand_mw / scale,
-                    stripe_from=now.demand_mw / scale),
-            f'<span class="vpp-key stripe"></span>예비력 <b>{pw(cap - now.demand_mw)}</b>',
-            value_color=C_YELLOW,
-        )
-    with c3:
-        label, css_class = logic.reserve_status(s, now.reserve_pct)
-        color = STATUS_COLOR[css_class]
-        # 0–20%: 30% 까지 두면 5·7% 눈금이 붙어 읽기 어렵다 (넘는 값은 오른쪽 끝)
-        crit, warn, top = s.reserve_critical_pct, s.reserve_warning_pct, 20.0
-        zones = [
-            (0, crit, "rgba(248,113,113,.30)"),
-            (crit, warn, "rgba(250,204,21,.30)"),
-            (warn, top, "rgba(163,230,53,.12)"),
-        ]
-        _bullet_card(
-            "예비율", f"{now.reserve_pct:.1f}", "%",
-            _delta(now.reserve_pct - prev.reserve_pct, "%p")
-            + f'<span class="vpp-alarm">{badge(label, css_class)}</span>',
-            _bullet(now.reserve_pct, top, color, [0, crit, warn, top], zones=zones),
+
+def render_supply_card(ctx: Context) -> None:
+    """공급능력 불릿 게이지. 공급능력 = 가용 설비 + 재생 + ESS 출력
+    (KPX 정의: 예비력 = 공급능력 − 수요). collector 에 없어 목업이다.
+    """
+    now, prev = ctx.now, ctx.prev
+    scale = 1000 if compact() else 1
+    gmax = 110000 / scale
+    ticks = [0, 55000 / scale, gmax]
+    cap, cap_prev = now.available_capacity_mw, prev.available_capacity_mw
+    value, unit = pw(cap).split(" ")
+    _bullet_card(
+        "공급 능력", value, unit, _delta(_pct_change(cap, cap_prev)),
+        _bullet(cap / scale, gmax, C_INDIGO, ticks, marker=now.demand_mw / scale,
+                stripe_from=now.demand_mw / scale),
+        f'<span class="vpp-key stripe"></span>예비력 <b>{pw(cap - now.demand_mw)}</b>',
+        value_color=C_INDIGO, stretch=False,
+    )
+
+
+# 예비율 링의 최대값 (%). 넘는 값은 링을 가득 채운다
+RESERVE_RING_MAX = 20.0
+
+
+def _reserve_ring(value: float, color: str, label: str, css_class: str,
+                  crit: float, warn: float) -> str:
+    """예비율 링 게이지 HTML. 링 위의 눈금 두 개가 Critical·Warning 기준이다."""
+    frac = min(max(value / RESERVE_RING_MAX, 0.0), 1.0)
+    ticks = "".join(
+        f'<i class="tick" style="transform:rotate({t / RESERVE_RING_MAX * 360:.1f}deg)"></i>'
+        for t in (crit, warn)
+    )
+    return (
+        f'<div class="vpp-ring" style="--p:{frac * 100:.1f};--c:{color}">{ticks}'
+        f'<div class="in"><b style="color:{color}">{value:.1f}<small>%</small></b>'
+        f"{badge(label, css_class)}</div></div>"
+    )
+
+
+def render_reserve_hero(ctx: Context) -> None:
+    """벤토 히어로: 예비율 링 + 위기 시나리오 (둘 다 '예비율이 버티는가'를 본다)."""
+    s, now, prev = ctx.settings, ctx.now, ctx.prev
+    label, css_class = logic.reserve_status(s, now.reserve_pct)
+    color = STATUS_COLOR[css_class]
+    crit, warn = s.reserve_critical_pct, s.reserve_warning_pct
+    with card(key="vpp-hero"):
+        html(
+            f'<div class="vpp-kpi-head"><span>예비율{mock_tag()}</span>'
+            f"<small>{ctx.hour}시</small></div>"
+            '<div class="vpp-alarm">'
+            f"{_reserve_ring(now.reserve_pct, color, label, css_class, crit, warn)}</div>"
+            '<div class="vpp-ring-sub">'
+            f'{_delta(now.reserve_pct - prev.reserve_pct, "%p")}'
             '<span class="vpp-legend">'
             f'<span><i style="background:{C_RED}"></i>Critical &lt;{crit:g}%</span>'
-            f'<span><i style="background:{C_YELLOW}"></i>Warning &lt;{warn:g}%</span></span>',
-            value_color=color,
+            f'<span><i style="background:{C_YELLOW}"></i>Warning &lt;{warn:g}%</span></span>'
+            "</div>"
         )
+        _render_crisis(ctx)
 
 
 def render_realtime_card(ctx: Context) -> None:
@@ -754,7 +796,7 @@ def render_realtime_card(ctx: Context) -> None:
         f'<span class="vpp-sync ok">{COLLECTOR_INTERVAL_MIN}분 갱신</span>' if demand.ok
         else '<span class="vpp-sync off">연결 끊김</span>'
     )
-    with card():
+    with card():  # 오른쪽 칸 맨 아래: 남은 높이를 채운다
         html(f'<div class="vpp-kpi-head">KPX 실측{status}</div>')
         last_demand = logic.latest_row(demand) if demand.ok else None
         last_smp = logic.latest_row(smp) if smp.ok else None
@@ -763,7 +805,7 @@ def render_realtime_card(ctx: Context) -> None:
                  f'{demand.error or "데이터 없음"}</div>')
             return
         value, unit = pw(last_demand["demand_mw"]).split(" ")
-        tiles = [("수요", value, unit, C_GREEN)]
+        tiles = [("수요", value, unit, C_BLUE)]
         if last_smp and last_smp.get("smp_won_per_kwh") is not None:
             tiles.append(("SMP", f"{last_smp['smp_won_per_kwh']:,.1f}", "원/kWh", C_ORANGE))
         html('<div class="vpp-stats-fill">' + "".join(
@@ -805,7 +847,7 @@ def render_merit_order(ctx: Context) -> None:
     fleet = sorted(s.fleet, key=lambda f: f.fuel_cost_won_per_kwh)
     with card():
         html(f'<div class="vpp-kpi-head"><span>Merit Order 스택{mock_tag()}</span>'
-             f'<small>{" < ".join(f.name for f in fleet)} (연료비 순)</small></div>')
+             '<small>범례 = 연료비 낮은 순</small></div>')
         fig = px.bar(
             _melt_by_fuel(s, df), x="hour", y="mw", color="발전원",
             category_orders={"발전원": [f.name for f in fleet]},
@@ -819,8 +861,8 @@ def render_merit_order(ctx: Context) -> None:
         fig.add_vline(x=ctx.hour, line=dict(color="rgba(255,255,255,.35)", width=1))
         fig.update_traces(marker_line_width=0, selector=dict(type="bar"))
         fig.update_layout(barmode="stack", bargap=0.22)
-        st.plotly_chart(_compact_chart(fig, H_MERIT), width="stretch", key="c_merit",
-                        config=NO_BAR)
+        st.plotly_chart(_legend_right(_compact_chart(fig, H_MERIT)), width="stretch",
+                        key="c_merit", config=NO_BAR)
 
 
 @st.cache_data(show_spinner=False)
@@ -839,10 +881,9 @@ def _render_plan_mix(head: DeltaGenerator, plan: dict, height: int) -> None:
     ko = {**COLLECTOR_FUEL_KO, **PLAN_EXTRA_KO}
     colors = {**COLLECTOR_FUEL_COLOR, **PLAN_EXTRA_COLOR}
     names = [ko.get(f, f) for f in codes]
-    fuels = [ko.get(f, f) for f in plan["fuel_order"]]
     with head.container():
         html(f'<div class="vpp-kpi-head"><span>Merit Order 스택{milp_tag(plan)}</span>'
-             f'<small>{" < ".join(fuels)} (연료비 순) · 순수요 기준</small></div>')
+             '<small>범례 = 연료비 낮은 순 · 순수요 기준</small></div>')
     fig = px.bar(
         stack.assign(발전원=stack.fuel.map(lambda f: ko.get(f, f))),
         x="hour", y="mw", color="발전원",
@@ -856,8 +897,8 @@ def _render_plan_mix(head: DeltaGenerator, plan: dict, height: int) -> None:
     )
     fig.update_traces(marker_line_width=0, selector=dict(type="bar"))
     fig.update_layout(barmode="relative", bargap=0.22)
-    st.plotly_chart(_compact_chart(fig, height), width="stretch", key="c_merit",
-                    config=NO_BAR)
+    st.plotly_chart(_legend_right(_compact_chart(fig, height)), width="stretch",
+                    key="c_merit", config=NO_BAR)
 
 
 def _render_real_mix(head: DeltaGenerator, real: RealMix, height: int) -> None:
@@ -867,7 +908,7 @@ def _render_real_mix(head: DeltaGenerator, real: RealMix, height: int) -> None:
     demand = mix.groupby("hour")["demand_mw"].first()
     with head.container():
         html(f'<div class="vpp-kpi-head"><span>Merit Order 스택{real.tag}</span>'
-             f'<small>{" < ".join(names)} (연료비 순)</small></div>')
+             '<small>범례 = 연료비 낮은 순</small></div>')
     fig = px.bar(
         mix, x="hour", y="mw", color="발전원",
         category_orders={"발전원": names},
@@ -882,8 +923,8 @@ def _render_real_mix(head: DeltaGenerator, real: RealMix, height: int) -> None:
         )
     fig.update_traces(marker_line_width=0, selector=dict(type="bar"))
     fig.update_layout(barmode="stack", bargap=0.22)
-    st.plotly_chart(_compact_chart(fig, height), width="stretch", key="c_merit",
-                    config=NO_BAR)
+    st.plotly_chart(_legend_right(_compact_chart(fig, height)), width="stretch",
+                    key="c_merit", config=NO_BAR)
 
 
 def render_optimization(ctx: Context) -> None:
@@ -947,46 +988,48 @@ def _scenario_reserve(row: pd.Series, scenario: logic.CrisisScenario) -> float:
     return (capacity - demand) / demand * 100
 
 
-def render_crisis_card(ctx: Context) -> None:
-    """위기 시나리오 시뮬레이션 — 선택 시나리오 적용 결과 + 3종 하루 최저 예비율."""
+def _render_crisis(ctx: Context) -> None:
+    """위기 시나리오 시뮬레이션 — 선택 시나리오 적용 결과 + 3종 하루 최저 예비율.
+
+    예비율 히어로 카드 안에서 그린다 (render_reserve_hero).
+    """
     s = ctx.settings
     names = [sc.name for sc in s.crisis]
-    with card():
-        # 바로 아래가 위젯이라 Streamlit 마크다운의 음수 하단 여백(-1rem)을 메운다
-        html('<div class="vpp-kpi-head" style="margin-bottom:1.65rem">'
-             f'<span>위기 시나리오{mock_tag()}</span>'
-             f"<small>예비율 ≥ {s.targets['crisis_reserve_pct']:g}% 유지</small></div>")
-        choice = st.selectbox("시나리오", ["없음", *names], key="crisis_scenario",
-                              label_visibility="collapsed")
-        base = ctx.now.reserve_pct
-        new = base if choice == "없음" else _scenario_reserve(
-            ctx.now, s.crisis[names.index(choice)]
+    # 바로 아래가 위젯이라 Streamlit 마크다운의 음수 하단 여백(-1rem)을 메운다
+    html('<div class="vpp-kpi-head vpp-divider" style="margin-bottom:1.65rem">'
+         f'<span>위기 시나리오{mock_tag()}</span>'
+         f"<small>예비율 ≥ {s.targets['crisis_reserve_pct']:g}% 유지</small></div>")
+    choice = st.selectbox("시나리오", ["없음", *names], key="crisis_scenario",
+                          label_visibility="collapsed")
+    base = ctx.now.reserve_pct
+    new = base if choice == "없음" else _scenario_reserve(
+        ctx.now, s.crisis[names.index(choice)]
+    )
+    label, css_class = logic.reserve_status(s, new)
+    html(
+        '<div class="vpp-kpi-row">'
+        f'<span class="vpp-kpi-sub">{ctx.hour}시 평시 {base:.1f}% →</span>'
+        f'<span class="vpp-kpi-value" style="color:{STATUS_COLOR[css_class]}">'
+        f'{new:.1f}<span class="u">%</span></span>{badge(label, css_class)}</div>'
+    )
+
+    lo, hi, crit = -10.0, 30.0, s.targets["crisis_reserve_pct"]
+
+    def pos(v: float) -> float:
+        return min(max((v - lo) / (hi - lo), 0.0), 1.0) * 100
+
+    rows = []
+    for _, r in logic.crisis_table(ctx.df, s).iterrows():
+        v, ok = r["최저 예비율(%)"], bool(r[logic.crisis_ok_column(s)])
+        color = C_GREEN if ok else C_RED
+        rows.append(
+            f'<div class="vpp-crisis-row"><span class="n">{r["시나리오"]}</span>'
+            f'<span class="bar"><i style="width:{pos(v):.1f}%;background:{color}"></i>'
+            f'<em style="left:{pos(crit):.1f}%"></em></span>'
+            f'<b style="color:{color}">{v:.1f}%</b></div>'
         )
-        label, css_class = logic.reserve_status(s, new)
-        html(
-            '<div class="vpp-kpi-row">'
-            f'<span class="vpp-kpi-sub">{ctx.hour}시 평시 {base:.1f}% →</span>'
-            f'<span class="vpp-kpi-value" style="color:{STATUS_COLOR[css_class]}">'
-            f'{new:.1f}<span class="u">%</span></span>{badge(label, css_class)}</div>'
-        )
-
-        lo, hi, crit = -10.0, 30.0, s.targets["crisis_reserve_pct"]
-
-        def pos(v: float) -> float:
-            return min(max((v - lo) / (hi - lo), 0.0), 1.0) * 100
-
-        rows = []
-        for _, r in logic.crisis_table(ctx.df, s).iterrows():
-            v, ok = r["최저 예비율(%)"], bool(r[logic.crisis_ok_column(s)])
-            color = C_GREEN if ok else C_RED
-            rows.append(
-                f'<div class="vpp-crisis-row"><span class="n">{r["시나리오"]}</span>'
-                f'<span class="bar"><i style="width:{pos(v):.1f}%;background:{color}"></i>'
-                f'<em style="left:{pos(crit):.1f}%"></em></span>'
-                f'<b style="color:{color}">{v:.1f}%</b></div>'
-            )
-        html(f'<div class="vpp-crisis-cap">하루 중 최저 예비율 (세로선 = {crit:g}%)</div>'
-             + "".join(rows))
+    html(f'<div class="vpp-crisis-cap">하루 중 최저 예비율 (세로선 = {crit:g}%)</div>'
+         + "".join(rows))
 
 
 def _period_x(ctx: Context) -> pd.Series:
@@ -1128,11 +1171,11 @@ def render_ess(ctx: Context) -> None:
             f'<span class="vpp-kpi-sub">피크 감소 {pw(before)} → {pw(after)}</span></div>'
         )
         fig = make_subplots(specs=[[{"secondary_y": True}]])
-        fig.add_bar(x=x, y=df["ess_discharge_mw"], name="방전", marker_color=C_GREEN)
+        fig.add_bar(x=x, y=df["ess_discharge_mw"], name="방전", marker_color=C_BLUE)
         fig.add_bar(x=x, y=-df["ess_charge_mw"], name="충전", marker_color=C_ORANGE)
         fig.add_scatter(
             x=x, y=df["ess_soc_pct"], name="SoC",
-            line=dict(color=C_YELLOW, width=2, shape="spline"), secondary_y=True,
+            line=dict(color=C_INDIGO, width=2, shape="spline"), secondary_y=True,
         )
         fig.update_traces(marker_line_width=0, marker_cornerradius=3, selector=dict(type="bar"))
         fig.update_layout(barmode="relative", bargap=0.2 if planned or ctx.days == 1 else 0)
@@ -1144,13 +1187,17 @@ def render_ess(ctx: Context) -> None:
         st.plotly_chart(fig, width="stretch", key="c_ess", config=NO_BAR)
 
 
+GEN_CAPTION = '<div class="vpp-kpi-sub vpp-gen-cap">막대 = 이용률 (출력 ÷ 설비용량)</div>'
+
+
 def _render_real_generators(real: RealMix, hour: int) -> None:
     """실측 하루의 그 시각 발전원별 출력과 이용률 (출력 / 설비용량)."""
     rows = []
     for r in logic.real_utilization(real.mix, hour).itertuples():
         color = COLLECTOR_FUEL_COLOR.get(r.fuel, C_TEXT)
         # 아이콘이 없는 발전원도 그리드 첫 칸을 채워야 열이 밀리지 않는다
-        icon = gen_icon(REAL_ICON[r.fuel], 18) if r.fuel in REAL_ICON else "<span></span>"
+        icon = (gen_icon(REAL_ICON[r.fuel], 18) if r.fuel in REAL_ICON
+                else f'<span class="vpp-dot" style="background:{color}"></span>')
         rows.append(
             f'<div class="vpp-gen-row">{icon}'
             f'<span class="n">{COLLECTOR_FUEL_KO.get(r.fuel, r.fuel)}</span><b>{pw(r.mw)}</b>'
@@ -1159,7 +1206,7 @@ def _render_real_generators(real: RealMix, hour: int) -> None:
         )
     with card():
         html(f'<div class="vpp-kpi-head"><span>발전원별 출력{real.tag}</span>'
-             f'<small>{hour}시 · 이용률</small></div>' + "".join(rows))
+             f"<small>{hour}시</small></div>{GEN_CAPTION}" + "".join(rows))
 
 
 def render_generators(ctx: Context) -> None:
@@ -1180,7 +1227,7 @@ def render_generators(ctx: Context) -> None:
         )
     with card():
         html(f'<div class="vpp-kpi-head"><span>발전원별 출력{mock_tag()}</span>'
-             f'<small>{ctx.hour}시 · 이용률</small></div>'
+             f"<small>{ctx.hour}시</small></div>{GEN_CAPTION}"
              + "".join(rows))
 
 
@@ -1189,26 +1236,26 @@ def page_overview() -> None:
     ctx = _ctx()
     render_adjust_notice(ctx)
 
-    g, r = st.columns([3, 1])
-    with g:
-        render_supply_gauges(ctx)
-    with r:
+    # 벤토 그리드. 1행: 예비율 히어로(세로로 김) · Merit Order(넓게) · 수요/공급/실측(세로로 쌓음)
+    hero, merit, side = st.columns([1.05, 2.2, 1.05])
+    with hero:
+        render_reserve_hero(ctx)
+    with merit:
+        render_merit_order(ctx)
+    with side:
+        render_demand_card(ctx)
+        render_supply_card(ctx)
         render_realtime_card(ctx)
 
-    c1, c2, c3 = st.columns([2, 1, 1])
+    # 2행: 최적화 · 탄소(넓게) · ESS(넓게) · 발전원
+    c1, c2, c3, c4 = st.columns([1.25, 1.25, 1.25, 1.0])
     with c1:
-        render_merit_order(ctx)
-    with c2:
         render_optimization(ctx)
-    with c3:
-        render_crisis_card(ctx)
-
-    c4, c5, c6 = st.columns([1.15, 1.15, 0.9])
-    with c4:
+    with c2:
         render_carbon(ctx)
-    with c5:
+    with c3:
         render_ess(ctx)
-    with c6:
+    with c4:
         render_generators(ctx)
 
 
@@ -1228,10 +1275,10 @@ def render_forecast(ctx: Context) -> None:
     )
     fig.add_scatter(
         x=fc.hour, y=fc.demand_lo_mw, mode="lines", line=dict(width=0), fill="tonexty",
-        fillcolor="rgba(163,230,53,.12)", name="90% PI",
+        fillcolor="rgba(56,189,248,.12)", name="90% PI",
     )
     fig.add_scatter(x=fc.hour, y=fc.demand_fc_mw, mode="lines", name="예측",
-                    line=dict(color=C_GREEN, width=2.5, shape="spline"))
+                    line=dict(color=C_BLUE, width=2.5, shape="spline"))
     if "demand_actual_mw" in fc:  # 목업만 실측이 있다 (forecast_api 는 미래 예측)
         fig.add_scatter(x=fc.hour, y=fc.demand_actual_mw, mode="lines", name="실측",
                         line=dict(color=C_ORANGE, width=1.6, shape="spline"))
@@ -1413,7 +1460,7 @@ def render_realtime_mix(collector_url: str) -> None:
         {"발전원": [COLLECTOR_FUEL_KO.get(k, k) for k in fuel_mw], "MW": list(fuel_mw.values())}
     ).sort_values("MW")
     fig = px.bar(mix_df, x="MW", y="발전원", orientation="h")
-    fig.update_traces(marker_color=C_GREEN, marker_line_width=0, marker_cornerradius=6)
+    fig.update_traces(marker_color=C_BLUE, marker_line_width=0, marker_cornerradius=6)
     fig.update_yaxes(title=None)
     st.plotly_chart(style_dark(fig, height=260), width="stretch", key="c_mix")
 
@@ -1431,7 +1478,7 @@ def render_generation_heatmap(
             pivot, aspect="auto", color_continuous_scale=HEAT_SCALE,
             labels={"x": "시간", "y": "발전원", "color": "MW"},
         )
-        fig.update_coloraxes(colorbar=dict(outlinewidth=0, tickfont=dict(color=C_TEXT, size=9)))
+        fig.update_coloraxes(colorbar=dict(outlinewidth=0, tickfont=dict(color=C_TEXT, size=11)))
         st.plotly_chart(style_dark(fig, height=260), width="stretch", key="c_heatmap")
         return
     panel_title("발전원별 시간대 출력 히트맵", mock_tag())
@@ -1441,7 +1488,7 @@ def render_generation_heatmap(
         pivot.reindex(order), aspect="auto", color_continuous_scale=HEAT_SCALE,
         labels={"x": "시간", "y": "발전원", "color": "MW"},
     )
-    fig.update_coloraxes(colorbar=dict(outlinewidth=0, tickfont=dict(color=C_TEXT, size=9)))
+    fig.update_coloraxes(colorbar=dict(outlinewidth=0, tickfont=dict(color=C_TEXT, size=11)))
     st.plotly_chart(style_dark(fig, height=260), width="stretch", key="c_heatmap")
 
 
@@ -1502,7 +1549,7 @@ def show_loader() -> DeltaGenerator | None:
     with slot.container(key="vpp-loader"):
         st.markdown(
             "<style>.st-key-vpp-loader{position:fixed;inset:0;z-index:1000000;"
-            "background:#17181c}.st-key-vpp-loader iframe{position:fixed;inset:0;"
+            f"background:{C_BG}}}.st-key-vpp-loader iframe{{position:fixed;inset:0;"
             "width:100vw;height:100vh;border:0}</style>",
             unsafe_allow_html=True,
         )

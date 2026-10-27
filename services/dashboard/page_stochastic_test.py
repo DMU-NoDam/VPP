@@ -18,11 +18,12 @@ import logic
 from logic import API_PREFIX, ApiResult
 from page_scenarios import fetch_scenarios
 from ui import (
+    C_BLUE,
     C_BRIGHT,
     C_GREEN,
+    C_ORANGE,
     C_RED,
     C_TEXT,
-    C_YELLOW,
     CFG,
     HEAT_SCALE,
     badge,
@@ -279,7 +280,7 @@ def render_problems(summary: dict) -> None:
     """RP · EV · EEV · WS 비용 비교. 차이가 작아 RP 대비 차이로 그린다."""
     panel_title("문제별 비용 (RP 대비 차이)")
     frame = problem_frame(summary)
-    colors = [C_YELLOW if name == "RP" else C_GREEN for name in frame["문제"]]
+    colors = [C_ORANGE if name == "RP" else C_BLUE for name in frame["문제"]]
     fig = go.Figure(go.Bar(
         x=frame["RP 대비(원)"] / logic.WON_PER_EOK, y=frame["문제"], orientation="h",
         marker_color=colors, marker_line_width=0, marker_cornerradius=6,
@@ -306,7 +307,7 @@ def render_breakdown(data: dict) -> None:
     frame = breakdown_frame(data)
     fig = go.Figure(go.Bar(
         x=frame["비용(원)"] / logic.WON_PER_EOK, y=frame["항목"], orientation="h",
-        marker_color=C_GREEN, marker_line_width=0, marker_cornerradius=6,
+        marker_color=C_BLUE, marker_line_width=0, marker_cornerradius=6,
         text=[f"{p:.1f}%" for p in frame["비중(%)"]], textposition="outside",
         hovertemplate="%{y} %{x:,.2f}억원<extra></extra>",
     ))
@@ -356,7 +357,7 @@ def render_commitment(data: dict) -> None:
         hovertemplate="%{y} · %{x}시 · %{z:,.0f} MW<extra></extra>",
     ))
     fig.update_layout(xaxis_title="시간", yaxis_autorange="reversed",
-                      yaxis_tickfont=dict(size=10, color=C_BRIGHT))
+                      yaxis_tickfont=dict(size=12, color=C_BRIGHT))
     st.plotly_chart(style_dark(fig, height=24 * len(matrix) + 90), width="stretch",
                     key="c_sto_commit")
     st.caption("어두운 칸은 정지. 기동 여부는 모든 시나리오가 공유하고 (비예측성), "
