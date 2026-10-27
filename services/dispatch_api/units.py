@@ -5,9 +5,12 @@ stochastic.py 는 이 모듈의 Unit 필드만 쓴다. C 의 MILP 로더가 생�
 
 연료비는 generators.yaml 에 없다 (월별로 변하는 값). collector 의 fuel_cost 데이터셋
 (month, fuel, cost_won_per_kwh)에서 최신 월 값을 REST 로 받아 fuel 코드로 조인하고,
-원/kWh → 원/MWh 변환(x1000)은 여기 한 곳에서만 한다. collector 가 응답하지 않으면
-data/csv/fuel_cost.csv 스냅샷을 읽는다. 유닛에 fuel_cost_krw_per_mwh 가 적혀 있으면
-(수력) 조인 대신 그 값을 쓴다.
+원/kWh → 원/MWh 변환(constants.KRW_PER_KWH_TO_KRW_PER_MWH)은 여기 한 곳에서만 한다.
+collector 가 응답하지 않으면 data/csv/fuel_cost.csv 스냅샷을 읽는다. 유닛에
+fuel_cost_krw_per_mwh 가 적혀 있으면 (수력) 조인 대신 그 값을 쓴다.
+
+D 쪽 모듈(stochastic, precompute, scenarios)이 config/stochastic.yaml 을 읽는 도우미
+(read_stochastic_yaml, cfg_value)도 여기 둔다.
 """
 
 from __future__ import annotations
@@ -18,8 +21,11 @@ import os
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import yaml
+
+import constants
 
 HERE = Path(__file__).resolve()
 
@@ -52,6 +58,21 @@ def find_file(env: str, *relative: str) -> Path:
     raise FileNotFoundError("/".join(relative))
 
 
+def read_stochastic_yaml(path: Path | None = None) -> dict[str, Any]:
+    """config/stochastic.yaml 전체."""
+    path = path or find_file("STOCHASTIC_YAML", "config", "stochastic.yaml")
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+
+def cfg_value(node: dict[str, Any], unit: str) -> Any:
+    """{value, unit, source} 항목의 value. unit 이 기대와 다르면 멈춘다 (변환하지 않는다)."""
+    if not isinstance(node, dict) or "value" not in node:
+        raise ValueError(f"config 값은 {{value, unit, source}} 형식이어야 한다: {node!r}")
+    if node.get("unit") != unit:
+        raise ValueError(f"unit 이 '{unit}' 이어야 하는데 '{node.get('unit')}' 이다: {node!r}")
+    return node["value"]
+
+
 def latest_fuel_costs(rows: list[dict]) -> dict[str, float]:
     """fuel_cost 행 목록에서 연료별 최신 월 단가(원/MWh)."""
     latest: dict[str, tuple[str, float]] = {}
@@ -60,13 +81,18 @@ def latest_fuel_costs(rows: list[dict]) -> dict[str, float]:
         if row.get("cost_won_per_kwh") in (None, ""):
             continue
         if fuel not in latest or month > latest[fuel][0]:
-            latest[fuel] = (month, float(row["cost_won_per_kwh"]) * 1000.0)
+            cost = float(row["cost_won_per_kwh"]) * constants.KRW_PER_KWH_TO_KRW_PER_MWH
+            latest[fuel] = (month, cost)
     return {fuel: cost for fuel, (_, cost) in latest.items()}
 
 
-def fetch_fuel_costs(timeout_s: float = 2.0) -> dict[str, float]:
-    """collector REST → 실패 시 CSV 스냅샷."""
-    url = os.getenv("COLLECTOR_URL", "http://collector:8000") + "/data/fuel_cost?limit=60"
+def fetch_fuel_costs(timeout_s: float | None = None) -> dict[str, float]:
+    """collector REST → 실패 시 CSV 스냅샷. timeout_s·조회 행 수는 config 의 collector 블록."""
+    cfg = read_stochastic_yaml()["collector"]
+    if timeout_s is None:
+        timeout_s = float(cfg_value(cfg["fuel_cost_timeout"], "s"))
+    rows = int(cfg_value(cfg["fuel_cost_rows"], "count"))
+    url = os.getenv("COLLECTOR_URL", "http://collector:8000") + f"/data/fuel_cost?limit={rows}"
     try:
         with urllib.request.urlopen(url, timeout=timeout_s) as resp:  # noqa: S310 (내부 URL)
             return latest_fuel_costs(json.load(resp)["rows"])

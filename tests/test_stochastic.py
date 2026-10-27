@@ -33,6 +33,11 @@ stochastic = _load("stochastic")
 
 START = datetime(2026, 9, 22)
 TIGHT = SolverOptions(time_limit_s=30, mip_gap=1e-6)
+# 작은 계통 테스트용 고정값 (config 와 무관하게 성질만 본다)
+RUN_KW = dict(reserve_ratio=0.10, shed_penalty=10_000_000.0)
+PARAMS = stochastic.StochasticParams(
+    reserve_short_penalty_krw_per_mw=1_000_000.0, vss_target_pct=3.0
+)
 
 
 def unit(uid: str, fuel: str, p_max: float, p_min: float, cost: float, **kw) -> "units.Unit":
@@ -70,12 +75,12 @@ SCENARIOS = [
 
 @pytest.fixture(scope="module")
 def params():
-    return stochastic.StochasticParams()
+    return PARAMS
 
 
 @pytest.fixture(scope="module")
 def result(params):
-    return stochastic.run(FLEET, SCENARIOS, params, START, opts=TIGHT, compute_ws=True)
+    return stochastic.run(FLEET, SCENARIOS, params, START, opts=TIGHT, compute_ws=True, **RUN_KW)
 
 
 # ── 로더 ─────────────────────────────────────────────────────────────────────
@@ -186,12 +191,12 @@ def test_min_up_time_from_initial_state(params) -> None:
 def test_shed_when_capacity_short(params) -> None:
     # 순부하 1950. 0~4시는 base+LNG = 1200, 5시에야 mid 가 켜져 1600 → 750x5 + 350 부족
     huge = [scen("x", 1.0, [2000.0] * 6)]
-    r = stochastic.run(FLEET, huge, params, START, opts=TIGHT)
+    r = stochastic.run(FLEET, huge, params, START, opts=TIGHT, **RUN_KW)
     assert r.scenarios[0].shed_mwh == pytest.approx(750 * 5 + 350, rel=1e-6)
     assert r.expected_hours[0].shed_mw == pytest.approx(750, rel=1e-6)
 
 
-RT_PARAMS = stochastic.StochasticParams(startup_time_h={"lng": 2, "bituminous_coal": 6})
+RT_PARAMS = dataclasses.replace(PARAMS, startup_time_h={"lng": 2, "bituminous_coal": 6})
 
 
 def test_intraday_start_rules() -> None:
@@ -216,7 +221,7 @@ def test_intraday_start_rules() -> None:
 def test_intraday_start_lowers_or_keeps_rp() -> None:
     # 2단계 선택지가 늘면 RP 는 같거나 줄어든다
     base = stochastic.solve(
-        stochastic.build_model(FLEET, SCENARIOS, stochastic.StochasticParams(), 0.0, 1e7), TIGHT
+        stochastic.build_model(FLEET, SCENARIOS, PARAMS, 0.0, 1e7), TIGHT
     )
     rt = stochastic.solve(stochastic.build_model(FLEET, SCENARIOS, RT_PARAMS, 0.0, 1e7), TIGHT)
     assert rt.objective <= base.objective + 1
@@ -246,7 +251,9 @@ def test_status_reports_non_optimal_ev(params, monkeypatch) -> None:
         return dataclasses.replace(sol, status="time_limit") if len(calls) == 2 else sol
 
     monkeypatch.setattr(stochastic, "solve", solve)
-    res = stochastic.run(FLEET, SCENARIOS, params, START, opts=TIGHT, compute_ws=False)
+    res = stochastic.run(
+        FLEET, SCENARIOS, params, START, opts=TIGHT, compute_ws=False, **RUN_KW
+    )
     assert calls[0].status == "optimal"
     assert res.status == "time_limit"
 
@@ -310,9 +317,15 @@ def test_api_rejects_ragged_scenarios() -> None:
 
 
 def test_precompute_config_reads_yaml(tmp_path, monkeypatch) -> None:
+    import yaml
+
     precompute = _load("precompute")
+    raw = units.read_stochastic_yaml()
+    raw["precompute"]["seed"]["value"] = 7
+    raw["precompute"]["reserve_ratio"]["value"] = 0.0
+    raw["precompute"]["unknown"] = 1
     f = tmp_path / "stochastic.yaml"
-    f.write_text("precompute:\n  seed: 7\n  reserve_ratio: 0.0\n  unknown: 1\n", encoding="utf-8")
+    f.write_text(yaml.safe_dump(raw, allow_unicode=True), encoding="utf-8")
     monkeypatch.delenv("PRECOMPUTE_ENABLED", raising=False)
     cfg = precompute.load_config(f)
     assert cfg.seed == 7 and cfg.reserve_ratio == 0.0 and cfg.enabled
@@ -327,7 +340,7 @@ def test_precompute_repo_config_matches_measurement_table() -> None:
 
 def test_precompute_compute_once_done_then_error_keeps_result(result, monkeypatch) -> None:
     precompute = _load("precompute")
-    store = precompute.LatestStore(precompute.PrecomputeConfig())
+    store = precompute.LatestStore(dataclasses.replace(precompute.load_config(), enabled=True))
     assert store.snapshot().state == "pending"
     monkeypatch.setattr(precompute, "load_units", lambda: FLEET)
     monkeypatch.setattr(precompute.stochastic, "run", lambda *a, **k: result)
@@ -350,7 +363,7 @@ def test_precompute_disabled_starts_no_thread() -> None:
     import threading
 
     precompute = _load("precompute")
-    store = precompute.LatestStore(precompute.PrecomputeConfig(enabled=False))
+    store = precompute.LatestStore(dataclasses.replace(precompute.load_config(), enabled=False))
     assert precompute.start_background(store, threading.Event()) is None
     assert store.snapshot().state == "disabled"
 
@@ -363,3 +376,35 @@ def test_api_stochastic_latest(monkeypatch) -> None:
     data = r.json()
     assert data["state"] == "disabled" and data["result"] is None
     assert data["seed"] == 1 and data["reserve_ratio"] == 0.10
+
+
+# ── config/stochastic.yaml ({value, unit, source}) ──────────────────────────
+
+
+def test_cfg_value_checks_unit() -> None:
+    node = {"value": 60, "unit": "s", "source": "x"}
+    assert units.cfg_value(node, "s") == 60
+    with pytest.raises(ValueError):
+        units.cfg_value(node, "min")
+    with pytest.raises(ValueError):
+        units.cfg_value(60, "s")  # 맨 숫자는 받지 않는다
+
+
+def test_api_fills_empty_fields_from_config(result, monkeypatch) -> None:
+    main = _load("main")
+    d = stochastic.load_request_defaults()
+    seen = {}
+
+    def run(*a, **k):
+        seen.update(k)
+        return result
+
+    monkeypatch.setattr(main, "load_units", lambda ids=None: FLEET)
+    monkeypatch.setattr(main.stochastic, "run", run)
+    r = TestClient(main.app).post(
+        "/api/v1/dispatch/stochastic", json={"start": "2026-09-22T00:00:00"}
+    )
+    assert r.status_code == 200, r.text
+    assert seen["reserve_ratio"] == d.reserve_ratio
+    assert seen["shed_penalty"] == d.shed_penalty_won_per_mwh
+    assert (seen["opts"].time_limit_s, seen["opts"].mip_gap) == (d.time_limit_s, d.mip_gap)

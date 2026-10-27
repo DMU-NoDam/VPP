@@ -79,7 +79,9 @@ def test_custom_base_profile() -> None:
 
 
 def test_sample_respects_physical_limits() -> None:
-    req = ScenarioRequest(solar_cloud_pct=40, wind_sigma_pct=60, wind_capacity_mw=1500)
+    req = scenarios.with_defaults(
+        ScenarioRequest(solar_cloud_pct=40, wind_sigma_pct=60, wind_capacity_mw=1500)
+    )
     s = scenarios.sample(req, scenarios.DEFAULT_BASE, np.random.default_rng(0))
     assert (s["solar"] >= 0).all() and (s["solar"] <= req.solar_capacity_mw).all()
     assert (s["wind"] >= 0).all() and (s["wind"] <= 1500).all()
@@ -133,3 +135,12 @@ def test_endpoint() -> None:
     assert all(c["ok"] for c in body["checks"])
 
     assert client.post("/api/v1/scenarios", json={"n_samples": 10}).status_code == 422
+
+
+def test_empty_request_uses_config_defaults() -> None:
+    """비운 필드는 config/stochastic.yaml 의 scenario_generator 값으로 채운다."""
+    req = scenarios.with_defaults(ScenarioRequest(seed=0))
+    assert req.seed == 0  # 준 값은 그대로 (0 도)
+    for field in scenarios.REQUEST_FIELDS:
+        if field != "seed":
+            assert getattr(req, field) == scenarios.CFG[field]

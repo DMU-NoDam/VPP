@@ -88,15 +88,17 @@ class ScenarioProfile(BaseModel):
 
 
 class ScenarioRequest(BaseModel):
-    n_scenarios: int = Field(10, ge=1, le=50)      # 축약 후 개수 (요구사항: 10개 이상)
-    n_samples: int = Field(300, ge=50, le=2000)    # 축약 전 표본 수 (거리 행렬이 n² 이라 상한)
-    seed: int = 42
-    demand_sigma_pct: float = 2.5   # 수요 오차 표준편차
-    demand_ar: float = 0.9          # 수요 오차 시간 상관 (AR(1) 계수)
-    solar_cloud_pct: float = 10.0   # 하루 흐림 계수의 평균 감소폭 (클수록 하방 꼬리가 두꺼움)
-    wind_sigma_pct: float = 25.0    # 풍력 로그정규 오차
-    solar_capacity_mw: float = 12000.0
-    wind_capacity_mw: float = 8000.0  # KPX renewable(풍력+기타) 실측 최대 5.1GW 를 덮는 값
+    """None 인 필드는 dispatch_api 가 config/stochastic.yaml 의 scenario_generator 값으로 채운다."""
+
+    n_scenarios: int | None = Field(None, ge=1, le=50)   # 축약 후 개수 (요구사항: 10개 이상)
+    n_samples: int | None = Field(None, ge=50, le=2000)  # 축약 전 표본 수 (거리 행렬 n² 상한)
+    seed: int | None = None
+    demand_sigma_pct: float | None = None   # 수요 오차 표준편차
+    demand_ar: float | None = None          # 수요 오차 시간 상관 (AR(1) 계수)
+    solar_cloud_pct: float | None = None    # 하루 흐림 계수의 평균 감소폭 (클수록 하방 꼬리↑)
+    wind_sigma_pct: float | None = None     # 풍력 로그정규 오차
+    solar_capacity_mw: float | None = None
+    wind_capacity_mw: float | None = None
     base: ScenarioProfile | None = None  # None 이면 기본 예측 (forecast_api 연동 전)
 
 
@@ -134,20 +136,23 @@ class ScenarioSetResponse(BaseModel):
 
 
 class StochasticRequest(BaseModel):
+    """None 인 숫자 필드는 dispatch_api 가 config/stochastic.yaml 값으로 채운다
+    (seed·n_scenarios 는 scenario_generator, 나머지는 request_defaults)."""
+
     start: datetime
-    horizon_h: int = 24
+    horizon_h: int | None = None  # 아직 쓰지 않는다. 시나리오 배열 길이가 계획 길이다
     # scenarios 를 직접 주거나, 비우면 dispatch_api 가 예측+잔차로 n_scenarios 개 만든다.
     scenarios: list[Scenario] | None = None
-    n_scenarios: int = 10
+    n_scenarios: int | None = None
     seed: int | None = None
     base: ScenarioProfile | None = None  # 시나리오 생성용 기준 예측. None 이면 생성기 기본값
     compute_ws: bool = False  # True 면 WS·EVPI 도 계산 (시나리오 수만큼 더 풀어 느려짐)
     generator_ids: list[str] | None = None  # None 이면 generators.yaml 전체
     use_ess: bool = True
-    reserve_ratio: float = 0.10
-    shed_penalty_won_per_mwh: float = 10_000_000.0  # VOLL 대용. 값은 formulation.md 에서 확정
+    reserve_ratio: float | None = None
+    shed_penalty_won_per_mwh: float | None = None  # K (VOLL 대용). 값은 formulation.md 에서 확정
     include_scenario_hours: bool = False  # True 면 시나리오별 시간 요약까지 반환 (응답 커짐)
-    solver: SolverOptions = Field(default_factory=SolverOptions)
+    solver: SolverOptions | None = None
 
 
 class ScenarioResult(BaseModel):

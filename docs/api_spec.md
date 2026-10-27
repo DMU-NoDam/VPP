@@ -35,7 +35,8 @@
 ## POST /api/v1/scenarios (dispatch_api `:8002`)
 
 불확실성 시나리오 생성기. 스키마: `shared/schemas.py` 의 `ScenarioRequest` / `ScenarioSetResponse`.
-방법은 [formulation.md](formulation.md) 7절. 모든 필드에 기본값이 있어 `{}` 만 보내도 된다.
+방법은 [formulation.md](formulation.md) 7절. 모든 필드를 비울 수 있고(`{}` 만 보내도 된다), 비운 필드는
+`config/stochastic.yaml` 의 `scenario_generator` 값으로 채운다. 아래 요청 예시의 숫자가 현재 config 값이다.
 
 요청:
 
@@ -76,27 +77,29 @@ Two-Stage Stochastic 급전 계획과 VSS. 스키마: `shared/schemas.py` 의 `S
 적용되므로 응답 시간은 최대 `time_limit_s` 의 3배 (WS 를 켜면 3 + `n_scenarios` 배) 다.
 
 > **VSS 를 판정할 때는 `solver` 를 `{ "time_limit_s": 60, "mip_gap": 0.001 }` 로 준다.**
-> 기본값(10초, 0.5%)에서는 25기 x 시나리오 10개 RP 가 시간 제한에 걸려 해가 나빠지고, VSS 가 음수로 나올 수 있다
+> 기본값(`config/stochastic.yaml` 의 `request_defaults`: 10초, 0.5%)에서는 25기 x 시나리오 10개 RP 가 시간 제한에 걸려 해가 나빠지고, VSS 가 음수로 나올 수 있다
 > (측정 예: `status: time_limit`, `vss_pct` −36.8%). 대시보드는 이 조건으로 미리 계산해 둔
 > `GET /dispatch/stochastic/latest` 를 쓴다.
 
 요청 — `start` 만 필수다.
 
+기본값 열의 숫자는 현재 `config/stochastic.yaml` 값이다. 필드를 비우면(`null`) 서버가 config 에서 채운다.
+
 | 필드 | 기본값 | 설명 |
 |---|---|---|
 | `start` | (필수) | 계획 시작 시각. 응답 timestamp 의 기준 |
-| `horizon_h` | 24 | 시나리오를 직접 주면 무시되고 시나리오 배열 길이를 쓴다 |
+| `horizon_h` | `null` | 아직 쓰지 않는다. 계획 길이는 시나리오 배열 길이다 |
 | `scenarios` | `null` | 시나리오 직접 입력. `null` 이면 `/scenarios` 와 같은 생성기로 `n_scenarios` 개를 만든다 (7절 파라메트릭 오차 모델) |
-| `n_scenarios` | 10 | 생성 개수 (`scenarios` 가 `null` 일 때만) |
-| `seed` | `null` | 생성 seed. `null` 이면 42 |
+| `n_scenarios` | `null` → 10 (`scenario_generator.n_scenarios`) | 생성 개수 (`scenarios` 가 `null` 일 때만) |
+| `seed` | `null` → 42 (`scenario_generator.seed`) | 생성 seed. 0 도 그대로 쓴다 |
 | `base` | `null` | 생성용 기준 예측 (`ScenarioProfile`). `null` 이면 생성기 기본 예측 (forecast_api 연동 전) |
 | `compute_ws` | `false` | `true` 면 WS·EVPI 도 계산. 시나리오 수만큼 더 풀어 느려진다 |
 | `generator_ids` | `null` | 사용할 유닛 id. `null` 이면 `generators.yaml` 전체 |
 | `use_ess` | `true` | **현재 무시된다.** 2단계에 ESS 를 넣지 않았다 (8절 끝, 🟨 C 와 상의) |
-| `reserve_ratio` | 0.10 | 1단계 예비율. 부족분은 슬랙으로 허용하고 `config/stochastic.yaml` 의 페널티를 붙인다 (가정, 8.1 S5 미확정) |
-| `shed_penalty_won_per_mwh` | 10,000,000 | 부하차단 페널티 $K$. 🟨 VOLL 근거 미확정 |
+| `reserve_ratio` | `null` → 0.10 (`request_defaults.reserve_ratio`) | 1단계 예비율. 부족분은 슬랙으로 허용하고 `config/stochastic.yaml` 의 페널티를 붙인다 (가정, 8.1 S5 미확정) |
+| `shed_penalty_won_per_mwh` | `null` → 10,000,000 (`request_defaults.shed_penalty`) | 부하차단 페널티 $K$. 🟨 VOLL 근거 미확정 |
 | `include_scenario_hours` | `false` | `true` 면 `scenarios[].hours` 에 시나리오별 시간 요약을 넣는다 |
-| `solver` | `{10, 0.005}` | 문제당 시간 제한(초)·상대 gap. 위 경고 참고 |
+| `solver` | `null` → `{10, 0.005}` (`request_defaults.time_limit`·`mip_gap`) | 문제당 시간 제한(초)·상대 gap. 위 경고 참고. 일부만 주면 빠진 값은 `SolverOptions` 스키마 기본값(10, 0.005)이다 |
 
 ```json
 {

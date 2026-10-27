@@ -46,7 +46,6 @@ from pathlib import Path
 
 import numpy as np
 import pyomo.environ as pyo
-import yaml
 from pyomo.contrib.solver.common.factory import SolverFactory
 from pyomo.contrib.solver.common.results import SolutionStatus, TerminationCondition
 
@@ -60,9 +59,8 @@ from shared.schemas import (
     UnitHour,
     VssReport,
 )
-from units import Unit, find_file
+from units import Unit, cfg_value, read_stochastic_yaml
 
-VSS_TARGET_PCT = 3.0
 # 목적함수를 백만 원 단위로 푼다. 원 단위(1e10)로 두면 HiGHS 수치 조건이 나빠져 느려진다.
 OBJ_SCALE = 1e-6
 FIRST_STAGE_VARS = ("u", "y", "z")
@@ -76,7 +74,8 @@ _SOLVE_LOCK = threading.Lock()
 class StochasticParams:
     """config/stochastic.yaml. 기동시간은 3장 비가역성 규칙 표, 나머지는 가정 항의 값."""
 
-    reserve_short_penalty_krw_per_mw: float = 1_000_000.0
+    reserve_short_penalty_krw_per_mw: float  # 원/MW·h
+    vss_target_pct: float
     # 연료별 기동시간 T^SU (h). 없는 연료는 당일 기동 불가 (가정 — 유류는 3장에서 미확정)
     startup_time_h: dict[str, float] = field(default_factory=dict)
 
@@ -86,11 +85,35 @@ class StochasticParams:
         return None if t_su is None else math.ceil(t_su)
 
 
+@dataclass(frozen=True)
+class RequestDefaults:
+    """POST /dispatch/stochastic 에서 값을 비웠을 때 쓰는 값 (config 의 request_defaults)."""
+
+    reserve_ratio: float
+    shed_penalty_won_per_mwh: float
+    time_limit_s: float
+    mip_gap: float
+
+
 def load_params(path: Path | None = None) -> StochasticParams:
-    path = path or find_file("STOCHASTIC_YAML", "config", "stochastic.yaml")
-    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    known = StochasticParams.__dataclass_fields__
-    return StochasticParams(**{k: v for k, v in raw.items() if k in known})
+    raw = read_stochastic_yaml(path)
+    return StochasticParams(
+        reserve_short_penalty_krw_per_mw=float(
+            cfg_value(raw["reserve_short_penalty"], "KRW/MW·h")
+        ),
+        vss_target_pct=float(cfg_value(raw["vss_target"], "%")),
+        startup_time_h=dict(cfg_value(raw["startup_time"], "h")),
+    )
+
+
+def load_request_defaults(path: Path | None = None) -> RequestDefaults:
+    raw = read_stochastic_yaml(path)["request_defaults"]
+    return RequestDefaults(
+        reserve_ratio=float(cfg_value(raw["reserve_ratio"], "ratio")),
+        shed_penalty_won_per_mwh=float(cfg_value(raw["shed_penalty"], "KRW/MWh")),
+        time_limit_s=float(cfg_value(raw["time_limit"], "s")),
+        mip_gap=float(cfg_value(raw["mip_gap"], "ratio")),
+    )
 
 
 @dataclass
@@ -386,14 +409,17 @@ def run(
     scenarios: list[Scenario],
     params: StochasticParams,
     start: datetime,
-    reserve_ratio: float = 0.10,
-    shed_penalty: float = 10_000_000.0,
-    opts: SolverOptions | None = None,
+    *,
+    reserve_ratio: float,
+    shed_penalty: float,
+    opts: SolverOptions,
     compute_ws: bool = True,
     include_scenario_hours: bool = False,
 ) -> StochasticResponse:
-    """RP · EV · EEV (· WS) 를 차례로 풀어 급전 계획과 VSS 를 돌려준다."""
-    opts = opts or SolverOptions()
+    """RP · EV · EEV (· WS) 를 차례로 풀어 급전 계획과 VSS 를 돌려준다.
+
+    reserve_ratio·shed_penalty·opts 는 호출하는 쪽이 config(또는 요청)에서 채워 넘긴다.
+    """
     t0 = time.perf_counter()
 
     plan_net = net_load(mean_scenario(scenarios))
@@ -470,6 +496,6 @@ def run(
             vss_pct=vss_pct,
             ws_won=ws,
             evpi_won=rp.objective - ws if ws is not None else None,
-            target_met=vss_pct >= VSS_TARGET_PCT,
+            target_met=vss_pct >= params.vss_target_pct,
         ),
     )

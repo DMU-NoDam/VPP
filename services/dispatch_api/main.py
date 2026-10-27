@@ -14,21 +14,21 @@ from fastapi import FastAPI, HTTPException
 
 import precompute
 import stochastic
-from scenarios import generate
+from scenarios import generate, with_defaults
 from shared.constants import API_PREFIX
 from shared.schemas import (
     ScenarioRequest,
     ScenarioSetResponse,
+    SolverOptions,
     StochasticLatest,
     StochasticRequest,
     StochasticResponse,
 )
 from units import load_units
 
-try:
-    _PRECOMPUTE = precompute.LatestStore(precompute.load_config())
-except FileNotFoundError:  # config/stochastic.yaml 이 없으면 미리 계산을 끈다
-    _PRECOMPUTE = precompute.LatestStore(precompute.PrecomputeConfig(enabled=False))
+# config/stochastic.yaml 이 없으면 scenarios 를 불러올 때 이미 FileNotFoundError 로 멈춘다.
+# 숫자 파라미터를 코드 기본값으로 대신하지 않는다 (CLAUDE.md 규칙 1·3).
+_PRECOMPUTE = precompute.LatestStore(precompute.load_config())
 
 
 @asynccontextmanager
@@ -59,11 +59,14 @@ def dispatch_stochastic(req: StochasticRequest) -> StochasticResponse:
     """Two-Stage Stochastic 급전 계획과 VSS(= EEV - RP)를 돌려준다."""
     scenarios = req.scenarios
     if scenarios is None:
-        seed = 42 if req.seed is None else req.seed  # seed=0 도 그대로 쓴다
-        gen = ScenarioRequest(n_scenarios=req.n_scenarios, seed=seed, base=req.base)
+        # 비운 seed·n_scenarios 는 config 의 scenario_generator 값 (seed=0 도 그대로 쓴다)
+        gen = with_defaults(
+            ScenarioRequest(n_scenarios=req.n_scenarios, seed=req.seed, base=req.base)
+        )
         scenarios = generate(gen).scenarios
     if len({len(s.demand_mw) for s in scenarios}) != 1:
         raise HTTPException(422, "시나리오 길이가 서로 다르다")
+    d = stochastic.load_request_defaults()
     try:
         units = load_units(ids=req.generator_ids)
         return stochastic.run(
@@ -71,9 +74,13 @@ def dispatch_stochastic(req: StochasticRequest) -> StochasticResponse:
             scenarios,
             stochastic.load_params(),
             start=req.start,
-            reserve_ratio=req.reserve_ratio,
-            shed_penalty=req.shed_penalty_won_per_mwh,
-            opts=req.solver,
+            reserve_ratio=d.reserve_ratio if req.reserve_ratio is None else req.reserve_ratio,
+            shed_penalty=(
+                d.shed_penalty_won_per_mwh
+                if req.shed_penalty_won_per_mwh is None
+                else req.shed_penalty_won_per_mwh
+            ),
+            opts=req.solver or SolverOptions(time_limit_s=d.time_limit_s, mip_gap=d.mip_gap),
             compute_ws=req.compute_ws,
             include_scenario_hours=req.include_scenario_hours,
         )

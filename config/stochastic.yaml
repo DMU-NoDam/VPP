@@ -1,35 +1,258 @@
-# Two-Stage Stochastic 급전 파라미터 (docs/formulation.md 3장)
+# Two-Stage Stochastic 급전·시나리오 생성 파라미터 (docs/formulation.md 3장, 7절)
 #
-# 담당: D. 발전기 제원은 generators.yaml(C)을 그대로 쓴다. 부하차단 페널티 K 는 API 요청값
-# (shed_penalty_won_per_mwh)이다. 여기에는 3장 비가역성 규칙의 기동시간과 문서에 없는
-# 가정 항의 값만 둔다.
+# 담당: D. 발전기 제원은 generators.yaml(C)을 그대로 쓴다.
+# 형식: 숫자 파라미터는 모두 {value, unit, source}. 코드는 unit 이 기대와 다르면 멈춘다 (변환하지 않는다).
+#       출처가 없으면 source 를 "[미정]" 또는 "[가정]" 으로 시작한다.
+# 읽는 곳: stochastic.py(모델·VSS 판정), main.py(요청 기본값), precompute.py(미리 계산),
+#          scenarios.py(시나리오 생성기), units.py(연료비 조회).
 
-# [가정] 1단계 예비력 확보량이 부족할 때의 페널티 (원/MW·h). 3장 S5(예비율)는 문서에서
-# 미확정이라 코드가 1단계에 두었고, 용량 자체가 모자란 날에도 해가 나오게 슬랙을 붙였다.
-reserve_short_penalty_krw_per_mw: 1000000
+# ── 모델 (stochastic.py) ─────────────────────────────────────────────────────
 
-# 3장 R1 기동시간 T^SU (h). 당일 추가 기동은 t >= ceil(T^SU) 부터 가능하다.
-# [스펙] Project.md "발전원별 파라미터 참조 (EPSIS 통계 기반 예시)": 석탄 6h, LNG 2h, 수력 0.1h,
-#        원자력 N/A(기저) → 항목을 두지 않아 당일 기동 불가.
-# anthracite 를 석탄과 같이 6h 로 둔 것은 D 의 해석이다.
-# 유류(oil)는 스펙에 기동시간이 없다 [미확정] → 항목을 두지 않아 당일 기동 불가 (가정).
-startup_time_h:
-  bituminous_coal: 6
-  anthracite: 6
-  lng: 2
-  hydro: 0.1
+reserve_short_penalty:
+  value: 1000000
+  unit: KRW/MW·h
+  source: >-
+    [가정] 1단계 예비력 부족분 q[t] 에 붙이는 페널티. 3장 S5(예비율)는 문서에서 미확정이라
+    코드가 1단계에 두었고, 용량 자체가 모자란 날에도 해가 나오게 슬랙을 붙였다.
 
-# 대시보드 VSS 타일용 미리 계산 (services/dispatch_api/precompute.py).
+# 3장 R1 기동시간 T^SU. 당일 추가 기동은 t >= ceil(T^SU) 부터 가능하다.
+# 항목이 없는 연료(원자력, 유류)는 당일 기동 불가.
+startup_time:
+  value:
+    bituminous_coal: 6
+    anthracite: 6
+    lng: 2
+    hydro: 0.1
+  unit: h
+  source: >-
+    과제 원문 "발전원별 파라미터 참조 (EPSIS 통계 기반 예시)": 석탄 6h, LNG 2h, 수력 0.1h,
+    원자력 N/A(기저). anthracite 를 석탄과 같이 6h 로 둔 것은 D 의 해석.
+    유류(oil)는 원문에 기동시간이 없다 [미정].
+
+vss_target:
+  value: 3.0
+  unit: "%"
+  source: 과제 원문 성능 기준표 "Stochastic VSS ≥ 3%"
+
+# ── POST /dispatch/stochastic 요청 기본값 (main.py) ───────────────────────────
+# 요청에서 값을 비우면(null) 아래 값을 쓴다. seed·시나리오 수는 scenario_generator 의 값을 쓴다.
+
+request_defaults:
+  reserve_ratio:
+    value: 0.10
+    unit: ratio
+    source: >-
+      [가정] 과제 원문 L81 MILP 제약 2 "예비율 ≥ 수요의 10%"를 Stochastic 1단계에 준용 (D 의 해석).
+      formulation.md 3장 S5(1단계 예비율)는 미확정
+  shed_penalty:
+    value: 10000000
+    unit: KRW/MWh
+    source: >-
+      [미정] 부하차단 페널티 K (VoLL 대용, formulation.md 3장).
+      에너지경제연구원 기본연구 24-21 범위로 민감도 분석 예정
+  time_limit:
+    value: 10
+    unit: s
+    source: >-
+      [가정] 문제(RP·EV·EEV)당 시간 제한. 과제 원문의 10초 기준(L281)은 MILP API 에만 해당하고
+      Stochastic 응답시간 기준은 원문에 없다. VSS 판정에는 부족하다 (docs/api_spec.md 경고 참고)
+  mip_gap:
+    value: 0.005
+    unit: ratio
+    source: "[가정] team_plan.md \"10초 응답: MIP gap 0.5% 정도\""
+
+# ── 대시보드 VSS 타일용 미리 계산 (precompute.py) ─────────────────────────────
 # 대시보드는 응답을 12초만 기다리는데, RP·EV·EEV 를 시간 제한에 걸리지 않게 풀면 1분 넘게 걸린다.
-# 그래서 서버가 켜질 때와 refresh_hours 마다 백그라운드로 한 번 풀어 두고
+# 그래서 서버가 켜질 때와 refresh_interval 마다 백그라운드로 한 번 풀어 두고
 # GET /api/v1/dispatch/stochastic/latest 로 마지막 결과를 내준다.
 # 조건은 formulation.md 3장 측정표의 seed 1 행과 같다 (R1~R4, 예비율 10% → VSS 0.00%).
+
 precompute:
   enabled: true
-  seed: 1
-  n_scenarios: 10
-  reserve_ratio: 0.10          # [스펙] 2장 제약 2. 3장 S5(1단계 예비율)는 미확정
-  shed_penalty_won_per_mwh: 10000000   # K. 미확정 (formulation.md 3장)
-  time_limit_s: 60             # 측정표와 같은 풀이 조건
-  mip_gap: 0.001
-  refresh_hours: 24
+  seed:
+    value: 1
+    unit: "-"
+    source: formulation.md 3장 측정표의 seed 1 행과 같은 조건
+  n_scenarios:
+    value: 10
+    unit: count
+    source: 과제 원문 "시나리오 최소 10개"
+  reserve_ratio:
+    value: 0.10
+    unit: ratio
+    source: >-
+      [가정] 과제 원문 L81 MILP 제약 2 "예비율 ≥ 수요의 10%"를 Stochastic 1단계에 준용 (D 의 해석).
+      formulation.md 3장 S5(1단계 예비율)는 미확정
+  shed_penalty:
+    value: 10000000
+    unit: KRW/MWh
+    source: "[미정] 부하차단 페널티 K (formulation.md 3장)"
+  time_limit:
+    value: 60
+    unit: s
+    source: formulation.md 3장 측정표와 같은 풀이 조건
+  mip_gap:
+    value: 0.001
+    unit: ratio
+    source: formulation.md 3장 측정표와 같은 풀이 조건
+  refresh_interval:
+    value: 24
+    unit: h
+    source: "[가정] 하루 한 번 갱신"
+
+# ── 시나리오 생성기 (scenarios.py, POST /scenarios) ───────────────────────────
+# 오차 모델은 파라메트릭이다. 1년치 예측 잔차가 쌓이면 잔차 부트스트랩으로 교체한다.
+
+scenario_generator:
+  # POST /scenarios, /dispatch/stochastic 요청에서 값을 비우면 쓰는 값
+  n_scenarios:
+    value: 10
+    unit: count
+    source: 과제 원문 "시나리오 최소 10개"
+  n_samples:
+    value: 300
+    unit: count
+    source: "[가정] 축약 전 표본 수. 거리 행렬이 n² 이라 2000 이하로 제한"
+  seed:
+    value: 42
+    unit: "-"
+    source: "[가정] 재현용 고정 seed (미리 계산의 seed 1 과 다르다)"
+  demand_sigma:
+    value: 2.5
+    unit: "%"
+    source: "[미정] 수요 예측 오차 표준편차. 예측 잔차가 쌓이면 잔차로 교체"
+  demand_ar:
+    value: 0.9
+    unit: "-"
+    source: "[미정] 수요 오차의 시간 상관 AR(1) 계수"
+  solar_cloud:
+    value: 10.0
+    unit: "%"
+    source: "[미정] 하루 흐림 계수의 평균 감소폭 (클수록 하방 꼬리가 두꺼움)"
+  wind_sigma:
+    value: 25.0
+    unit: "%"
+    source: "[미정] 풍력 로그정규 오차"
+  solar_capacity:
+    value: 12000.0
+    unit: MW
+    source: 과제 원문 L222 "발전원별 파라미터 참조 (EPSIS 통계 기반 예시)" 태양광 용량. 시나리오 출력 상한(클립)
+  wind_capacity:
+    value: 8000.0
+    unit: MW
+    source: >-
+      [미정] 풍력+기타 재생 출력 상한(클립). 원문 L223 예시표의 풍력 3,500 MW 는 풍력 단독인데,
+      base_profile.wind_mw 는 KPX renewable(풍력+기타 재생, 실측 최대 5.1GW)이라 3,500 으로 자르면
+      기준 예측이 24시간 중 18시간 잘리고 기대 일간 풍력이 18% 줄어든다 (2026-10-27 측정).
+      EPSIS 의 풍력+기타 재생 설비용량으로 교체 필요 (A 에게 자료 요청)
+
+  # 오차 모델 내부 계수
+  solar_hourly_ar:
+    value: 0.7
+    unit: "-"
+    source: "[미정] 태양광 시간 노이즈 AR(1) 계수"
+  solar_hourly_sigma:
+    value: 0.08
+    unit: ratio
+    source: "[미정] 태양광 시간 노이즈 표준편차"
+  wind_ar:
+    value: 0.85
+    unit: "-"
+    source: "[미정] 풍력 오차 AR(1) 계수"
+  cloud_shape:
+    value: 0.8
+    unit: "-"
+    source: "[미정] 흐림 계수 감마분포 형상. 작을수록 가끔 크게 흐린 날이 나온다"
+
+  # 축약 (k-medoids + 꼬리 보존)
+  kmedoids_max_iter:
+    value: 50
+    unit: count
+    source: "[가정] k-medoids 반복 상한"
+  tail:
+    value: 10
+    unit: "%"
+    source: "[가정] 상방(피크 상위)·하방(최저 순부하 하위) 꼬리 군집 크기. 표본 대비 비율"
+  band_percentiles:
+    value: [5, 50, 95]
+    unit: percentile
+    source: "[가정] 응답 밴드(p5/p50/p95)"
+
+  # 사후 라벨 기준 (기준 예측 대비 일간 에너지 편차)
+  label_demand:
+    value: 1.5
+    unit: "%"
+    source: "[가정] |수요 편차| 이상이면 고수요/저수요"
+  label_solar_cloudy:
+    value: -15
+    unit: "%"
+    source: "[가정] 태양광 편차 이하이면 흐림"
+  label_solar_sunny:
+    value: 5
+    unit: "%"
+    source: "[가정] 태양광 편차 이상이면 맑음"
+  label_wind:
+    value: 20
+    unit: "%"
+    source: "[가정] |풍력 편차| 이상이면 강풍/약풍"
+
+  # 생성 결과 검사 (formulation.md 7절 검증 기준)
+  check_min_scenarios:
+    value: 10
+    unit: count
+    source: 과제 원문 "시나리오 최소 10개"
+  check_prob_sum_tol:
+    value: 1.0e-9
+    unit: "-"
+    source: "[가정] 확률 합 = 1 판정 허용오차"
+  check_demand_bias:
+    value: 1.0
+    unit: "%"
+    source: "[가정] 표본 평균 수요 vs 기준 예측 허용 편향"
+  check_net_energy_keep:
+    value: 1.0
+    unit: "%"
+    source: "[가정] 축약 전후 일간 순부하 기대값 허용 차이"
+  check_tail_upper:
+    value: 90
+    unit: percentile
+    source: "[가정] 상방 꼬리 보존: 최대 피크 ≥ 표본 피크의 이 분위"
+  check_tail_lower:
+    value: 10
+    unit: percentile
+    source: "[가정] 하방 꼬리 보존: 최저 순부하 ≤ 표본 최저의 이 분위"
+
+  # forecast_api 연동 전 기본 예측. 요청의 base 가 null 이면 쓴다.
+  base_profile:
+    value:
+      demand_mw: [
+        58303, 56060, 54853, 55114, 55977, 58188, 60701, 63990, 68026, 72007, 75745, 79031,
+        81474, 83611, 84521, 84997, 83906, 81887, 79218, 75726, 71892, 68412, 64237, 61107,
+      ]
+      solar_mw: [
+        0, 0, 0, 0, 0, 754, 2429, 4109, 5679, 7033, 8078, 8742,
+        8981, 8779, 8148, 7133, 5802, 4246, 2571, 891, 1, 0, 0, 0,
+      ]
+      wind_mw: [
+        3489, 3365, 3308, 3308, 3370, 3482, 3657, 3866, 4067, 4318, 4531, 4734,
+        4919, 5017, 5090, 5101, 5028, 4911, 4759, 4538, 4330, 4076, 3867, 3654,
+      ]
+    unit: MW
+    source: >-
+      2026-09-21(월) 실측의 시간 평균. 수요 = data/csv/power_demand.csv,
+      태양광·풍력 = generation_by_fuel 의 solar·renewable (KPX 분류상 풍력+기타 재생).
+      generation_by_fuel.csv 는 A 가 삭제했고(커밋 6263828) trading_by_fuel 은 2026-09-18 까지라
+      다시 만들 수 없다. 기준일·출처 교체는 forecast_api 연동 때 정한다.
+
+# ── 연료비 조회 (units.py) ───────────────────────────────────────────────────
+# collector REST 로 받고, 실패하면 data/csv/fuel_cost.csv 스냅샷으로 폴백한다.
+
+collector:
+  fuel_cost_timeout:
+    value: 2.0
+    unit: s
+    source: "[가정] collector 응답 대기. 넘으면 CSV 스냅샷으로 폴백"
+  fuel_cost_rows:
+    value: 60
+    unit: count
+    source: "[가정] fuel_cost 조회 행 수 (연료 5종 x 12개월)"

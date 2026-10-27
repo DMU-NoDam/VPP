@@ -13,44 +13,49 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
-import yaml
 
 import stochastic
 from scenarios import generate
 from shared.schemas import ScenarioRequest, SolverOptions, StochasticLatest, StochasticResponse
-from units import find_file, load_units
+from units import cfg_value, load_units, read_stochastic_yaml
 
 logger = logging.getLogger(__name__)
+# 한국 표준시. 서머타임이 없어 고정 오프셋으로 충분하다 (컨테이너에 tzdata 가 없어도 동작)
 KST = timezone(timedelta(hours=9))
+SECONDS_PER_HOUR = 3600
 
 
 @dataclass(frozen=True)
 class PrecomputeConfig:
     """config/stochastic.yaml 의 precompute 블록."""
 
-    enabled: bool = True
-    seed: int = 1
-    n_scenarios: int = 10
-    reserve_ratio: float = 0.10
-    shed_penalty_won_per_mwh: float = 10_000_000.0
-    time_limit_s: float = 60.0
-    mip_gap: float = 0.001
-    refresh_hours: float = 24.0
+    enabled: bool
+    seed: int
+    n_scenarios: int
+    reserve_ratio: float
+    shed_penalty_won_per_mwh: float
+    time_limit_s: float
+    mip_gap: float
+    refresh_hours: float
 
 
 def load_config(path: Path | None = None) -> PrecomputeConfig:
-    """precompute 블록을 읽는다. 블록이 없으면 기본값."""
-    path = path or find_file("STOCHASTIC_YAML", "config", "stochastic.yaml")
-    raw = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("precompute") or {}
-    known = {f.name for f in fields(PrecomputeConfig)}
-    cfg = PrecomputeConfig(**{k: v for k, v in raw.items() if k in known})
-    if os.getenv("PRECOMPUTE_ENABLED", "").lower() == "false":
-        cfg = PrecomputeConfig(**{**cfg.__dict__, "enabled": False})
-    return cfg
+    """precompute 블록을 읽는다. 환경변수 PRECOMPUTE_ENABLED=false 면 꺼 둔다."""
+    raw = read_stochastic_yaml(path)["precompute"]
+    enabled = bool(raw["enabled"]) and os.getenv("PRECOMPUTE_ENABLED", "").lower() != "false"
+    return PrecomputeConfig(
+        enabled=enabled,
+        seed=int(cfg_value(raw["seed"], "-")),
+        n_scenarios=int(cfg_value(raw["n_scenarios"], "count")),
+        reserve_ratio=float(cfg_value(raw["reserve_ratio"], "ratio")),
+        shed_penalty_won_per_mwh=float(cfg_value(raw["shed_penalty"], "KRW/MWh")),
+        time_limit_s=float(cfg_value(raw["time_limit"], "s")),
+        mip_gap=float(cfg_value(raw["mip_gap"], "ratio")),
+        refresh_hours=float(cfg_value(raw["refresh_interval"], "h")),
+    )
 
 
 class LatestStore:
@@ -120,7 +125,7 @@ def start_background(store: LatestStore, stop: threading.Event) -> threading.Thr
     def loop() -> None:
         while not stop.is_set():
             compute_once(store)
-            stop.wait(store.cfg.refresh_hours * 3600)
+            stop.wait(store.cfg.refresh_hours * SECONDS_PER_HOUR)
 
     thread = threading.Thread(target=loop, name="vss-precompute", daemon=True)
     thread.start()
