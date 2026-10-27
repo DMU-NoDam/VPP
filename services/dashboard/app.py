@@ -56,6 +56,7 @@ from ui import (
     C_RED,
     C_TEXT,
     C_YELLOW,
+    CFG,
     HEAT_SCALE,
     badge,
     compact,
@@ -183,24 +184,25 @@ class Context:
 # ── 데이터 가져오기 (캐시) ───────────────────────────────────────────────────
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=CFG.cache_ttl_s, show_spinner=False)
 def fetch_collector(base_url: str, name: str, limit: int) -> ApiResult:
     """collector 데이터셋의 최근 limit 행."""
-    return logic.call_api("GET", f"{base_url}/data/{name}", params={"limit": limit}, timeout=5.0)
+    return logic.call_api("GET", f"{base_url}/data/{name}", params={"limit": limit},
+                          timeout=CFG.api.timeout_short_s)
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=CFG.cache_ttl_s, show_spinner=False)
 def fetch_stochastic_latest(base_url: str) -> ApiResult:
     """GET /dispatch/stochastic/latest. dispatch_api 가 미리 계산해 둔 결과라 바로 온다."""
     return logic.call_api("GET", f"{base_url}{API_PREFIX}/dispatch/stochastic/latest",
-                          timeout=5.0)
+                          timeout=CFG.api.timeout_short_s)
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=CFG.api.ttl_range_s, show_spinner=False)
 def fetch_collector_range(base_url: str, name: str, start: str, end: str) -> ApiResult:
     """collector 데이터셋의 start~end 구간 (시간 컬럼 기준, 양 끝 포함)."""
     return logic.call_api("GET", f"{base_url}/data/{name}",
-                          params={"start": start, "end": end}, timeout=5.0)
+                          params={"start": start, "end": end}, timeout=CFG.api.timeout_short_s)
 
 
 @dataclass
@@ -252,15 +254,15 @@ def real_tag(text: str) -> str:
     return f'<span class="vpp-src live">{text}</span>'
 
 
-@st.cache_data(ttl=300, show_spinner="수요 예측 호출 중…")
+@st.cache_data(ttl=CFG.api.ttl_range_s, show_spinner="수요 예측 호출 중…")
 def fetch_forecast(base_url: str, timeout: float) -> ApiResult:
-    """POST /forecast (168h, 수요·태양광·풍력). 과거 1년을 넘기고 5분 캐시한다."""
+    """POST /forecast (수요·태양광·풍력). 기간·horizon 은 config 의 forecast_request."""
     today = date.today()
     payload = {
-        "start_date": (today - timedelta(days=365)).isoformat(),
+        "start_date": (today - timedelta(days=CFG.forecast_history_days)).isoformat(),
         "end_date": today.isoformat(),
         "target": "all",
-        "horizon_hours": 168,
+        "horizon_hours": CFG.forecast_horizon_h,
     }
     return logic.call_api("POST", f"{base_url}{API_PREFIX}/forecast", payload=payload,
                           timeout=timeout)
@@ -309,7 +311,7 @@ def stochastic_result(ctx: Context, label: str = "") -> tuple[dict, str]:
     return mock, mock_tag(f"{prefix}목업")
 
 
-@st.cache_data(ttl=300, show_spinner="MILP 급전 계획 계산 중…")
+@st.cache_data(ttl=CFG.api.ttl_range_s, show_spinner="MILP 급전 계획 계산 중…")
 def fetch_milp(base_url: str, ess_mode: str | None, timeout: float,
                use_ess: bool = True, include_units: bool = False) -> ApiResult:
     """POST /dispatch/milp. 수요를 주지 않으면 dispatch_api 가 수집 데이터의 최신 연속 24h 를 쓴다.
@@ -482,6 +484,11 @@ def _reset_adjust(defaults: dict[str, float]) -> None:
         st.session_state[key] = value
 
 
+def _heat_demand_pct(settings: Settings) -> float:
+    """위기 시나리오 중 수요를 키우는 것(폭염)의 수요 배율 (%)."""
+    return next(sc.demand_mult for sc in settings.crisis if sc.demand_mult != 1.0) * 100
+
+
 def render_adjust_controls(settings: Settings) -> logic.Adjust:
     """사이드바 what-if 조정 위젯. 모든 패널이 이 값으로 다시 계산된다."""
     defaults = _adjust_defaults(settings)
@@ -490,7 +497,7 @@ def render_adjust_controls(settings: Settings) -> logic.Adjust:
 
     panel_title("시뮬레이션 조정")
     st.slider("수요 (%)", 80, 120, step=1, key="adj_demand",
-              help="시간대별 수요 전체에 곱한다. 폭염 시나리오는 115%.")
+              help=f"시간대별 수요 전체에 곱한다. 폭염 시나리오는 {_heat_demand_pct(settings):g}%.")
     st.slider("태양광 출력 (%)", 0, 150, step=5, key="adj_solar")
     st.slider("풍력 출력 (%)", 0, 150, step=5, key="adj_wind")
     st.slider("원자력 탈락 (MW)", 0, 6000, step=200, key="adj_outage",
@@ -883,7 +890,7 @@ def render_optimization(ctx: Context) -> None:
     """최적화 결과 — MILP 절감률·비용·응답·제약 + Two-Stage VSS. dispatch_api 가 없으면 목업."""
     s = ctx.settings
     live = milp_result(ctx)
-    milp = live or logic.sample_dispatch_summary(ctx.df)
+    milp = live or logic.sample_dispatch_summary(ctx.df, ctx.settings)
     tag = milp_tag(live) if live else mock_tag("MILP 목업")
     latency_sub = f'풀이 {live["solve_s"]:.1f}초' if live else "MILP 풀이 시간"
     vss, vss_tag = stochastic_result(ctx)
@@ -948,7 +955,7 @@ def render_crisis_card(ctx: Context) -> None:
         # 바로 아래가 위젯이라 Streamlit 마크다운의 음수 하단 여백(-1rem)을 메운다
         html('<div class="vpp-kpi-head" style="margin-bottom:1.65rem">'
              f'<span>위기 시나리오{mock_tag()}</span>'
-             "<small>예비율 ≥ 5% 유지</small></div>")
+             f"<small>예비율 ≥ {s.targets['crisis_reserve_pct']:g}% 유지</small></div>")
         choice = st.selectbox("시나리오", ["없음", *names], key="crisis_scenario",
                               label_visibility="collapsed")
         base = ctx.now.reserve_pct
@@ -970,7 +977,7 @@ def render_crisis_card(ctx: Context) -> None:
 
         rows = []
         for _, r in logic.crisis_table(ctx.df, s).iterrows():
-            v, ok = r["최저 예비율(%)"], bool(r["5% 유지"])
+            v, ok = r["최저 예비율(%)"], bool(r[logic.crisis_ok_column(s)])
             color = C_GREEN if ok else C_RED
             rows.append(
                 f'<div class="vpp-crisis-row"><span class="n">{r["시나리오"]}</span>'
@@ -978,7 +985,7 @@ def render_crisis_card(ctx: Context) -> None:
                 f'<em style="left:{pos(crit):.1f}%"></em></span>'
                 f'<b style="color:{color}">{v:.1f}%</b></div>'
             )
-        html('<div class="vpp-crisis-cap">하루 중 최저 예비율 (세로선 = 5%)</div>'
+        html(f'<div class="vpp-crisis-cap">하루 중 최저 예비율 (세로선 = {crit:g}%)</div>'
              + "".join(rows))
 
 
@@ -1267,7 +1274,7 @@ def render_optimization_detail(ctx: Context) -> None:
     """MILP 비용·제약과 Two-Stage RP/EV/EEV."""
     s = ctx.settings
     live = milp_result(ctx)
-    milp = live or logic.sample_dispatch_summary(ctx.df)
+    milp = live or logic.sample_dispatch_summary(ctx.df, ctx.settings)
     tag = milp_tag(live) if live else mock_tag("MILP 목업")
     vss, vss_tag = stochastic_result(ctx, "VSS")
     panel_title("최적화 상세 (MILP · Two-Stage)", tag + vss_tag)
@@ -1366,7 +1373,8 @@ def render_carbon_detail(ctx: Context) -> None:
         )
     ess = ctx.adjust.ess_spec(ctx.settings.ess)
     st.caption(
-        "야간 충전분을 석탄(0.91)이 대고 저녁 방전이 LNG(0.45)를 대체하면 "
+        f"야간 충전분을 석탄({ctx.settings.fuel['coal'].co2_t_per_mwh:.2f})이 대고 "
+        f"저녁 방전이 LNG({ctx.settings.fuel['lng'].co2_t_per_mwh:.2f})를 대체하면 "
         "피크는 줄어도 배출은 늘 수 있다 — 비용·탄소 Trade-off 의 한 예. "
         f"ESS {pw(ess.power_mw)} / {logic.fmt_energy(ess.energy_mwh, compact())}, "
         f"왕복효율 {ess.round_trip_efficiency:.0%} (가정값)."

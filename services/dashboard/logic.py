@@ -21,6 +21,10 @@ import yaml
 
 API_PREFIX = "/api/v1"
 
+# 단위 환산 (정의상 상수라 config 에 두지 않는다)
+KRW_PER_KWH_TO_KRW_PER_MWH = 1000
+WON_PER_EOK = 1e8  # 1억 원
+
 
 # ── 설정 ─────────────────────────────────────────────────────────────────────
 
@@ -52,6 +56,51 @@ class CrisisScenario:
 
 
 @dataclass(frozen=True)
+class ApiSpec:
+    """API 호출 timeout·캐시 TTL (초)."""
+
+    timeout_short_s: float
+    timeout_health_s: float
+    timeout_scenarios_s: float
+    stochastic_timeout_margin_s: float
+    ttl_range_s: int
+    ttl_scenarios_s: int
+    ttl_stochastic_s: int
+    ttl_health_s: int
+
+
+@dataclass(frozen=True)
+class MockSpec:
+    """API 연동 전 목업 값 (config/dashboard.yaml 의 mock)."""
+
+    seed: int
+    forecast_seed: int
+    demand_shape_mw: tuple[float, ...]
+    solar_shape_mw: tuple[float, ...]
+    weekday_factor: tuple[float, ...]
+    wind_base_mw: float
+    wind_amplitude_mw: float
+    nuclear_availability: float
+    hydro_base_ratio: float
+    demand_noise: float
+    solar_noise: float
+    wind_noise_mw: float
+    forecast_demand_actual_sd: float
+    forecast_demand_sd: float
+    forecast_demand_sd_growth: float
+    forecast_solar_actual_sd: float
+    forecast_solar_sd: float
+    forecast_wind_actual_sd_mw: float
+    forecast_wind_sd_mw: float
+    pi_z: float
+    milp_saving: float
+    milp_latency_s: float
+    milp_n_scenarios: int
+    constraint_reserve_pct: float
+    constraint_hydro_pct: float
+
+
+@dataclass(frozen=True)
 class Settings:
     """config/dashboard.yaml 을 읽은 결과."""
 
@@ -63,6 +112,12 @@ class Settings:
     crisis: tuple[CrisisScenario, ...]
     fleet: tuple[Fuel, ...]
     ess: EssSpec
+    api: ApiSpec
+    forecast_history_days: int
+    forecast_horizon_h: int
+    # 페이지별 슬라이더 초기값 {"scenarios": {...}, "stochastic_test": {...}}
+    page_defaults: dict[str, dict[str, float | bool]] = field(hash=False)
+    mock: MockSpec
 
     @property
     def fuel(self) -> dict[str, Fuel]:
@@ -110,6 +165,70 @@ def load_unit_fuels(path: Path | None = None) -> dict[str, str]:
     return {g["id"]: g["fuel"] for g in raw.get("generators", [])}
 
 
+def cfg_value(node: Any, unit: str) -> Any:
+    """{value, unit, source} 항목의 value. unit 이 기대와 다르면 멈춘다 (변환하지 않는다)."""
+    if not isinstance(node, dict) or "value" not in node:
+        raise ValueError(f"config 값은 {{value, unit, source}} 형식이어야 한다: {node!r}")
+    if node.get("unit") != unit:
+        raise ValueError(f"unit 이 '{unit}' 이어야 하는데 '{node.get('unit')}' 이다: {node!r}")
+    return node["value"]
+
+
+# CrisisScenario 필드 → unit
+_CRISIS_UNITS = {"demand_mult": "ratio", "capacity_delta_mw": "MW", "solar_mult": "ratio"}
+# 페이지 초기값 필드 → (unit, 형). compute_ws 같은 bool 은 숫자가 아니라 그대로 둔다
+_PAGE_FIELDS: dict[str, tuple[str, type]] = {
+    "n_scenarios": ("count", int), "n_samples": ("count", int), "seed": ("-", int),
+    "demand_sigma_pct": ("%", float), "demand_ar": ("-", float),
+    "solar_cloud_pct": ("%", float), "wind_sigma_pct": ("%", float),
+    "time_limit_s": ("s", int), "mip_gap_pct": ("%", float),
+}
+
+
+def _page_defaults(raw: dict) -> dict[str, float | bool]:
+    out: dict[str, float | bool] = {}
+    for key, node in raw.items():
+        if isinstance(node, bool):
+            out[key] = node
+        else:
+            unit, cast = _PAGE_FIELDS[key]
+            out[key] = cast(cfg_value(node, unit))
+    return out
+
+
+def _mock(raw: dict) -> MockSpec:
+    def v(key: str, unit: str) -> Any:
+        return cfg_value(raw[key], unit)
+
+    return MockSpec(
+        seed=int(v("seed", "-")),
+        forecast_seed=int(v("forecast_seed", "-")),
+        demand_shape_mw=tuple(v("demand_shape", "MW")),
+        solar_shape_mw=tuple(v("solar_shape", "MW")),
+        weekday_factor=tuple(v("weekday_factor", "ratio")),
+        wind_base_mw=v("wind_base", "MW"),
+        wind_amplitude_mw=v("wind_amplitude", "MW"),
+        nuclear_availability=v("nuclear_availability", "ratio"),
+        hydro_base_ratio=v("hydro_base_ratio", "ratio"),
+        demand_noise=v("demand_noise", "ratio"),
+        solar_noise=v("solar_noise", "ratio"),
+        wind_noise_mw=v("wind_noise", "MW"),
+        forecast_demand_actual_sd=v("forecast_demand_actual_sd", "ratio"),
+        forecast_demand_sd=v("forecast_demand_sd", "ratio"),
+        forecast_demand_sd_growth=v("forecast_demand_sd_growth", "ratio"),
+        forecast_solar_actual_sd=v("forecast_solar_actual_sd", "ratio"),
+        forecast_solar_sd=v("forecast_solar_sd", "ratio"),
+        forecast_wind_actual_sd_mw=v("forecast_wind_actual_sd", "MW"),
+        forecast_wind_sd_mw=v("forecast_wind_sd", "MW"),
+        pi_z=v("pi_z", "-"),
+        milp_saving=v("milp_saving", "ratio"),
+        milp_latency_s=v("milp_latency", "s"),
+        milp_n_scenarios=int(v("milp_n_scenarios", "count")),
+        constraint_reserve_pct=v("constraint_reserve_pct", "%"),
+        constraint_hydro_pct=v("constraint_hydro_pct", "%"),
+    )
+
+
 def load_settings(path: Path | None = None) -> Settings:
     """dashboard.yaml 을 읽는다. path 를 안 주면 _config_candidates() 에서 찾는다."""
     if path is None:
@@ -117,15 +236,51 @@ def load_settings(path: Path | None = None) -> Settings:
         if path is None:
             raise FileNotFoundError("config/dashboard.yaml 을 찾지 못했다")
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    api = raw["api"]
     return Settings(
-        reserve_warning_pct=float(raw["alarm"]["reserve_warning_pct"]),
-        reserve_critical_pct=float(raw["alarm"]["reserve_critical_pct"]),
-        targets={k: float(v) for k, v in raw["targets"].items()},
-        timeout_s=float(raw["api"]["timeout_s"]),
-        cache_ttl_s=int(raw["api"]["cache_ttl_s"]),
-        crisis=tuple(CrisisScenario(**c) for c in raw["crisis_scenarios"]),
-        fleet=tuple(Fuel(**f) for f in raw["fleet"]),
-        ess=EssSpec(**raw["ess"]),
+        reserve_warning_pct=float(cfg_value(raw["alarm"]["reserve_warning_pct"], "%")),
+        reserve_critical_pct=float(cfg_value(raw["alarm"]["reserve_critical_pct"], "%")),
+        targets={
+            k: float(cfg_value(v, "s" if k.endswith("_s") else "%"))
+            for k, v in raw["targets"].items()
+        },
+        timeout_s=float(cfg_value(api["timeout"], "s")),
+        cache_ttl_s=int(cfg_value(api["cache_ttl"], "s")),
+        crisis=tuple(
+            CrisisScenario(
+                name=c["name"],
+                **{k: cfg_value(c[k], unit) for k, unit in _CRISIS_UNITS.items() if k in c},
+            )
+            for c in raw["crisis_scenarios"]
+        ),
+        fleet=tuple(
+            Fuel(
+                code=f["code"], name=f["name"],
+                capacity_mw=cfg_value(f["capacity_mw"], "MW"),
+                fuel_cost_won_per_kwh=cfg_value(f["fuel_cost_won_per_kwh"], "KRW/kWh"),
+                co2_t_per_mwh=cfg_value(f["co2_t_per_mwh"], "tCO2/MWh"),
+            )
+            for f in raw["fleet"]
+        ),
+        ess=EssSpec(
+            power_mw=cfg_value(raw["ess"]["power_mw"], "MW"),
+            energy_mwh=cfg_value(raw["ess"]["energy_mwh"], "MWh"),
+            round_trip_efficiency=cfg_value(raw["ess"]["round_trip_efficiency"], "ratio"),
+        ),
+        api=ApiSpec(
+            timeout_short_s=float(cfg_value(api["timeout_short"], "s")),
+            timeout_health_s=float(cfg_value(api["timeout_health"], "s")),
+            timeout_scenarios_s=cfg_value(api["timeout_scenarios"], "s"),
+            stochastic_timeout_margin_s=float(cfg_value(api["stochastic_timeout_margin"], "s")),
+            ttl_range_s=int(cfg_value(api["cache_ttl_range"], "s")),
+            ttl_scenarios_s=int(cfg_value(api["cache_ttl_scenarios"], "s")),
+            ttl_stochastic_s=int(cfg_value(api["cache_ttl_stochastic"], "s")),
+            ttl_health_s=int(cfg_value(api["cache_ttl_health"], "s")),
+        ),
+        forecast_history_days=int(cfg_value(raw["forecast_request"]["history"], "day")),
+        forecast_horizon_h=int(cfg_value(raw["forecast_request"]["horizon"], "h")),
+        page_defaults={k: _page_defaults(v) for k, v in raw["page_defaults"].items()},
+        mock=_mock(raw["mock"]),
     )
 
 
@@ -199,7 +354,7 @@ def call_api(
     *,
     payload: dict | None = None,
     params: dict | None = None,
-    timeout: float = 12.0,
+    timeout: float,
 ) -> ApiResult:
     """HTTP 호출 한 번. 예외를 올리지 않고 ApiResult 로 돌려준다 (화면이 목업으로 대체)."""
     start = time.perf_counter()
@@ -384,7 +539,7 @@ def carbon_plan_table(with_ess: dict, no_ess: dict) -> pd.DataFrame:
             "배출량(tCO2)": round(t),
             "Rule-based 대비 배출": round(_pct(t, rule_ton), 2),
             "배출집약도(tCO2/MWh)": None if i is None else round(i, 4),
-            "비용(억원)": round(c / 1e8, 1),
+            "비용(억원)": round(c / WON_PER_EOK, 1),
             "Rule-based 대비 비용": round(_pct(c, rule_cost), 2),
         }
         for name, t, i, c in rows
@@ -583,33 +738,22 @@ def parse_forecast(data: dict) -> tuple[pd.DataFrame, dict]:
 
 # ── 목업 데이터 ──────────────────────────────────────────────────────────────
 
-# 하루 수요 곡선 (전형적인 한국 부하 패턴을 본뜬 토이 값, MW)
-DEMAND_SHAPE_MW = [
-    52000, 50000, 49000, 48000, 49000, 52000,
-    58000, 66000, 72000, 76000, 79000, 81000,
-    82000, 80000, 78000, 77000, 78000, 80000,
-    84000, 86000, 83000, 74000, 65000, 57000,
-]
-SOLAR_SHAPE_MW = [
-    0, 0, 0, 0, 0, 200,
-    1200, 3600, 6400, 8800, 10400, 11200,
-    11600, 11200, 10000, 8000, 5600, 2800,
-    800, 100, 0, 0, 0, 0,
-]
-WEEKDAY_FACTOR = [1.0, 1.02, 1.02, 1.01, 1.0, 0.9, 0.85]  # 월~일
+# 수요·태양광 곡선, 요일 계수, 노이즈 등 목업 값은 config/dashboard.yaml 의 mock (Settings.mock).
 
 
-def _wind_shape(h: int) -> float:
-    return 800 + 700 * math.sin(h / 24 * 4 * math.pi)
+def _wind_shape(h: int, mock: MockSpec) -> float:
+    return mock.wind_base_mw + mock.wind_amplitude_mw * math.sin(h / 24 * 4 * math.pi)
 
 
-def merit_dispatch(net_demand: float, solar: float, wind: float, fleet: dict[str, Fuel]) -> dict:
+def merit_dispatch(
+    net_demand: float, solar: float, wind: float, fleet: dict[str, Fuel], mock: MockSpec
+) -> dict:
     """연료비 순 단순 급전. 원자력(기저) → 재생(must-run) → 석탄 → LNG → 수력(첨두).
 
     수력은 싸지만 저수량 제약이 있어 첨두에 쓴다고 가정한다. 못 채운 양은 shed.
     """
-    nuclear = fleet["nuclear"].capacity_mw * 0.95
-    hydro_base = fleet["hydro"].capacity_mw * 0.12  # 유입식 기저 출력
+    nuclear = fleet["nuclear"].capacity_mw * mock.nuclear_availability
+    hydro_base = fleet["hydro"].capacity_mw * mock.hydro_base_ratio  # 유입식 기저 출력
     remaining = max(net_demand - (nuclear + hydro_base + solar + wind), 0.0)
     coal = min(remaining, fleet["coal"].capacity_mw)
     remaining -= coal
@@ -694,15 +838,17 @@ class Adjust:
 
 
 def sample_timeseries(
-    settings: Settings, seed: int = 42, adjust: Adjust | None = None,
+    settings: Settings, seed: int | None = None, adjust: Adjust | None = None,
     demand_factor: float = 1.0,
 ) -> pd.DataFrame:
     """24시간 더미 급전 결과 (ESS 반영 / 미반영 둘 다). dispatch_api 연동 후 제거.
 
     demand_factor 는 요일 효과 같은 날짜별 수요 계수다 (sample_day 가 넘긴다).
+    seed 를 안 주면 config 의 mock.seed.
     """
     adjust = adjust or Adjust()
-    rng = random.Random(seed)
+    mock = settings.mock
+    rng = random.Random(mock.seed if seed is None else seed)
     fleet = dict(settings.fuel)
     nuke = fleet["nuclear"]
     fleet["nuclear"] = Fuel(
@@ -712,14 +858,17 @@ def sample_timeseries(
     ess = adjust.ess_spec(settings.ess)
 
     demand = [
-        d * (1 + rng.uniform(-0.015, 0.015)) * adjust.demand_pct / 100 * demand_factor
-        for d in DEMAND_SHAPE_MW
+        d * (1 + rng.uniform(-mock.demand_noise, mock.demand_noise))
+        * adjust.demand_pct / 100 * demand_factor
+        for d in mock.demand_shape_mw
     ]
     solar = [
-        s * (1 + rng.uniform(-0.05, 0.05)) * adjust.solar_pct / 100 for s in SOLAR_SHAPE_MW
+        s * (1 + rng.uniform(-mock.solar_noise, mock.solar_noise)) * adjust.solar_pct / 100
+        for s in mock.solar_shape_mw
     ]
     wind = [
-        max(_wind_shape(h) + rng.uniform(-300, 300), 0.0) * adjust.wind_pct / 100
+        max(_wind_shape(h, mock) + rng.uniform(-mock.wind_noise_mw, mock.wind_noise_mw), 0.0)
+        * adjust.wind_pct / 100
         for h in range(24)
     ]
     charge, discharge, soc = plan_ess(demand, ess)
@@ -728,8 +877,8 @@ def sample_timeseries(
     rows = []
     for h in range(24):
         net = demand[h] + charge[h] - discharge[h]
-        with_ess = merit_dispatch(net, solar[h], wind[h], fleet)
-        no_ess = merit_dispatch(demand[h], solar[h], wind[h], fleet)
+        with_ess = merit_dispatch(net, solar[h], wind[h], fleet, mock)
+        no_ess = merit_dispatch(demand[h], solar[h], wind[h], fleet, mock)
         available = firm_mw + solar[h] + wind[h] + ess.power_mw
         rows.append({
             "hour": h,
@@ -742,7 +891,8 @@ def sample_timeseries(
             "carbon_ton": _carbon(with_ess, fleet),
             "carbon_no_ess_ton": _carbon(no_ess, fleet),
             "fuel_cost_won": sum(
-                with_ess[c] * fleet[c].fuel_cost_won_per_kwh * 1000 for c in fleet
+                with_ess[c] * fleet[c].fuel_cost_won_per_kwh * KRW_PER_KWH_TO_KRW_PER_MWH
+                for c in fleet
             ),
             "available_capacity_mw": available,
             "reserve_pct": (available - demand[h]) / demand[h] * 100,
@@ -760,7 +910,7 @@ def sample_day(settings: Settings, day: date, adjust: Adjust | None = None) -> p
     """
     df = sample_timeseries(
         settings, seed=day.toordinal(), adjust=adjust,
-        demand_factor=WEEKDAY_FACTOR[day.weekday()],
+        demand_factor=settings.mock.weekday_factor[day.weekday()],
     )
     df.insert(0, "date", day)
     df.insert(1, "ts", pd.Timestamp(day) + pd.to_timedelta(df.hour, unit="h"))
@@ -806,26 +956,35 @@ def _carbon(outputs: dict, fleet: dict[str, Fuel]) -> float:
     return sum(outputs[c] * fleet[c].co2_t_per_mwh for c in fleet)
 
 
-def sample_forecast(settings: Settings, seed: int = 7, horizon_h: int = 168) -> pd.DataFrame:
-    """168h 더미 예측 (실측·예측·90% PI). 멀리 볼수록 오차를 키운다. forecast_api 연동 후 제거."""
-    rng = random.Random(seed)
+def sample_forecast(
+    settings: Settings, seed: int | None = None, horizon_h: int | None = None
+) -> pd.DataFrame:
+    """더미 예측 (실측·예측·90% PI). 멀리 볼수록 오차를 키운다. forecast_api 연동 후 제거.
+
+    seed·horizon_h 를 안 주면 config 의 mock.forecast_seed, forecast_request.horizon.
+    """
+    m = settings.mock
+    rng = random.Random(m.forecast_seed if seed is None else seed)
+    horizon_h = settings.forecast_horizon_h if horizon_h is None else horizon_h
     solar_cap = settings.fuel["solar"].capacity_mw
     rows = []
     for h in range(horizon_h):
-        base = DEMAND_SHAPE_MW[h % 24] * WEEKDAY_FACTOR[(h // 24) % 7]
-        actual = base * (1 + rng.gauss(0, 0.01))
-        sd = 0.02 + 0.03 * h / horizon_h
+        base = m.demand_shape_mw[h % 24] * m.weekday_factor[(h // 24) % 7]
+        actual = base * (1 + rng.gauss(0, m.forecast_demand_actual_sd))
+        sd = m.forecast_demand_sd + m.forecast_demand_sd_growth * h / horizon_h
         fc = actual * (1 + rng.gauss(0, sd))
-        solar_act = SOLAR_SHAPE_MW[h % 24] * max(1 + rng.gauss(0, 0.1), 0)
-        solar_fc = max(solar_act + rng.gauss(0, 0.06 * solar_cap), 0) if solar_act else 0.0
-        wind_act = max(_wind_shape(h) + rng.gauss(0, 200), 0.0)
-        wind_fc = max(wind_act + rng.gauss(0, 350), 0.0)
+        solar_act = m.solar_shape_mw[h % 24] * max(1 + rng.gauss(0, m.forecast_solar_actual_sd), 0)
+        solar_fc = (
+            max(solar_act + rng.gauss(0, m.forecast_solar_sd * solar_cap), 0) if solar_act else 0.0
+        )
+        wind_act = max(_wind_shape(h, m) + rng.gauss(0, m.forecast_wind_actual_sd_mw), 0.0)
+        wind_fc = max(wind_act + rng.gauss(0, m.forecast_wind_sd_mw), 0.0)
         rows.append({
             "hour": h,
             "demand_actual_mw": actual,
             "demand_fc_mw": fc,
-            "demand_lo_mw": fc * (1 - 1.645 * sd),
-            "demand_hi_mw": fc * (1 + 1.645 * sd),
+            "demand_lo_mw": fc * (1 - m.pi_z * sd),
+            "demand_hi_mw": fc * (1 + m.pi_z * sd),
             "solar_actual_mw": solar_act,
             "solar_fc_mw": solar_fc,
             "wind_actual_mw": wind_act,
@@ -855,19 +1014,20 @@ def forecast_metrics(fc: pd.DataFrame, settings: Settings) -> dict[str, float]:
     }
 
 
-def sample_dispatch_summary(df: pd.DataFrame) -> dict:
+def sample_dispatch_summary(df: pd.DataFrame, settings: Settings) -> dict:
     """MILP 요약 목업. dispatch_api 가 응답하지 않을 때 쓴다 (응답이 있으면 parse_milp)."""
+    m = settings.mock
     milp_cost = float(df.fuel_cost_won.sum())
-    rule_cost = milp_cost / (1 - 0.124)
+    rule_cost = milp_cost / (1 - m.milp_saving)
     return {
         "milp_cost_won": milp_cost,
         "rule_cost_won": rule_cost,
         "saving_pct": (rule_cost - milp_cost) / rule_cost * 100,
-        "latency_s": 3.2,
-        "n_scenarios": 12,
+        "latency_s": m.milp_latency_s,
+        "n_scenarios": m.milp_n_scenarios,
         "constraints": {
-            "수급균형": True, "예비율≥10%": True, "출력 상하한": True,
-            "램프율": True, "최소기동정지": True, "수력저수율<30%": True,
+            "수급균형": True, f"예비율≥{m.constraint_reserve_pct:g}%": True, "출력 상하한": True,
+            "램프율": True, "최소기동정지": True, f"수력저수율<{m.constraint_hydro_pct:g}%": True,
         },
     }
 
@@ -904,8 +1064,13 @@ def apply_scenario(row: pd.Series, scenario: CrisisScenario) -> tuple[float, flo
     return demand, capacity
 
 
+def crisis_ok_column(settings: Settings) -> str:
+    """crisis_table 의 유지 여부 열 이름. 예: "5% 유지"."""
+    return f"{settings.targets['crisis_reserve_pct']:g}% 유지"
+
+
 def crisis_table(df: pd.DataFrame, settings: Settings) -> pd.DataFrame:
-    """시나리오별 하루 중 최저 예비율과 그 시각, 5% 유지 여부."""
+    """시나리오별 하루 중 최저 예비율과 그 시각, 기준(crisis_reserve_pct) 유지 여부."""
     out = []
     for sc in settings.crisis:
         reserves = []
@@ -917,7 +1082,7 @@ def crisis_table(df: pd.DataFrame, settings: Settings) -> pd.DataFrame:
             "시나리오": sc.name,
             "최저 예비율(%)": round(reserves[worst], 1),
             "시각": f"{int(df.hour.iloc[worst])}시",
-            "5% 유지": meets(settings, "crisis_reserve_pct", reserves[worst]),
+            crisis_ok_column(settings): meets(settings, "crisis_reserve_pct", reserves[worst]),
         })
     return pd.DataFrame(out)
 
@@ -957,7 +1122,7 @@ def fmt_won(won: float, compact: bool = True) -> str:
     if not compact:
         return f"{won:,.0f}원"
     sign, v = ("-" if won < 0 else ""), abs(won)
-    for unit, size in (("조", 1e12), ("억", 1e8), ("만", 1e4)):
+    for unit, size in (("조", 1e12), ("억", WON_PER_EOK), ("만", 1e4)):
         if v >= size:
             return f"{sign}{v / size:,.1f}{unit}원"
     return f"{sign}{v:,.0f}원"
@@ -1048,5 +1213,5 @@ def hourly_table(settings: Settings, df: pd.DataFrame) -> pd.DataFrame:
     out["예비율(%)"] = df.reserve_pct.round(1)
     out["공급부족(MW)"] = df.shed_mw.round(0)
     out["배출(tCO2)"] = df.carbon_ton.round(0)
-    out["연료비(억원)"] = (df.fuel_cost_won / 1e8).round(2)
+    out["연료비(억원)"] = (df.fuel_cost_won / WON_PER_EOK).round(2)
     return out

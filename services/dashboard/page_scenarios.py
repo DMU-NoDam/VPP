@@ -19,6 +19,7 @@ from ui import (
     C_GREEN,
     C_TEXT,
     C_YELLOW,
+    CFG,
     badge,
     get_settings,
     panel_title,
@@ -27,16 +28,9 @@ from ui import (
     style_dark,
 )
 
-# 생성 조건 기본값 (shared/schemas.py ScenarioRequest 와 같다)
-DEFAULTS: dict[str, float] = {
-    "n_scenarios": 10,
-    "n_samples": 300,
-    "seed": 42,
-    "demand_sigma_pct": 2.5,
-    "demand_ar": 0.9,
-    "solar_cloud_pct": 10.0,
-    "wind_sigma_pct": 25.0,
-}
+# 생성 조건 초기값. config/dashboard.yaml 의 page_defaults.scenarios
+# (서버 config/stochastic.yaml 의 scenario_generator 와 같은 값으로 맞춘다)
+DEFAULTS: dict[str, float] = dict(CFG.page_defaults["scenarios"])
 
 VARIABLES = {
     "순부하": ("net", "수요 − 태양광 − 풍력. 발전기가 실제로 메워야 하는 양"),
@@ -46,11 +40,12 @@ VARIABLES = {
 }
 
 
-@st.cache_data(ttl=600, show_spinner="시나리오 생성 중…")
+@st.cache_data(ttl=CFG.api.ttl_scenarios_s, show_spinner="시나리오 생성 중…")
 def fetch_scenarios(base_url: str, payload_json: str) -> ApiResult:
     """POST /scenarios. 같은 조건이면 캐시를 쓴다 (payload 를 JSON 문자열로 받아 키로 쓴다)."""
     return logic.call_api(
-        "POST", f"{base_url}{API_PREFIX}/scenarios", payload=json.loads(payload_json), timeout=30
+        "POST", f"{base_url}{API_PREFIX}/scenarios", payload=json.loads(payload_json),
+        timeout=CFG.api.timeout_scenarios_s,
     )
 
 

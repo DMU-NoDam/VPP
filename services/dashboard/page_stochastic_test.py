@@ -23,6 +23,7 @@ from ui import (
     C_RED,
     C_TEXT,
     C_YELLOW,
+    CFG,
     HEAT_SCALE,
     badge,
     get_settings,
@@ -33,15 +34,12 @@ from ui import (
     won,
 )
 
-# 실행 조건 기본값. 제한 시간은 API 기본(10초)보다 길게 둔다 — 25기 x 24h x 10 시나리오의
+# 실행 조건 초기값. config/dashboard.yaml 의 page_defaults.stochastic_test.
+# 제한 시간은 API 기본(10초)보다 길게 둔다 — 25기 x 24h x 10 시나리오의
 # RP 는 HiGHS 버전·PC 에 따라 10초를 넘기고, 덜 풀리면 VSS 가 음수로 나온다.
-DEFAULTS: dict[str, float | bool] = {
-    "seed": 42,
-    "n_scenarios": 10,
-    "time_limit_s": 60,
-    "mip_gap_pct": 0.5,
-    "compute_ws": False,
-}
+DEFAULTS: dict[str, float | bool] = dict(CFG.page_defaults["stochastic_test"])
+# 한 번 호출에 푸는 문제 수: RP·EV·EEV (정의상 3, WS 를 켜면 시나리오 수만큼 더)
+SOLVES_PER_CALL = 3
 
 SCENARIO_KEYS = ("scenario_id", "probability", "demand_mw", "solar_mw", "wind_mw")
 
@@ -63,10 +61,16 @@ COST_PARTS = {
 # ── 계산 (화면 없이 테스트 가능) ─────────────────────────────────────────────
 
 
-def request_timeout(time_limit_s: float, n_scenarios: int, compute_ws: bool) -> float:
-    """HTTP 타임아웃. RP·EV·EEV 3번 + (WS 면 시나리오 수만큼) 풀고, 모델 생성 여유를 더한다."""
-    solves = 3 + (n_scenarios if compute_ws else 0)
-    return time_limit_s * solves + 60.0
+def request_timeout(
+    time_limit_s: float, n_scenarios: int, compute_ws: bool, margin_s: float | None = None
+) -> float:
+    """HTTP 타임아웃. RP·EV·EEV 3번 + (WS 면 시나리오 수만큼) 풀고, 모델 생성 여유를 더한다.
+
+    margin_s 를 안 주면 config 의 api.stochastic_timeout_margin.
+    """
+    margin_s = CFG.api.stochastic_timeout_margin_s if margin_s is None else margin_s
+    solves = SOLVES_PER_CALL + (n_scenarios if compute_ws else 0)
+    return time_limit_s * solves + margin_s
 
 
 def summarize(data: dict, mip_gap: float) -> dict:
@@ -162,8 +166,8 @@ def history_row(params: dict, summary: dict) -> dict:
         "제한(초)": params["time_limit_s"],
         "gap(%)": params["mip_gap_pct"],
         "상태": summary["status"],
-        "RP(억원)": summary["rp_won"] / 1e8,
-        "EEV(억원)": summary["eev_won"] / 1e8,
+        "RP(억원)": summary["rp_won"] / logic.WON_PER_EOK,
+        "EEV(억원)": summary["eev_won"] / logic.WON_PER_EOK,
         "VSS(%)": summary["vss_pct"],
         "풀이(초)": summary["solve_time_s"],
     }
@@ -172,7 +176,10 @@ def history_row(params: dict, summary: dict) -> dict:
 # ── 호출 ─────────────────────────────────────────────────────────────────────
 
 
-@st.cache_data(ttl=1800, show_spinner="Two-Stage 최적화 실행 중… (제한 시간만큼 걸릴 수 있다)")
+@st.cache_data(
+    ttl=CFG.api.ttl_stochastic_s,
+    show_spinner="Two-Stage 최적화 실행 중… (제한 시간만큼 걸릴 수 있다)",
+)
 def fetch_stochastic(base_url: str, payload_json: str, timeout: float) -> ApiResult:
     """POST /dispatch/stochastic. 같은 조건이면 캐시를 쓴다."""
     return logic.call_api(
@@ -274,7 +281,7 @@ def render_problems(summary: dict) -> None:
     frame = problem_frame(summary)
     colors = [C_YELLOW if name == "RP" else C_GREEN for name in frame["문제"]]
     fig = go.Figure(go.Bar(
-        x=frame["RP 대비(원)"] / 1e8, y=frame["문제"], orientation="h",
+        x=frame["RP 대비(원)"] / logic.WON_PER_EOK, y=frame["문제"], orientation="h",
         marker_color=colors, marker_line_width=0, marker_cornerradius=6,
         text=[won(v) for v in frame["비용(원)"]], textposition="outside",
         hovertemplate="%{y} · RP 대비 %{x:+,.2f}억원<extra></extra>",
@@ -298,7 +305,7 @@ def render_breakdown(data: dict) -> None:
     panel_title("RP 기대비용 구성")
     frame = breakdown_frame(data)
     fig = go.Figure(go.Bar(
-        x=frame["비용(원)"] / 1e8, y=frame["항목"], orientation="h",
+        x=frame["비용(원)"] / logic.WON_PER_EOK, y=frame["항목"], orientation="h",
         marker_color=C_GREEN, marker_line_width=0, marker_cornerradius=6,
         text=[f"{p:.1f}%" for p in frame["비중(%)"]], textposition="outside",
         hovertemplate="%{y} %{x:,.2f}억원<extra></extra>",
@@ -318,7 +325,7 @@ def render_scenarios(data: dict, labels: dict[str, str]) -> None:
     panel_title("시나리오별 2단계 결과 (RP 의 1단계 해 기준)")
     frame = scenario_frame(data, labels)
     fig = go.Figure(go.Bar(
-        x=frame["ID"], y=frame["비용(원)"] / 1e8,
+        x=frame["ID"], y=frame["비용(원)"] / logic.WON_PER_EOK,
         marker_color=[C_RED if s > 0 else C_GREEN for s in frame["부하차단(MWh)"]],
         marker_line_width=0, marker_cornerradius=6, customdata=frame[["라벨", "확률"]],
         hovertemplate="%{x} · %{customdata[0]} · p=%{customdata[1]:.1%}"

@@ -22,16 +22,21 @@ C_CARD = "#232529"
 HEAT_SCALE = [[0.0, "#232529"], [0.35, "#3f6212"], [0.7, "#84cc16"], [1.0, "#d9f99d"]]
 
 
+# st.cache_data 의 ttl 은 함수를 정의할 때 정해져야 해서, 모듈을 불러올 때 설정을 한 번 읽는다.
+# (app.py·page_*.py 의 캐시 TTL·timeout 이 이 값을 쓴다)
+CFG: Settings = logic.load_settings()
+
+
 @st.cache_resource
 def get_settings() -> Settings:
     """config/dashboard.yaml. 컨테이너 수명 동안 한 번만 읽는다."""
     return logic.load_settings()
 
 
-@st.cache_data(ttl=30, show_spinner=False)
+@st.cache_data(ttl=CFG.api.ttl_health_s, show_spinner=False)
 def fetch_health(base_url: str) -> ApiResult:
     """서비스 /health. 꺼져 있을 때 화면이 오래 멈추지 않게 타임아웃을 짧게 둔다."""
-    return logic.call_api("GET", f"{base_url}/health", timeout=2.0)
+    return logic.call_api("GET", f"{base_url}/health", timeout=CFG.api.timeout_health_s)
 
 
 # ── 스타일 (차콜 배경 + 둥근 카드 + 라임 포인트) ────────────────────────────

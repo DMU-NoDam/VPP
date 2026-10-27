@@ -209,8 +209,8 @@ def test_parse_forecast_rejects_missing_demand() -> None:
         logic.parse_forecast(data)
 
 
-def test_sample_dispatch_summary(df) -> None:
-    s = logic.sample_dispatch_summary(df)
+def test_sample_dispatch_summary(settings, df) -> None:
+    s = logic.sample_dispatch_summary(df, settings)
     assert s["saving_pct"] == pytest.approx(12.4)
     assert s["milp_cost_won"] == pytest.approx(df.fuel_cost_won.sum())
 
@@ -267,7 +267,8 @@ def test_parse_milp_reads_baseline_and_constraints() -> None:
     assert data["solve_s"] == pytest.approx(1.4)
     assert data["constraints"] == {"수급 균형": True, "예비율": False}
     # 목업과 키가 같아야 화면 코드가 둘을 바꿔 쓸 수 있다
-    assert set(logic.sample_dispatch_summary(pd.DataFrame({"fuel_cost_won": [1.0]}))) - {
+    assert set(logic.sample_dispatch_summary(
+        pd.DataFrame({"fuel_cost_won": [1.0]}), logic.load_settings(CONFIG))) - {
         "n_scenarios"} <= set(data)
 
 
@@ -363,20 +364,20 @@ class _FakeResponse:
 
 def test_call_api_ok(monkeypatch) -> None:
     monkeypatch.setattr(logic.requests, "request", lambda *a, **k: _FakeResponse(200, {"x": 1}))
-    res = logic.call_api("GET", "http://svc/health")
+    res = logic.call_api("GET", "http://svc/health", timeout=1.0)
     assert res.ok and res.data == {"x": 1} and res.latency_s is not None
 
 
 def test_call_api_http_error(monkeypatch) -> None:
     monkeypatch.setattr(logic.requests, "request", lambda *a, **k: _FakeResponse(404))
-    res = logic.call_api("POST", "http://svc/x")
+    res = logic.call_api("POST", "http://svc/x", timeout=1.0)
     assert not res.ok and res.error == "HTTP 404"
 
 
 def test_call_api_bad_json(monkeypatch) -> None:
     bad = _FakeResponse(200, bad_json=True)
     monkeypatch.setattr(logic.requests, "request", lambda *a, **k: bad)
-    assert logic.call_api("GET", "http://svc/x").error == "JSON 아님"
+    assert logic.call_api("GET", "http://svc/x", timeout=1.0).error == "JSON 아님"
 
 
 def test_call_api_connection_error(monkeypatch) -> None:
@@ -384,7 +385,7 @@ def test_call_api_connection_error(monkeypatch) -> None:
         raise requests.ConnectionError()
 
     monkeypatch.setattr(logic.requests, "request", boom)
-    res = logic.call_api("GET", "http://svc/x")
+    res = logic.call_api("GET", "http://svc/x", timeout=1.0)
     assert not res.ok and res.error == "ConnectionError"
 
 
@@ -1032,3 +1033,39 @@ def test_parse_stochastic_latest() -> None:
     assert data["seed"] == 1 and data["reserve_ratio"] == 0.1 and data["state"] == "running"
     assert data["computed_at"].hour == 15
     assert logic.parse_stochastic_latest({**latest, "result": None}) is None
+
+
+# ── config/dashboard.yaml ({value, unit, source}) ───────────────────────────
+
+
+def test_cfg_value_checks_unit() -> None:
+    node = {"value": 5.0, "unit": "%", "source": "x"}
+    assert logic.cfg_value(node, "%") == 5.0
+    with pytest.raises(ValueError):
+        logic.cfg_value(node, "ratio")
+    with pytest.raises(ValueError):
+        logic.cfg_value(5.0, "%")  # 맨 숫자는 받지 않는다
+
+
+def test_load_settings_rejects_wrong_unit(tmp_path) -> None:
+    import yaml
+
+    raw = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
+    raw["ess"]["power_mw"]["unit"] = "kW"
+    bad = tmp_path / "dashboard.yaml"
+    bad.write_text(yaml.safe_dump(raw, allow_unicode=True), encoding="utf-8")
+    with pytest.raises(ValueError):
+        logic.load_settings(bad)
+
+
+def test_page_defaults_keep_types(settings) -> None:
+    scn = settings.page_defaults["scenarios"]
+    assert isinstance(scn["seed"], int) and isinstance(scn["n_samples"], int)
+    assert isinstance(scn["demand_sigma_pct"], float)
+    sto = settings.page_defaults["stochastic_test"]
+    assert isinstance(sto["time_limit_s"], int) and sto["compute_ws"] is False
+
+
+def test_crisis_ok_column_follows_target(settings) -> None:
+    col = logic.crisis_ok_column(settings)
+    assert col == f"{settings.targets['crisis_reserve_pct']:g}% 유지"
