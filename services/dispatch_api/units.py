@@ -5,7 +5,7 @@ stochastic.py 는 이 모듈의 Unit 필드만 쓴다. C 의 MILP 로더가 생�
 
 연료비는 generators.yaml 에 없다 (월별로 변하는 값). collector 의 fuel_cost 데이터셋
 (month, fuel, cost_won_per_kwh)에서 최신 월 값을 REST 로 받아 fuel 코드로 조인하고,
-원/kWh → 원/MWh 변환(constants.KRW_PER_KWH_TO_KRW_PER_MWH)은 여기 한 곳에서만 한다.
+원/kWh → 원/MWh 변환(KRW_PER_KWH_TO_KRW_PER_MWH)은 여기 한 곳에서만 한다.
 collector 가 응답하지 않으면 data/csv/fuel_cost.csv 스냅샷을 읽는다. 유닛에
 fuel_cost_krw_per_mwh 가 적혀 있으면 (수력) 조인 대신 그 값을 쓴다.
 
@@ -25,9 +25,9 @@ from typing import Any
 
 import yaml
 
-import constants
-
 HERE = Path(__file__).resolve()
+# 단위 환산 계수 (파라미터가 아니다). C 의 constants.py 가 main 에 들어오면 그쪽으로 합친다
+KRW_PER_KWH_TO_KRW_PER_MWH = 1000
 
 
 @dataclass(frozen=True)
@@ -81,7 +81,7 @@ def latest_fuel_costs(rows: list[dict]) -> dict[str, float]:
         if row.get("cost_won_per_kwh") in (None, ""):
             continue
         if fuel not in latest or month > latest[fuel][0]:
-            cost = float(row["cost_won_per_kwh"]) * constants.KRW_PER_KWH_TO_KRW_PER_MWH
+            cost = float(row["cost_won_per_kwh"]) * KRW_PER_KWH_TO_KRW_PER_MWH
             latest[fuel] = (month, cost)
     return {fuel: cost for fuel, (_, cost) in latest.items()}
 
