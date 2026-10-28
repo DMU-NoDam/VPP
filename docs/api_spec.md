@@ -30,12 +30,160 @@
 
 ## TODO: POST /api/v1/forecast
 
-## TODO: POST /api/v1/dispatch/milp
+## POST /api/v1/dispatch/milp (dispatch_api `:8002`)
+
+UC 포함 경제급전 MILP. 스키마는 `shared/schemas.py` 의 `MilpRequest` / `MilpResponse`,
+정식화는 [formulation.md](formulation.md) 4장. 모든 필드에 기본값이 있어 `{}` 만
+보내도 된다.
+
+### 요청
+
+```json
+{
+  "horizon_h": 24,
+  "net_demand_mw": null,
+  "start": null,
+  "reserve_ratio": null,
+  "storage_rate_pct": null,
+  "p_init_mw": null,
+  "unit_ids": null,
+  "allow_load_shedding": false,
+  "shed_penalty_won_per_mwh": null,
+  "use_ess": true,
+  "ess_mode": null,
+  "ess_peak_target_pct": null,
+  "include_baseline": true,
+  "include_units": true,
+  "solver": { "time_limit_s": 10, "mip_gap": 0.005 }
+}
+```
+
+| 필드 | 뜻 |
+|---|---|
+| `horizon_h` | 1~168, 기본 24 |
+| `net_demand_mw` | 순수요 배열(MW, 길이 = `horizon_h`). 수요 - (태양광+풍력+신재생). 비우면 수집 데이터의 **최신 연속 구간**을 쓴다 |
+| `start` | `net_demand_mw` 의 첫 시각. 비우면 현재 시(時), tz-aware |
+| `reserve_ratio` | 예비율 요건. 비우면 `config/settings.yaml` (0.10) |
+| `storage_rate_pct` | 저수율(%). 비우면 `dam_status` 최신 관측 평균 |
+| `p_init_mw` | `{"coal_1": 3000.0}` 형태의 직전 출력. 없으면 t=0 램프 제약을 생략하고 `notes` 에 남긴다 |
+| `unit_ids` | 쓸 유닛 일부만 지정 (발전소 탈락 시나리오). 없는 id 면 500 |
+| `allow_load_shedding` | `[모델링 선택]` 기본 false. true 면 부족량이 `shed_mw` 로 나온다 |
+| `use_ess` | 기본 true. false 면 ESS 없이 푼다 (피크 전/후 비교의 "전") |
+| `ess_mode` | `cost`(기본) / `peak_shaving` / `combined`. 비우면 `config/ess.yaml`. 피크 5% KPI 는 `peak_shaving` 으로 본다 |
+| `ess_peak_target_pct` | `peak_shaving` 목표 감소율(%). 비우면 ess.yaml (5.0) |
+| `include_baseline` | Rule-based 비교와 절감률 포함 (기본 true) |
+| `include_units` | 유닛 x 시간 급전값 포함 (29기 x 24h = 696행) |
+| `solver` | 요청별 time limit / MIP gap |
+
+forecast_api 연동 전까지는 `net_demand_mw` 를 직접 주는 경로를 쓴다. `/api/v1/scenarios`
+의 시나리오 하나를 `demand - solar - wind` 로 합쳐 넣으면 시나리오별 재실행이 된다.
+
+### 응답 (배열은 앞부분만, 숫자는 실제 실행값)
+
+```json
+{
+  "status": "optimal",
+  "method": "milp",
+  "horizon_h": 24,
+  "timestamps": ["2026-04-10T00:00:00+09:00", "2026-04-10T01:00:00+09:00"],
+  "model_size": {
+    "n_variables": 2808, "n_binaries": 696, "n_constraints": 4564,
+    "build_time_s": 0.026, "solve_time_s": 0.243, "total_time_s": 0.269
+  },
+  "cost": {
+    "fuel_won": 74279713808.4, "startup_won": 340000000.0,
+    "recourse_won": 0.0, "shed_won": 0.0, "total_won": 74619713808.4
+  },
+  "hours": [
+    { "timestamp": "2026-04-10T00:00:00+09:00", "demand_mw": 56425.6,
+      "supply_mw": 56425.6, "reserve_pct": 21.4, "shed_mw": 0.0,
+      "ess_mw": 0.0, "co2_t": 26823.7 }
+  ],
+  "units": [
+    { "timestamp": "2026-04-10T00:00:00+09:00", "unit_id": "nuclear_1",
+      "on": true, "p_mw": 6512.5 }
+  ],
+  "merit_order": [
+    { "rank": 1, "fuel": "hydro", "fuel_cost_krw_per_mwh": 0.0,
+      "capacity_mw": 1609.8, "energy_mwh": 38635.2, "unit_hours_on": 48.0,
+      "n_units": 2.0, "co2_ton": 2955.6 }
+  ],
+  "carbon": {
+    "total_ton": 714512.2, "hourly_ton": [26823.7, 24817.0],
+    "by_fuel_ton": { "nuclear": 3594.9, "bituminous_coal": 702087.9 },
+    "intensity_ton_per_mwh": 0.498
+  },
+  "ess": {
+    "mode": "peak_shaving",
+    "power_charge_mw": 4700.0, "power_discharge_mw": 4700.0,
+    "capacity_mwh": 32900.0, "round_trip_efficiency": 0.75,
+    "soc_min_mwh": 3290.0, "soc_max_mwh": 31255.0, "soc_init_mwh": 16450.0,
+    "charge_mw": [2271.1, 0.0], "discharge_mw": [0.0, 4424.0],
+    "soc_mwh": [31255.0, 26146.6], "soc_pct": [95.0, 79.5],
+    "energy_charged_mwh": 24698.7, "energy_discharged_mwh": 18524.0,
+    "loss_mwh": 6174.7, "cycles": 0.66,
+    "peak_before_mw": 84000.0, "peak_after_mw": 79300.0,
+    "peak_reduction_pct": 5.6, "peak_target_pct": 5.0, "target_met": true
+  },
+  "constraints": [
+    { "name": "수급 균형", "ok": true, "detail": "위반 없음" },
+    { "name": "예비율", "ok": true, "detail": "위반 없음" },
+    { "name": "ESS SOC 전이식", "ok": true, "detail": "위반 없음" }
+  ],
+  "baseline": {
+    "method": "rule_based",
+    "rules": ["R1 우선순위: 연료비 오름차순 (동률이면 큰 유닛 먼저)"],
+    "total_cost_won": 75116797926.6, "fuel_won": 74756797926.6,
+    "startup_won": 360000000.0, "carbon_total_ton": 710747.7,
+    "peak_mw": 66348.9, "cost_reduction_pct": 0.66, "target_met": false,
+    "constraints": [{ "name": "수급 균형", "ok": true, "detail": "위반 없음" }]
+  },
+  "reserve_ratio": 0.1,
+  "hydro_factor": 1.0,
+  "notes": ["유닛별 초기 출력(p_init_mw)이 없어 t=0 의 램프 제약을 생략했다"]
+}
+```
+
+### 읽는 법
+
+- `status`: `optimal` | `feasible` | `infeasible` | `time_limit` | `error`.
+  **`optimal` 이 아니면 급전값은 유효하지 않다** (전부 0). `notes` 에 진단 순서가 담긴다.
+- `constraints`: 해를 받은 뒤 제약을 다시 검사한 결과
+  (수급 균형 / 출력 상·하한 / 예비율 / 램프업 / 램프다운 / 최소 기동시간 /
+  최소 정지시간 / 수력 저수율 제한 / 과잉발전 / 부하차단, ESS 를 쓰면 + ESS 출력
+  한계 / SOC 범위 / SOC 전이식 / 종료 SOC / 동시 충방전). 정상 해에서는 전부
+  `ok: true`. `status` 가 optimal 이 아니면 검증할 계획이 없으므로 `제약 검증`
+  한 줄만 돌아온다.
+- `model_size.total_time_s`: 응답시간 KPI(<= 10초)를 이 값으로 확인한다.
+  (HTTP 왕복에는 데이터 로딩이 더해지지만, 로딩 결과는 파일 변경 전까지 캐시된다.)
+- `baseline.cost_reduction_pct`: `(baseline - milp) / baseline x 100`. 기준 >= 10%.
+  `target_met` 이 판정이다. 양쪽 모두 같은 회계(연료비 + 기동비)를 쓴다.
+- `hours[].ess_mw`: ESS 순출력 (+ 방전 / - 충전). `use_ess: false` 면 0.
+- `ess`: 사양 + 시간대별 충·방전·SOC + 피크 저감 효과. `peak_reduction_pct` 의
+  정의는 `(ESS 미적용 순수요 피크 - 적용 후 발전기 부하 피크) / 전 x 100` 이고
+  기준은 5% 다 ([formulation.md](formulation.md) 5.4). `target_met` 이 판정이다.
+  `cost` 모드는 피크 감소를 **보장하지 않는다** (단가 차이가 없으면 ESS 를 쓸
+  이유가 없다). 5% 를 보장해야 하면 `peak_shaving` 을 쓰고, 물리적으로 불가능한
+  목표면 `status: infeasible` 로 돌아온다.
+- ESS 를 켠 채 `include_baseline: true` 로 받은 `cost_reduction_pct` 는
+  "MILP + ESS vs ESS 없는 Rule-based" 비교다. 조건이 다르다는 사실이 `notes` 에
+  들어간다 (baseline 에 ESS 를 포함할지는 `[미정]`).
+
+### HTTP 상태
+
+| 코드 | 경우 |
+|---:|---|
+| 200 | 최적화가 끝났다. infeasible 도 200 이며 `status` 로 구분한다 |
+| 422 | 입력 시계열이 모자라거나 길이가 안 맞는다 (`net_demand_mw` 길이 != `horizon_h` 등) |
+| 500 | config 오류 (없는 `unit_ids`, generators.yaml 규칙 위반) |
+| 503 | solver 를 이 환경에서 쓸 수 없다 |
+
 
 ## POST /api/v1/scenarios (dispatch_api `:8002`)
 
 불확실성 시나리오 생성기. 스키마: `shared/schemas.py` 의 `ScenarioRequest` / `ScenarioSetResponse`.
-방법은 [formulation.md](formulation.md) 7절. 모든 필드에 기본값이 있어 `{}` 만 보내도 된다.
+방법은 [formulation.md](formulation.md) 7절. 모든 필드를 비울 수 있고(`{}` 만 보내도 된다), 비운 필드는
+`config/stochastic.yaml` 의 `scenario_generator` 값으로 채운다. 아래 요청 예시의 숫자가 현재 config 값이다.
 
 요청:
 
@@ -66,12 +214,39 @@
 
 `scenarios` 는 피크 순부하 내림차순이다 (S01 이 가장 빡빡한 날). 각 시나리오의 `scenario_id`·`probability`·`demand_mw`·`solar_mw`·`wind_mw` 를 그대로 `/dispatch/stochastic` 의 `scenarios` 로 넘기면 된다.
 
-## POST /api/v1/dispatch/stochastic (초안)
+## POST /api/v1/dispatch/stochastic (dispatch_api `:8002`)
 
-스키마: `shared/schemas.py` 의 `StochasticRequest` / `StochasticResponse`.
-정식화와 VSS 정의는 [formulation.md](formulation.md) 8~9절.
+Two-Stage Stochastic 급전 계획과 VSS. 스키마: `shared/schemas.py` 의 `StochasticRequest` / `StochasticResponse`.
+정식화는 [formulation.md](formulation.md) 8절, VSS·EVPI 정의는 9절.
 
-요청 — `scenarios` 를 비우면 dispatch_api 가 예측값+잔차로 `n_scenarios` 개를 만든다.
+한 번 호출하면 RP(전 시나리오) → EV(평균 시나리오 1개) → EEV(EV 의 1단계 해 고정) 순으로 풀고,
+`compute_ws` 가 켜져 있으면 WS(시나리오마다 1개씩) 를 더 푼다. `solver` 의 시간 제한·gap 은 **문제마다**
+적용되므로 응답 시간은 최대 `time_limit_s` 의 3배 (WS 를 켜면 3 + `n_scenarios` 배) 다.
+
+> **VSS 를 판정할 때는 `solver` 를 `{ "time_limit_s": 60, "mip_gap": 0.001 }` 로 준다.**
+> 기본값(`config/stochastic.yaml` 의 `request_defaults`: 10초, 0.5%)에서는 25기 x 시나리오 10개 RP 가 시간 제한에 걸려 해가 나빠지고, VSS 가 음수로 나올 수 있다
+> (측정 예: `status: time_limit`, `vss_pct` −36.8%). 대시보드는 이 조건으로 미리 계산해 둔
+> `GET /dispatch/stochastic/latest` 를 쓴다.
+
+요청 — `start` 만 필수다.
+
+기본값 열의 숫자는 현재 `config/stochastic.yaml` 값이다. 필드를 비우면(`null`) 서버가 config 에서 채운다.
+
+| 필드 | 기본값 | 설명 |
+|---|---|---|
+| `start` | (필수) | 계획 시작 시각. 응답 timestamp 의 기준 |
+| `horizon_h` | `null` | 아직 쓰지 않는다. 계획 길이는 시나리오 배열 길이다 |
+| `scenarios` | `null` | 시나리오 직접 입력. `null` 이면 `/scenarios` 와 같은 생성기로 `n_scenarios` 개를 만든다 (7절 파라메트릭 오차 모델) |
+| `n_scenarios` | `null` → 10 (`scenario_generator.n_scenarios`) | 생성 개수 (`scenarios` 가 `null` 일 때만) |
+| `seed` | `null` → 42 (`scenario_generator.seed`) | 생성 seed. 0 도 그대로 쓴다 |
+| `base` | `null` | 생성용 기준 예측 (`ScenarioProfile`). `null` 이면 생성기 기본 예측 (forecast_api 연동 전) |
+| `compute_ws` | `false` | `true` 면 WS·EVPI 도 계산. 시나리오 수만큼 더 풀어 느려진다 |
+| `generator_ids` | `null` | 사용할 유닛 id. `null` 이면 `generators.yaml` 전체 |
+| `use_ess` | `true` | **현재 무시된다.** 2단계에 ESS 를 넣지 않았다 (8절 끝, 🟨 C 와 상의) |
+| `reserve_ratio` | `null` → 0.10 (`request_defaults.reserve_ratio`) | 1단계 예비율. 부족분은 슬랙으로 허용하고 `config/stochastic.yaml` 의 페널티를 붙인다 (가정, 8.1 S5 미확정) |
+| `shed_penalty_won_per_mwh` | `null` → 10,000,000 (`request_defaults.shed_penalty`) | 부하차단 페널티 $K$. 🟨 VOLL 근거 미확정 |
+| `include_scenario_hours` | `false` | `true` 면 `scenarios[].hours` 에 시나리오별 시간 요약을 넣는다 |
+| `solver` | `null` → `{10, 0.005}` (`request_defaults.time_limit`·`mip_gap`) | 문제당 시간 제한(초)·상대 gap. 위 경고 참고. 일부만 주면 빠진 값은 `SolverOptions` 스키마 기본값(10, 0.005)이다 |
 
 ```json
 {
@@ -79,13 +254,14 @@
   "horizon_h": 24,
   "scenarios": null,
   "n_scenarios": 10,
-  "seed": 42,
+  "seed": 1,
+  "base": null,
+  "compute_ws": false,
   "generator_ids": null,
-  "use_ess": true,
   "reserve_ratio": 0.10,
   "shed_penalty_won_per_mwh": 10000000,
   "include_scenario_hours": false,
-  "solver": { "time_limit_s": 10, "mip_gap": 0.005 }
+  "solver": { "time_limit_s": 60, "mip_gap": 0.001 }
 }
 ```
 
@@ -93,10 +269,31 @@
 
 ```json
 "scenarios": [
-  { "scenario_id": "s01", "probability": 0.1,
+  { "scenario_id": "S01", "probability": 0.1,
     "demand_mw": [61200.0, 59800.0], "solar_mw": [0.0, 0.0], "wind_mw": [1500.0, 1420.0] }
 ]
 ```
+
+확률은 합이 1 이 아니어도 내부에서 정규화한다. 시나리오끼리 배열 길이가 다르면 422.
+
+응답 필드:
+
+| 필드 | 설명 |
+|---|---|
+| `status` | RP·EV·EEV 가 모두 `optimal` 이면 `optimal`, 아니면 RP → EV → EEV 순으로 처음 `optimal` 이 아닌 상태 (`feasible` · `time_limit` 등). `optimal` 이 아니면 VSS 를 믿지 않는다 |
+| `solve_time_s` | RP·EV·EEV(·WS) 전체 풀이 시간 |
+| `first_stage` | 유닛 x 시간 (25기 x 24h = 600행). `on` 은 1단계 기동계획 $u$. 1단계에는 출력 변수가 없어서 `p_mw` 는 시나리오 기대 출력 $\sum_s p_s P_{i,t,s}$ 다 |
+| `expected_cost` | 시나리오 비용의 확률 가중 평균 (= RP 기대비용). `startup_won` = 1단계 기동비 + 당일 추가 기동비, `recourse_won` = 예비력 부족 페널티 (가정 항, 모든 시나리오에 같다), `shed_won` = 부하차단 페널티 |
+| `expected_hours` | 시간별 수급의 확률 가중 평균. `reserve_pct` 의 공급능력은 가동 유닛 상한 합 + 태양광 + 풍력. `ess_mw` 는 항상 0 |
+| `scenarios[]` | 시나리오별 `cost`, `shed_mwh`, `rt_adjust_mwh` (기대 출력 대비 그 시나리오 출력의 편차 $\sum\lvert P_s - E[P]\rvert$), `hours` |
+| `vss` | `rp_won`·`ev_won`·`eev_won` 은 각 문제의 목적값. `vss_won` = EEV − RP, `vss_pct` = `vss_won` / `eev_won` x 100 (분모는 가정, 9절), `target_met` = `vss_pct` ≥ 3. `ws_won`·`evpi_won` 은 `compute_ws` 일 때만 |
+
+오류:
+
+| 코드 | 경우 |
+|---|---|
+| 422 | `start` 누락, 시나리오 길이 불일치, 선택된 발전기 없음 (`generator_ids` 가 모두 없는 id), 입력값 오류 |
+| 500 | RP 의 해를 찾지 못함 (infeasible 또는 시간 안에 해 없음) |
 
 응답 (숫자는 형태 예시):
 
@@ -108,7 +305,7 @@
   "horizon_h": 24,
   "n_scenarios": 10,
   "first_stage": [
-    { "timestamp": "2026-09-22T00:00:00+09:00", "unit_id": "coal_1", "on": true, "p_mw": 21000.0 }
+    { "timestamp": "2026-09-22T00:00:00+09:00", "unit_id": "nuclear_1", "on": true, "p_mw": 8500.0 }
   ],
   "expected_cost": {
     "fuel_won": 1.52e10, "startup_won": 3.1e8, "recourse_won": 4.2e8,
@@ -116,10 +313,10 @@
   },
   "expected_hours": [
     { "timestamp": "2026-09-22T00:00:00+09:00", "demand_mw": 61200.0, "supply_mw": 61200.0,
-      "reserve_pct": 14.2, "shed_mw": 0.0, "ess_mw": -300.0, "co2_t": 31500.0 }
+      "reserve_pct": 14.2, "shed_mw": 0.0, "ess_mw": 0.0, "co2_t": 31500.0 }
   ],
   "scenarios": [
-    { "scenario_id": "s01", "probability": 0.1,
+    { "scenario_id": "S01", "probability": 0.1,
       "cost": { "fuel_won": 1.49e10, "startup_won": 3.1e8, "recourse_won": 2.0e8,
                 "shed_won": 0.0, "total_won": 1.541e10 },
       "shed_mwh": 0.0, "rt_adjust_mwh": 1850.0, "hours": null }
@@ -129,5 +326,32 @@
     "vss_won": 5.8e8, "vss_pct": 3.5,
     "ws_won": null, "evpi_won": null, "target_met": true
   }
+}
+```
+
+## GET /api/v1/dispatch/stochastic/latest
+
+대시보드 VSS 타일용. dispatch_api 가 켜질 때와 `refresh_hours` 마다 백그라운드로 Two-Stage 를 한 번 풀어 두고,
+이 엔드포인트는 마지막 결과를 바로 돌려준다 (풀이 자체는 1분 안팎). 계산 조건은 `config/stochastic.yaml` 의
+`precompute` 블록이고, 현재 값은 formulation.md 8.1 측정표의 seed 1 행과 같다 (시나리오 10개, 예비율 10%,
+문제당 60초, gap 0.1%). 환경변수 `PRECOMPUTE_ENABLED=false` 면 계산하지 않는다.
+
+스키마: `shared/schemas.py` 의 `StochasticLatest`.
+
+| 필드 | 설명 |
+|---|---|
+| `state` | `pending` 시작 전 · `running` 계산 중 · `done` · `error` · `disabled` |
+| `computed_at` | 마지막으로 성공한 계산 시각 (KST) |
+| `seed`, `n_scenarios`, `reserve_ratio`, `shed_penalty_won_per_mwh`, `time_limit_s`, `mip_gap` | 계산 조건 |
+| `result` | `StochasticResponse`. 아직 없으면 `null`. 계산 중이거나 실패해도 이전 결과는 남는다 |
+| `error` | 마지막 실패 메시지 |
+
+```json
+{
+  "state": "done", "computed_at": "2026-10-23T15:40:26+09:00",
+  "seed": 1, "n_scenarios": 10, "reserve_ratio": 0.1, "shed_penalty_won_per_mwh": 10000000.0,
+  "time_limit_s": 60.0, "mip_gap": 0.001,
+  "result": { "status": "optimal", "solve_time_s": 58.1, "vss": { "vss_pct": 0.002, "...": "..." }, "...": "..." },
+  "error": null
 }
 ```

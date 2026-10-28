@@ -1,0 +1,140 @@
+<!doctype html>
+<!--
+  대시보드 첫 로딩 화면 (app.py show_loader).
+  가운데 VPP 허브에 발전원 6종이 연결된 아이소메트릭 그림이다. buildIso() 는 중간발표 자료
+  ("VPP 전력수급 최적화 에이전트 — 중간발표.html" 1번 슬라이드)의 코드를 그대로 옮겼고,
+  색은 그 자료의 어두운 테마 값이다. 대시보드 배경(#0b0f17)에 맞춰 바탕만 바꿨다.
+-->
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<style>
+:root{
+  --wind:#46C9A1; --nuc:#9C93F0; --coal:#9AA3AA; --solar:#EBC12E; --hydro:#4DB0E3; --lng:#F29A45;
+  --amber:#F2B630; --bad:#D96A50;
+  --hero-ink:#EAF3F4; --hero-sub:#A3BBC1;
+  --iso-tt:#2A4D59; --iso-tl:#1D3A44; --iso-tr:#152D35; --iso-ot:#6FB0E6; --iso-ol:#3D7CC0; --iso-or:#25578F; --iso-hi:#CFE9FF;
+  --iso-dt:#4A7BB0; --iso-dl:#2C5A8D; --iso-dr:#1D426B; --iso-white:#E8F2F8; --iso-shadow:rgba(0,0,0,.35); --iso-link:rgba(120,180,230,.25);
+  --iso-steam:#E8F0F4; --iso-smoke:#7E8C96; --iso-win:#F7D27A; --iso-coalpile:#0E1418; --iso-coalpile2:#070B0E;
+  --iso-water:#3E9AD6; --iso-water2:#2876B0; --iso-panel:#173F72; --iso-panelline:#5F98D6; --iso-chip:#F2B630;
+}
+html,body{margin:0;height:100%;overflow:hidden}
+body{background:radial-gradient(ellipse 70% 75% at 50% 48%,#172033 0%,#0b0f17 100%);
+  font-family:"Pretendard Variable",Pretendard,"Noto Sans KR","Malgun Gothic",-apple-system,"Segoe UI",sans-serif;
+  color:var(--hero-ink);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px}
+svg.iso{width:min(92vw,980px);height:auto;max-height:76vh}
+.iso-lb{font-size:15px;font-weight:700;fill:var(--hero-ink)}
+.iso-hub{font-size:24px;font-weight:700;fill:#10303A;letter-spacing:.06em}
+h1{margin:0;font-size:26px;font-weight:800;letter-spacing:-.02em}
+p{margin:0;font-size:15px;color:var(--hero-sub)}
+.dots i{display:inline-block;width:6px;height:6px;margin-left:5px;border-radius:50%;background:var(--amber);animation:b 1.2s infinite both}
+.dots i:nth-child(2){animation-delay:.2s}.dots i:nth-child(3){animation-delay:.4s}
+@keyframes b{0%,80%,100%{opacity:.2;transform:translateY(0)}40%{opacity:1;transform:translateY(-4px)}}
+@media (prefers-reduced-motion: reduce){.dots i{animation:none;opacity:.8}}
+</style>
+</head>
+<body>
+<!-- 원본은 1280x720 슬라이드 오른쪽에 그린다. 그림이 있는 영역만 잘라 가운데에 둔다. -->
+<svg id="iso" class="iso" viewBox="440 40 840 560" role="img" aria-label="원자력, 석탄, LNG, 수력, 태양광, 풍력이 가운데 VPP 허브로 연결된 그림"></svg>
+<h1>VPP 통합 관제 대시보드</h1>
+<p>발전원 데이터를 불러오는 중<span class="dots"><i></i><i></i><i></i></span></p>
+<script>
+const RM=matchMedia('(prefers-reduced-motion: reduce)').matches;
+function buildIso(){const svg=document.getElementById('iso');if(!svg)return;
+  const u=19.5,CX=858,CY=362,K=0.866;
+  const P=(x,y,z)=>[CX+(x-y)*K*u,CY+(x+y)*.5*u-z*u];
+  const f=v=>v.toFixed(1);
+  const pts=a=>a.map(p=>f(p[0])+','+f(p[1])).join(' ');
+  const poly=(a,fill,ex='')=>`<polygon points="${pts(a)}" style="fill:${fill}" ${ex}/>`;
+  const box=(x,y,z,dx,dy,dz,c)=>poly([P(x,y+dy,z),P(x+dx,y+dy,z),P(x+dx,y+dy,z+dz),P(x,y+dy,z+dz)],c[1])+poly([P(x+dx,y,z),P(x+dx,y+dy,z),P(x+dx,y+dy,z+dz),P(x+dx,y,z+dz)],c[2])+poly([P(x,y,z+dz),P(x+dx,y,z+dz),P(x+dx,y+dy,z+dz),P(x,y+dy,z+dz)],c[0]);
+  const boxC=(cx,cy,z,w,d,h,c)=>box(cx-w/2,cy-d/2,z,w,d,h,c);
+  const OBJ=['var(--iso-ot)','var(--iso-ol)','var(--iso-or)'],DARK=['var(--iso-dt)','var(--iso-dl)','var(--iso-dr)'],TILE=['var(--iso-tt)','var(--iso-tl)','var(--iso-tr)'];
+  const cyl=(cx,cy,z,r,h,side,top)=>{const[bx,by]=P(cx,cy,z),[tx,ty]=P(cx,cy,z+h),rx=1.2247*r*u,ry=.7071*r*u;
+    return `<path d="M${f(bx-rx)} ${f(by)} A${f(rx)} ${f(ry)} 0 0 0 ${f(bx+rx)} ${f(by)} L${f(tx+rx)} ${f(ty)} L${f(tx-rx)} ${f(ty)}Z" style="fill:${side}"/><ellipse cx="${f(tx)}" cy="${f(ty)}" rx="${f(rx)}" ry="${f(ry)}" style="fill:${top}"/>`};
+  const tower=(cx,cy,z,rb,rt,h)=>{const[X,Yb]=P(cx,cy,z),Yt=Yb-h*u,xb=1.2247*rb*u,xt=1.2247*rt*u,yb=.7071*rb*u,yt=.7071*rt*u,ym=Yb-(Yb-Yt)*.62,xw=xt*.86;
+    return `<path d="M${f(X-xb)} ${f(Yb)} Q${f(X-xw)} ${f(ym)} ${f(X-xt)} ${f(Yt)} L${f(X+xt)} ${f(Yt)} Q${f(X+xw)} ${f(ym)} ${f(X+xb)} ${f(Yb)} A${f(xb)} ${f(yb)} 0 0 1 ${f(X-xb)} ${f(Yb)}Z" fill="url(#gTower)"/><ellipse cx="${f(X)}" cy="${f(Yt)}" rx="${f(xt)}" ry="${f(yt)}" style="fill:var(--iso-ot)"/><ellipse cx="${f(X)}" cy="${f(Yt+1)}" rx="${f(xt*.8)}" ry="${f(yt*.75)}" style="fill:var(--iso-dr)"/>`};
+  const puff=(x,y,col,n,dur,rise,drift)=>{let s='';for(let i=0;i<n;i++){const b=(i*dur/n).toFixed(2);
+    s+=`<circle cx="${f(x)}" cy="${f(y)}" r="4" style="fill:${col}" opacity="0"><animate attributeName="cy" values="${f(y)};${f(y-rise)}" dur="${dur}s" begin="${b}s" repeatCount="indefinite"/><animate attributeName="cx" values="${f(x)};${f(x+drift)}" dur="${dur}s" begin="${b}s" repeatCount="indefinite"/><animate attributeName="r" values="4;${f(rise*.3)}" dur="${dur}s" begin="${b}s" repeatCount="indefinite"/><animate attributeName="opacity" values="0;.75;0" dur="${dur}s" begin="${b}s" repeatCount="indefinite"/></circle>`}return s};
+  const tile=(cx,cy)=>`<ellipse cx="${f(P(cx,cy,0)[0])}" cy="${f(P(cx,cy,0)[1]+14)}" rx="${f(5.6*K*u*1.15)}" ry="${f(5.6*.5*u*.9)}" style="fill:var(--iso-shadow)"/>`+boxC(cx,cy,0,5.4,5.4,.45,TILE);
+  const LB=[];const label=(cx,cy,name,col,side,ox0=0,oy0=0)=>{const v=side==='l'?P(cx-2.7,cy+2.7,0):side==='r'?P(cx+2.7,cy-2.7,0):P(cx+2.7,cy+2.7,0);const x=v[0]+(side==='l'?-16:side==='r'?16:0)+ox0,y=v[1]+(side==='b'?34:6)+oy0;
+  LB.push(side==='l'?`<g transform="translate(${f(x)},${f(y)})"><text x="-14" y="0" text-anchor="end" class="iso-lb">${name}</text><circle cx="-4" cy="-5" r="5" style="fill:${col}"/></g>`
+   :`<g transform="translate(${f(x)},${f(y)})"><circle cx="${side==='b'?-24:4}" cy="-5" r="5" style="fill:${col}"/><text x="${side==='b'?-14:14}" y="0" class="iso-lb">${name}</text></g>`);return ''};
+  const Z=.45;let defs=`<defs>
+    <linearGradient id="gTower" x1="0" x2="1"><stop offset="0" style="stop-color:var(--iso-ot)"/><stop offset=".55" style="stop-color:var(--iso-ol)"/><stop offset="1" style="stop-color:var(--iso-or)"/></linearGradient>
+    <linearGradient id="gCyl" x1="0" x2="1"><stop offset="0" style="stop-color:var(--iso-ol)"/><stop offset="1" style="stop-color:var(--iso-or)"/></linearGradient>
+    <radialGradient id="gSph" cx=".35" cy=".3" r=".75"><stop offset="0" style="stop-color:var(--iso-hi)"/><stop offset=".45" style="stop-color:var(--iso-ot)"/><stop offset="1" style="stop-color:var(--iso-or)"/></radialGradient>
+    <radialGradient id="gCore" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#FFF6CF" stop-opacity=".95"/><stop offset=".35" stop-color="#F2B630" stop-opacity=".55"/><stop offset="1" stop-color="#F2B630" stop-opacity="0"/></radialGradient>
+    <radialGradient id="gFlame" cx=".5" cy=".7" r=".6"><stop offset="0" stop-color="#FFF0B0"/><stop offset=".5" stop-color="#F7A43A"/><stop offset="1" stop-color="#E9701C"/></radialGradient>
+  </defs>`;
+  const R=9.2,pos={};[['wind',225],['nuc',285],['coal',345],['solar',45],['hydro',105],['lng',165]].forEach(([k,a])=>{const t=a*Math.PI/180;pos[k]=[R*Math.cos(t),R*Math.sin(t)]});
+  const COL={wind:'var(--wind)',nuc:'var(--nuc)',coal:'var(--coal)',solar:'var(--solar)',hydro:'var(--hydro)',lng:'var(--lng)'};
+  const NAME={wind:'풍력',nuc:'원자력',coal:'석탄',solar:'태양광',hydro:'수력',lng:'LNG'};
+  let g=`<ellipse cx="${CX}" cy="${CY+18}" rx="395" ry="222" style="fill:var(--iso-shadow)" opacity=".6"/>`;
+  // energy links
+  Object.entries(pos).forEach(([k,[x,y]],i)=>{const a=P(x*.72,y*.72,.3),b=P(x*.22,y*.22,.6);const d=`M${f(a[0])} ${f(a[1])} L${f(b[0])} ${f(b[1])}`;
+    g+=`<path d="${d}" style="stroke:var(--iso-link)" stroke-width="5" stroke-linecap="round" fill="none"/><path d="${d}" style="stroke:${COL[k]}" stroke-width="2" stroke-dasharray="4 10" fill="none"><animate attributeName="stroke-dashoffset" values="0;-28" dur="1s" repeatCount="indefinite"/></path>`;
+    for(let j=0;j<2;j++)g+=`<circle r="4.5" style="fill:${COL[k]}" opacity=".95"><animateMotion dur="2.2s" begin="${(i*.37+j*1.1).toFixed(2)}s" repeatCount="indefinite" path="${d}"/></circle>`});
+  const parts={};
+  // wind
+  {const[cx,cy]=pos.wind;let s=tile(cx,cy);s+=boxC(cx+1.6,cy+1.6,Z,1,.8,.6,DARK);
+    [[-1.3,-1.1,6.2,4.2],[1.1,-1.6,5.2,5.6],[-1.6,1.3,4.6,3.6]].sort((p,q)=>(p[0]+p[1])-(q[0]+q[1])).forEach(([dx,dy,h,sp])=>{const[bx,by]=P(cx+dx,cy+dy,Z),ty=by-h*u,L=h*u*.46;
+      s+=`<polygon points="${f(bx-3.2)},${f(by)} ${f(bx+3.2)},${f(by)} ${f(bx+1.3)},${f(ty)} ${f(bx-1.3)},${f(ty)}" style="fill:var(--iso-white)"/><rect x="${f(bx-2)}" y="${f(ty-3)}" width="9" height="5" rx="2" style="fill:var(--iso-white)"/>`;
+      s+=`<g transform="translate(${f(bx)},${f(ty)})"><g>${[0,120,240].map(r=>`<path d="M-1.6 0 L-.5 ${f(-L)} L.5 ${f(-L)} L1.6 0Z" transform="rotate(${r})" style="fill:var(--iso-white)"/>`).join('')}<animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="${sp}s" repeatCount="indefinite"/></g><circle r="2.8" style="fill:var(--iso-ot)"/></g>`});
+    parts.wind=s+label(cx,cy,NAME.wind,COL.wind,'l',-4,-58)}
+  // nuclear
+  {const[cx,cy]=pos.nuc;let s=tile(cx,cy);const[tx1,ty1]=P(cx-1.3,cy-.7,Z+3.4),[tx2,ty2]=P(cx+.5,cy-1.7,Z+2.9);
+    s+=tower(cx-1.3,cy-.7,Z,1.2,.78,3.4)+tower(cx+.5,cy-1.7,Z,1.05,.68,2.9);
+    s+=puff(tx2,ty2,'var(--iso-steam)',5,4.2,70,18)+puff(tx1,ty1,'var(--iso-steam)',5,4.6,80,22);
+    s+=cyl(cx+1.5,cy+.6,Z,.85,.8,'url(#gCyl)','var(--iso-ot)');const[dx,dy]=P(cx+1.5,cy+.6,Z+.8),rx=1.2247*.85*u,ry=.7071*.85*u;
+    s+=`<path d="M${f(dx-rx)} ${f(dy)} A${f(rx)} ${f(ry*1.9)} 0 0 1 ${f(dx+rx)} ${f(dy)} A${f(rx)} ${f(ry)} 0 0 1 ${f(dx-rx)} ${f(dy)}Z" fill="url(#gSph)"/><circle cx="${f(dx)}" cy="${f(dy-ry*1.2)}" r="9" style="fill:var(--nuc)" opacity=".55"><animate attributeName="opacity" values=".25;.7;.25" dur="2.6s" repeatCount="indefinite"/></circle>`;
+    s+=boxC(cx-.6,cy+1.7,Z,1.8,1,.7,OBJ);parts.nuc=s+label(cx,cy,NAME.nuc,COL.nuc,'r',22,-8)}
+  // coal
+  {const[cx,cy]=pos.coal;let s=tile(cx,cy);
+    const ch=(x,y,h)=>{let t=cyl(x,y,Z,.26,h,'url(#gCyl)','var(--iso-ot)')+cyl(x,y,Z+h-.75,.27,.28,'var(--bad)','var(--bad)')+cyl(x,y,Z+h-.35,.27,.15,'var(--iso-ol)','var(--iso-ot)');const[px,py]=P(x,y,Z+h);return t+puff(px,py-2,'var(--iso-smoke)',5,4.8,62,8)};
+    s+=ch(cx+1.3,cy-2.1,4.4)+ch(cx+2.0,cy-1.3,3.8);
+    s+=boxC(cx-.9,cy-1.0,Z,1.5,1.5,2.1,OBJ)+boxC(cx-.4,cy+.7,Z,3.4,2,1.1,OBJ);
+    const w=[];for(let i=0;i<4;i++)w.push(poly([P(cx-1.9+i*.8,cy+1.7,Z+.4),P(cx-1.5+i*.8,cy+1.7,Z+.4),P(cx-1.5+i*.8,cy+1.7,Z+.75),P(cx-1.9+i*.8,cy+1.7,Z+.75)],'var(--iso-win)'));s+=w.join('');
+    {const x0=cx+1.4,y0=cy+.9,w=1.1,ap=P(x0+w/2,y0+w/2,Z+.75);s+=poly([P(x0,y0+w,Z),P(x0+w,y0+w,Z),ap],'var(--iso-coalpile)')+poly([P(x0+w,y0,Z),P(x0+w,y0+w,Z),ap],'var(--iso-coalpile2)')}
+    parts.coal=s+label(cx,cy,NAME.coal,COL.coal,'r')}
+  // LNG
+  {const[cx,cy]=pos.lng;let s=tile(cx,cy);
+    s+=cyl(cx+1.7,cy-1.7,Z,.14,3.6,'url(#gCyl)','var(--iso-ot)');const[fx,fy]=P(cx+1.7,cy-1.7,Z+3.6);
+    s+=`<circle cx="${f(fx)}" cy="${f(fy-8)}" r="16" fill="url(#gCore)"/><g transform="translate(${f(fx)},${f(fy+1)})"><path d="M-4.5 0 Q-5 -10 0 -20 Q5 -10 4.5 0Z" fill="url(#gFlame)"><animateTransform attributeName="transform" type="scale" values="1 1;1.05 1.25;.95 .9;1 1.15;1 1" dur=".9s" repeatCount="indefinite"/></path></g>`;
+    [[-1.4,-.6,1.05],[.5,-1.1,.9],[-.4,1.2,1.0]].sort((p,q)=>(p[0]+p[1])-(q[0]+q[1])).forEach(([dx,dy,r])=>{const[sx,sy]=P(cx+dx,cy+dy,Z);
+      s+=`<ellipse cx="${f(sx)}" cy="${f(sy)}" rx="${f(r*u*1.1)}" ry="${f(r*u*.55)}" style="fill:var(--iso-shadow)"/>`;
+      [-.6,0,.6].forEach(o=>s+=`<line x1="${f(sx+o*r*u)}" y1="${f(sy)}" x2="${f(sx+o*r*u*.8)}" y2="${f(sy-r*u*.9)}" style="stroke:var(--iso-or)" stroke-width="2.4"/>`);
+      s+=`<circle cx="${f(sx)}" cy="${f(sy-r*u*1.15)}" r="${f(r*u)}" fill="url(#gSph)"/>`});
+    s+=boxC(cx+1.5,cy+1.5,Z,1.3,.9,.6,DARK);parts.lng=s+label(cx,cy,NAME.lng,COL.lng,'l')}
+  // hydro
+  {const[cx,cy]=pos.hydro;let s=tile(cx,cy);const W1=['var(--iso-water)','var(--iso-water2)','var(--iso-water2)'];
+    s+=box(cx-2.7,cy-2.7,Z,5.4,2.2,.55,W1);
+    s+=`<g opacity=".7">`+[0,1,2].map(i=>{const a=P(cx-2.2+i*1.4,cy-2.3+i*.3,Z+.56),b=P(cx-1.2+i*1.4,cy-2.3+i*.3,Z+.56);return `<line x1="${f(a[0])}" y1="${f(a[1])}" x2="${f(b[0])}" y2="${f(b[1])}" style="stroke:var(--iso-hi)" stroke-width="1.6" stroke-dasharray="6 8"><animate attributeName="stroke-dashoffset" values="0;-28" dur="${2+i*.4}s" repeatCount="indefinite"/></line>`}).join('')+`</g>`;
+    s+=box(cx-2.7,cy-.5,Z,5.4,.8,1.5,OBJ);
+    for(let i=0;i<3;i++){const x0=cx-1.6+i*1.4;const a=P(x0,cy+.3,Z+1.3),b=P(x0+.6,cy+.3,Z+1.3),c=P(x0+.6,cy+.3,Z+.05),d=P(x0,cy+.3,Z+.05);
+      s+=poly([a,b,c,d],'var(--iso-water)')+`<line x1="${f((a[0]+b[0])/2)}" y1="${f((a[1]+b[1])/2)}" x2="${f((c[0]+d[0])/2)}" y2="${f((c[1]+d[1])/2)}" style="stroke:var(--iso-hi)" stroke-width="2.2" stroke-dasharray="5 7"><animate attributeName="stroke-dashoffset" values="0;-24" dur=".7s" repeatCount="indefinite"/></line>`}
+    s+=box(cx-2.7,cy+.3,Z,5.4,2.4,.08,W1);s+=boxC(cx+1.7,cy+1.7,Z,1.3,1,.8,DARK);
+    parts.hydro=s+label(cx,cy,NAME.hydro,COL.hydro,'l')}
+  // solar
+  {const[cx,cy]=pos.solar;let s=tile(cx,cy);let k=0;
+    for(let j=0;j<4;j++)for(let i=0;i<3;i++){const x0=cx-2.3+i*1.55,y0=cy-2.3+j*1.15;const q=[P(x0,y0,Z+.75),P(x0+1.35,y0,Z+.75),P(x0+1.35,y0+.8,Z+.25),P(x0,y0+.8,Z+.25)];
+      const[lx,ly]=P(x0+.68,y0+.6,Z);s+=`<line x1="${f(lx)}" y1="${f(ly)}" x2="${f(lx)}" y2="${f(ly-7)}" style="stroke:var(--iso-or)" stroke-width="2"/>`;
+      s+=poly(q,'var(--iso-panel)','style="stroke:var(--iso-panelline)" stroke-width=".8"');
+      const m1=[(q[0][0]+q[3][0])/2,(q[0][1]+q[3][1])/2],m2=[(q[1][0]+q[2][0])/2,(q[1][1]+q[2][1])/2];
+      s+=`<line x1="${f(m1[0])}" y1="${f(m1[1])}" x2="${f(m2[0])}" y2="${f(m2[1])}" style="stroke:var(--iso-panelline)" stroke-width=".8"/>`;
+      s+=poly(q,'#FFFFFF',`opacity="0"`).replace('/>',`><animate attributeName="opacity" values="0;0;.55;0;0" keyTimes="0;.4;.5;.6;1" dur="4s" begin="${(k*.09).toFixed(2)}s" repeatCount="indefinite"/></polygon>`);k++}
+    parts.solar=s+label(cx,cy,NAME.solar,COL.solar,'b')}
+  // hub
+  let hub=`<ellipse cx="${CX}" cy="${CY+22}" rx="120" ry="64" style="fill:var(--iso-shadow)"/>`+boxC(0,0,0,6.6,6.6,.9,TILE);
+  hub+=`<ellipse cx="${f(P(0,0,.9)[0])}" cy="${f(P(0,0,.9)[1])}" rx="${f(1.2247*3*u)}" ry="${f(.7071*3*u)}" style="fill:none;stroke:var(--iso-link)" stroke-width="2"/>`;
+  const[ox,oy]=P(0,0,.9);hub+=`<ellipse cx="${f(ox)}" cy="${f(oy)}" rx="${f(1.2247*2.6*u)}" ry="${f(.7071*2.6*u)}" style="fill:none;stroke:var(--amber)" stroke-width="2" stroke-dasharray="10 14" opacity=".8"><animate attributeName="stroke-dashoffset" values="0;-48" dur="2s" repeatCount="indefinite"/></ellipse>`;
+  hub+=cyl(0,0,.9,2.1,.45,'url(#gCyl)','var(--iso-ot)')+cyl(0,0,1.35,1.55,2.2,'url(#gCyl)','var(--iso-ot)')+cyl(0,0,3.55,1.75,.3,'var(--iso-or)','var(--iso-hi)');
+  for(let i=0;i<3;i++){const[lx,ly]=P(0,0,1.75+i*.62);hub+=`<ellipse cx="${f(lx)}" cy="${f(ly)}" rx="${f(1.2247*1.55*u)}" ry="${f(.7071*1.55*u)}" style="fill:none;stroke:var(--amber)" stroke-width="1.6" stroke-dasharray="${f(1.2247*1.55*u*3.2)} 999" opacity=".85"/>`}
+  const[hx,hy]=P(0,0,3.85);hub+=`<ellipse cx="${f(hx)}" cy="${f(hy)}" rx="60" ry="34" fill="url(#gCore)"><animate attributeName="rx" values="52;66;52" dur="2.4s" repeatCount="indefinite"/><animate attributeName="ry" values="30;38;30" dur="2.4s" repeatCount="indefinite"/></ellipse>`;
+  hub+=`<g transform="translate(${f(hx)},${f(hy-30)})"><rect x="-40" y="-17" width="80" height="30" rx="6" style="fill:var(--iso-chip)"/><text x="0" y="5" text-anchor="middle" class="iso-hub">VPP</text><path d="M-5 13 L0 19 L5 13Z" style="fill:var(--iso-chip)"/></g>`;
+  svg.innerHTML=defs+g+parts.wind+parts.nuc+parts.lng+hub+parts.coal+parts.hydro+parts.solar+LB.join('');
+  if(RM)svg.querySelectorAll('animate,animateTransform,animateMotion').forEach(a=>a.remove());
+}
+buildIso();
+</script>
+</body>
+</html>

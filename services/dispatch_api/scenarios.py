@@ -8,11 +8,16 @@
     수요    곱셈 오차, AR(1) — 시간대끼리 같이 움직인다
     태양광  하루 공통 흐림 계수(하방으로 치우친 감마) x 시간 노이즈, 0 ~ 설비용량
     풍력    로그정규 곱셈 오차, AR(1), 0 ~ 설비용량
+
+모든 숫자 파라미터는 config/stochastic.yaml 의 scenario_generator 블록에서 읽는다
+(모듈을 불러올 때 한 번).
 """
 
 from __future__ import annotations
 
 import math
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -24,23 +29,60 @@ from shared.schemas import (
     ScenarioRequest,
     ScenarioSetResponse,
 )
+from units import cfg_value, read_stochastic_yaml
 
-# forecast_api 연동 전 기본 예측 (전형적인 한국 하루 부하 패턴을 본뜬 값, MW)
-DEFAULT_BASE = ScenarioProfile(
-    demand_mw=[
-        52000, 50000, 49000, 48000, 49000, 52000, 58000, 66000, 72000, 76000, 79000, 81000,
-        82000, 80000, 78000, 77000, 78000, 80000, 84000, 86000, 83000, 74000, 65000, 57000,
-    ],
-    solar_mw=[
-        0, 0, 0, 0, 0, 200, 1200, 3600, 6400, 8800, 10400, 11200,
-        11600, 11200, 10000, 8000, 5600, 2800, 800, 100, 0, 0, 0, 0,
-    ],
-    wind_mw=[round(800 + 700 * math.sin(h / 24 * 4 * math.pi), 1) for h in range(24)],
-)
+# ScenarioRequest 필드 → (config 키, unit, 형). 요청에서 비운(None) 필드를 이 값으로 채운다
+REQUEST_FIELDS = {
+    "n_scenarios": ("n_scenarios", "count", int),
+    "n_samples": ("n_samples", "count", int),
+    "seed": ("seed", "-", int),
+    "demand_sigma_pct": ("demand_sigma", "%", float),
+    "demand_ar": ("demand_ar", "-", float),
+    "solar_cloud_pct": ("solar_cloud", "%", float),
+    "wind_sigma_pct": ("wind_sigma", "%", float),
+    "solar_capacity_mw": ("solar_capacity", "MW", float),
+    "wind_capacity_mw": ("wind_capacity", "MW", float),
+}
 
-SOLAR_HOURLY_AR, SOLAR_HOURLY_SIGMA = 0.7, 0.08
-WIND_AR = 0.85
-CLOUD_SHAPE = 0.8  # 감마 형상. 작을수록 가끔 크게 흐린 날이 나온다
+
+def load_generator_config(path: Path | None = None) -> dict[str, Any]:
+    """scenario_generator 블록 (단위 확인 후 value 만)."""
+    raw = read_stochastic_yaml(path)["scenario_generator"]
+    cfg: dict[str, Any] = {
+        field: cast(cfg_value(raw[key], unit))
+        for field, (key, unit, cast) in REQUEST_FIELDS.items()
+    }
+    for key, unit, cast in [
+        ("solar_hourly_ar", "-", float), ("solar_hourly_sigma", "ratio", float),
+        ("wind_ar", "-", float), ("cloud_shape", "-", float),
+        ("kmedoids_max_iter", "count", int), ("tail", "%", float),
+        ("label_demand", "%", float), ("label_solar_cloudy", "%", float),
+        ("label_solar_sunny", "%", float), ("label_wind", "%", float),
+        ("check_min_scenarios", "count", int), ("check_prob_sum_tol", "-", float),
+        ("check_demand_bias", "%", float), ("check_net_energy_keep", "%", float),
+        ("check_tail_upper", "percentile", float), ("check_tail_lower", "percentile", float),
+    ]:
+        cfg[key] = cast(cfg_value(raw[key], unit))
+    cfg["band_percentiles"] = list(cfg_value(raw["band_percentiles"], "percentile"))
+    cfg["base_profile"] = ScenarioProfile(**cfg_value(raw["base_profile"], "MW"))
+    return cfg
+
+
+CFG = load_generator_config()
+
+# forecast_api 연동 전 기본 예측 (MW). 기준일·출처는 config 의 base_profile.source.
+# 순부하 피크 약 72.8GW 로 generators.yaml(C) 설비 85.6GW 와 맞물린다.
+DEFAULT_BASE: ScenarioProfile = CFG["base_profile"]
+
+SOLAR_HOURLY_AR, SOLAR_HOURLY_SIGMA = CFG["solar_hourly_ar"], CFG["solar_hourly_sigma"]
+WIND_AR = CFG["wind_ar"]
+CLOUD_SHAPE = CFG["cloud_shape"]  # 감마 형상. 작을수록 가끔 크게 흐린 날이 나온다
+
+
+def with_defaults(req: ScenarioRequest) -> ScenarioRequest:
+    """요청에서 비운(None) 필드를 config 기본값으로 채운다."""
+    missing = {f: CFG[f] for f in REQUEST_FIELDS if getattr(req, f) is None}
+    return req.model_copy(update=missing) if missing else req
 
 
 # ── 표본 ─────────────────────────────────────────────────────────────────────
@@ -59,6 +101,7 @@ def ar1(rng: np.random.Generator, n: int, horizon: int, phi: float, sigma: float
 
 def sample(req: ScenarioRequest, base: ScenarioProfile, rng: np.random.Generator) -> dict:
     """오차를 입힌 표본. 키별로 (n_samples, horizon) 배열."""
+    req = with_defaults(req)
     n = req.n_samples
     d0, s0, w0 = (np.asarray(x, dtype=float) for x in (base.demand_mw, base.solar_mw, base.wind_mw))
     h = len(d0)
@@ -79,7 +122,9 @@ def sample(req: ScenarioRequest, base: ScenarioProfile, rng: np.random.Generator
 # ── 축약 ─────────────────────────────────────────────────────────────────────
 
 
-def k_medoids(x: np.ndarray, k: int, rng: np.random.Generator, iters: int = 50) -> tuple:
+def k_medoids(
+    x: np.ndarray, k: int, rng: np.random.Generator, iters: int = CFG["kmedoids_max_iter"]
+) -> tuple:
     """(대표 인덱스, 각 표본의 군집 번호). k-means++ 로 시작해 배정·대표 갱신을 반복한다."""
     n = len(x)
     if k >= n:
@@ -106,7 +151,7 @@ def k_medoids(x: np.ndarray, k: int, rng: np.random.Generator, iters: int = 50) 
     return medoids, dist[:, medoids].argmin(axis=1)
 
 
-TAIL_PCT = 10  # 꼬리 군집 크기 (표본의 %)
+TAIL_PCT = CFG["tail"]  # 꼬리 군집 크기 (표본의 %)
 
 
 def reduce(net: np.ndarray, k: int, rng: np.random.Generator) -> list[tuple[int, float]]:
@@ -148,17 +193,17 @@ def _dev(values: np.ndarray, base: np.ndarray) -> float:
 def label(demand_dev: float, solar_dev: float, wind_dev: float) -> str:
     """편차로 사람이 읽을 이름을 붙인다."""
     parts = []
-    if demand_dev >= 1.5:
+    if demand_dev >= CFG["label_demand"]:
         parts.append("고수요")
-    elif demand_dev <= -1.5:
+    elif demand_dev <= -CFG["label_demand"]:
         parts.append("저수요")
-    if solar_dev <= -15:
+    if solar_dev <= CFG["label_solar_cloudy"]:
         parts.append("흐림")
-    elif solar_dev >= 5:
+    elif solar_dev >= CFG["label_solar_sunny"]:
         parts.append("맑음")
-    if wind_dev >= 20:
+    if wind_dev >= CFG["label_wind"]:
         parts.append("강풍")
-    elif wind_dev <= -20:
+    elif wind_dev <= -CFG["label_wind"]:
         parts.append("약풍")
     return "·".join(parts) or "기준 근접"
 
@@ -178,9 +223,13 @@ def checks(req: ScenarioRequest, base: ScenarioProfile, s: dict,
     raw_net_energy = s["net"].sum(axis=1).mean()
     red_net_energy = float((prob * red_net.sum(axis=1)).sum())
     keep = abs(red_net_energy - raw_net_energy) / raw_net_energy * 100
-    p90_peak = float(np.percentile(s["net"].max(axis=1), 90))
+    upper, lower = CFG["check_tail_upper"], CFG["check_tail_lower"]
+    min_n, bias_max, keep_max = (
+        CFG["check_min_scenarios"], CFG["check_demand_bias"], CFG["check_net_energy_keep"]
+    )
+    p90_peak = float(np.percentile(s["net"].max(axis=1), upper))
     top_peak = float(red_net.max())
-    p10_low = float(np.percentile(s["net"].min(axis=1), 10))
+    p10_low = float(np.percentile(s["net"].min(axis=1), lower))
     bottom_low = float(red_net.min())
     night = s0 == 0
     night_ok = bool(np.all(s["solar"][:, night] == 0))
@@ -190,18 +239,20 @@ def checks(req: ScenarioRequest, base: ScenarioProfile, s: dict,
     )
 
     return [
-        ScenarioCheck(name="시나리오 수 ≥ 10", ok=len(scenarios) >= 10,
+        ScenarioCheck(name=f"시나리오 수 ≥ {min_n}", ok=len(scenarios) >= min_n,
                       detail=f"{len(scenarios)}개"),
-        ScenarioCheck(name="확률 합 = 1", ok=abs(prob.sum() - 1) < 1e-9,
+        ScenarioCheck(name="확률 합 = 1", ok=abs(prob.sum() - 1) < CFG["check_prob_sum_tol"],
                       detail=f"{prob.sum():.6f}"),
-        ScenarioCheck(name="수요 표본 편향 ≤ 1%", ok=bias <= 1.0,
+        ScenarioCheck(name=f"수요 표본 편향 ≤ {bias_max:g}%", ok=bias <= bias_max,
                       detail=f"표본 평균 vs 기준 예측 {bias:.2f}%"),
-        ScenarioCheck(name="축약 후 기대 순부하 보존 ≤ 1%", ok=keep <= 1.0,
+        ScenarioCheck(name=f"축약 후 기대 순부하 보존 ≤ {keep_max:g}%", ok=keep <= keep_max,
                       detail=f"축약 전후 일간 순부하 기대값 차이 {keep:.2f}%"),
         ScenarioCheck(name="상방 꼬리 보존", ok=top_peak >= p90_peak,
-                      detail=f"최대 피크 {top_peak:,.0f} MW vs 표본 P90 {p90_peak:,.0f} MW"),
-        ScenarioCheck(name="하방 꼬리 보존", ok=bottom_low <= p10_low,
-                      detail=f"최저 순부하 {bottom_low:,.0f} MW vs 표본 P10 {p10_low:,.0f} MW"),
+                      detail=f"최대 피크 {top_peak:,.0f} MW vs 표본 P{upper:g} {p90_peak:,.0f} MW"),
+        ScenarioCheck(
+            name="하방 꼬리 보존", ok=bottom_low <= p10_low,
+            detail=f"최저 순부하 {bottom_low:,.0f} MW vs 표본 P{lower:g} {p10_low:,.0f} MW",
+        ),
         ScenarioCheck(name="태양광 야간 0 · 물리 범위", ok=night_ok and range_ok,
                       detail="야간 0, 0 ~ 설비용량" if night_ok and range_ok else "범위 벗어남"),
     ]
@@ -212,6 +263,7 @@ def checks(req: ScenarioRequest, base: ScenarioProfile, s: dict,
 
 def generate(req: ScenarioRequest) -> ScenarioSetResponse:
     """표본 생성 → 축약 → 라벨·검증. 같은 seed 면 같은 결과."""
+    req = with_defaults(req)
     base = req.base or DEFAULT_BASE
     rng = np.random.default_rng(req.seed)
     s = sample(req, base, rng)
@@ -234,7 +286,7 @@ def generate(req: ScenarioRequest) -> ScenarioSetResponse:
     scenarios = [ScenarioDetail(scenario_id=f"S{i + 1:02d}", **r) for i, r in enumerate(raw)]
 
     def band(x: np.ndarray) -> Band:
-        p = np.percentile(x, [5, 50, 95], axis=0).round(1)
+        p = np.percentile(x, CFG["band_percentiles"], axis=0).round(1)
         return Band(p5=p[0].tolist(), p50=p[1].tolist(), p95=p[2].tolist())
 
     return ScenarioSetResponse(
