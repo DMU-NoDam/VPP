@@ -27,11 +27,29 @@ select = ["E", "F", "I", "N", "UP"]
 
 [tool.ruff.lint.isort]
 # collector 는 패키지 없이 평평한 모듈로 돌아간다 (main.py 가 같은 폴더에서 import).
-known-first-party = ["shared", "collector", "data_api", "domain", "sources", "store", "logic", "scenarios", "ui", "page_scenarios", "page_stochastic_test", "units", "stochastic", "precompute"]
+# dispatch_api 도 같은 관례를 따른다 (constants, models, loaders).
+known-first-party = [
+  "shared",
+  # collector
+  "collector", "data_api", "domain", "sources", "store",
+  # dispatch_api
+  "main", "constants", "models", "loaders",
+  "milp", "baseline", "schedule", "validation", "carbon", "scenarios", "service",
+  "units", "stochastic", "precompute",
+  # dashboard
+  "logic", "ui", "page_scenarios", "page_stochastic_test",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--cov=services --cov-report=term-missing"
+# PuLP 3.x 가 4.0 API 변경을 미리 경고한다. 의존성을 <4 로 핀해 둔 상태이므로
+# (pyproject dependencies 주석 참고) 테스트 출력에서만 숨긴다. 핀을 올릴 때
+# 이 필터를 먼저 지우고 경고를 다시 확인할 것.
+filterwarnings = [
+  "ignore:Constructing LpVariable:DeprecationWarning",
+  "ignore:Using LpProblem.constraints as a dict mapping:DeprecationWarning",
+]
 
 [build-system]
 requires = ["setuptools>=68"]
