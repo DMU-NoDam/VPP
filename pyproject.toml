@@ -29,11 +29,17 @@ select = ["E", "F", "I", "N", "UP"]
 
 [tool.ruff.lint.isort]
 # collector 는 패키지 없이 평평한 모듈로 돌아간다 (main.py 가 같은 폴더에서 import).
-known-first-party = ["shared", "collector", "data_api", "domain", "sources", "store", "logic", "scenarios", "ui", "page_scenarios"]
+known-first-party = ["shared", "collector", "data_api", "domain", "sources", "store", "logic", "scenarios", "ui", "page_scenarios",
+  # forecast_api 는 패키지 없이 평평한 모듈로 돌아간다 (main.py 가 같은 폴더에서 import).
+  "data_client", "features", "metrics", "pi", "forecast_engine", "router", "schemas", "models"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--cov=services --cov-report=term-missing"
+
+[tool.coverage.run]
+# 서비스 폴더 안의 로컬 가상환경(venv)이 커버리지 계산에 섞이지 않게 제외
+omit = ["*/venv/*", "*/.venv/*", "*/site-packages/*"]
 
 [build-system]
 requires = ["setuptools>=68"]

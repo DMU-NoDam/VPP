@@ -76,12 +76,12 @@ def compute_horizon_margins(abs_residuals: np.ndarray, confidence: float = 0.9,
     - h번째 margin은 h±pool 시간 오차를 묶어서 분위수를 구한다 (표본 수 확보 + 매끄럽게).
     - 먼 미래가 가까운 미래보다 좁아지지 않도록 누적 최댓값으로 단조 증가시킨다.
     """
-    R = np.asarray(abs_residuals, dtype=float)
-    H = R.shape[1]
-    margins = np.empty(H)
-    for h in range(H):
-        lo, hi = max(0, h - pool), min(H, h + pool + 1)
-        window = R[:, lo:hi].ravel()
+    res = np.asarray(abs_residuals, dtype=float)
+    n_steps = res.shape[1]
+    margins = np.empty(n_steps)
+    for h in range(n_steps):
+        lo, hi = max(0, h - pool), min(n_steps, h + pool + 1)
+        window = res[:, lo:hi].ravel()
         margins[h] = conformal_quantile(window[~np.isnan(window)], confidence)
     return np.maximum.accumulate(margins)
 

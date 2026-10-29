@@ -1,0 +1,12 @@
+# forecast_api 이미지 빌드 컨텍스트(services/forecast_api)에서 제외할 것.
+# 루트 .dockerignore 는 이 폴더를 컨텍스트로 쓰는 빌드에는 적용되지 않는다.
+venv/
+.venv/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.coverage
+.DS_Store
+# 데이터는 docker-compose 볼륨(./data:/app/data)으로 붙인다
+data/

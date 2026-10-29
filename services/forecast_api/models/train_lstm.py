@@ -22,7 +22,8 @@ LightGBM(train_lgbm.py)은 사람이 미리 계산한 힌트 컬럼(lag, 기상,
 결과 파일:
     saved/{target}_lstm.pt        : 최종 LSTM 모델
     saved/{target}_lstm_eval.json : LSTM test 성적
-    saved/model_comparison.md     : LightGBM vs LSTM 비교표 (LightGBM은 saved/{target}_pi.json에서 읽음)
+    saved/model_comparison.md     : LightGBM vs LSTM 비교표
+                                    (LightGBM 성적은 saved/{target}_pi.json에서 읽음)
 
 실행 (LightGBM 먼저):
     python3 models/train_lgbm.py
@@ -76,11 +77,11 @@ PredictFn = Callable[[np.ndarray], np.ndarray]
 def make_sequences(feature_matrix: np.ndarray, lookback: int) -> tuple[np.ndarray, np.ndarray]:
     """(n_timesteps, n_features) 배열을 (과거 lookback개 -> 다음 1개 target) 쌍으로 재구성.
     target(예측 대상)은 항상 feature_matrix의 0번째 열이라고 약속한다."""
-    X, y = [], []
+    xs, ys = [], []
     for i in range(len(feature_matrix) - lookback):
-        X.append(feature_matrix[i:i + lookback])
-        y.append(feature_matrix[i + lookback, 0])  # 0번째 열 = target
-    return np.array(X), np.array(y)
+        xs.append(feature_matrix[i:i + lookback])
+        ys.append(feature_matrix[i + lookback, 0])  # 0번째 열 = target
+    return np.array(xs), np.array(ys)
 
 
 class SimpleLSTM(nn.Module):
@@ -108,10 +109,12 @@ def _fit_stats(df: pd.DataFrame, target_col: str, weather_col: str | None) -> di
 def _build_feature_matrix(df: pd.DataFrame, target_col: str, weather_col: str | None,
                           stats: dict) -> np.ndarray:
     """target(+weather) 컬럼들을 각각 정규화해서 (n, n_features) 배열로 합친다."""
-    target_norm = (df[target_col].to_numpy(dtype=float) - stats["target_mean"]) / stats["target_std"]
+    target_vals = df[target_col].to_numpy(dtype=float)
+    target_norm = (target_vals - stats["target_mean"]) / stats["target_std"]
     if weather_col is None:
         return target_norm.reshape(-1, 1)
-    weather_norm = (df[weather_col].to_numpy(dtype=float) - stats["weather_mean"]) / stats["weather_std"]
+    weather_vals = df[weather_col].to_numpy(dtype=float)
+    weather_norm = (weather_vals - stats["weather_mean"]) / stats["weather_std"]
     return np.stack([target_norm, weather_norm], axis=-1)
 
 
@@ -120,11 +123,11 @@ def _train(df: pd.DataFrame, target_col: str, weather_col: str | None,
     """df로 LSTM 학습. 반환: (모델, 정규화 통계, 학습시간 초)"""
     torch.manual_seed(SEED)
     stats = _fit_stats(df, target_col, weather_col)
-    X, y = make_sequences(_build_feature_matrix(df, target_col, weather_col, stats), LOOKBACK)
-    X_t = torch.tensor(X, dtype=torch.float32)
+    x, y = make_sequences(_build_feature_matrix(df, target_col, weather_col, stats), LOOKBACK)
+    x_t = torch.tensor(x, dtype=torch.float32)
     y_t = torch.tensor(y, dtype=torch.float32)
 
-    model = SimpleLSTM(input_size=X.shape[-1])
+    model = SimpleLSTM(input_size=x.shape[-1])
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
     loss_fn = nn.MSELoss()
 
@@ -132,7 +135,7 @@ def _train(df: pd.DataFrame, target_col: str, weather_col: str | None,
     model.train()
     for epoch in range(epochs):
         optimizer.zero_grad()
-        loss = loss_fn(model(X_t), y_t)
+        loss = loss_fn(model(x_t), y_t)
         loss.backward()
         optimizer.step()
         if (epoch + 1) % 10 == 0:
@@ -143,9 +146,9 @@ def _train(df: pd.DataFrame, target_col: str, weather_col: str | None,
 
 def _predict_fn(model: SimpleLSTM) -> PredictFn:
     """(batch, lookback, n_features) numpy → (batch,) 정규화된 예측값."""
-    def predict(X: np.ndarray) -> np.ndarray:
+    def predict(x: np.ndarray) -> np.ndarray:
         with torch.no_grad():
-            return model(torch.tensor(X, dtype=torch.float32)).numpy()
+            return model(torch.tensor(x, dtype=torch.float32)).numpy()
     return predict
 
 
@@ -163,16 +166,16 @@ def recursive_backtest(predict: PredictFn, raw: pd.DataFrame, target_col: str,
     pos = {ts: i for i, ts in enumerate(raw["datetime"])}
     starts = np.array([pos[o] for o in origins])
 
-    X = np.stack([matrix[p - LOOKBACK:p] for p in starts])  # (b, L, f)
+    x = np.stack([matrix[p - LOOKBACK:p] for p in starts])  # (b, L, f)
     preds = []
     for h in range(horizon):
-        y_norm = predict(X)
+        y_norm = predict(x)
         preds.append(y_norm)
         if weather_col is None:
             new_row = y_norm[:, None]
         else:
             new_row = np.stack([y_norm, matrix[starts + h, 1]], axis=-1)
-        X = np.concatenate([X[:, 1:, :], new_row[:, None, :]], axis=1)
+        x = np.concatenate([x[:, 1:, :], new_row[:, None, :]], axis=1)
 
     pred = np.stack(preds, axis=1) * stats["target_std"] + stats["target_mean"]
     out = {
@@ -204,7 +207,8 @@ def train_one(target: str, start: str | None = None, end: str | None = None) -> 
 
     # 1차 학습(train) → calib 구간에서 168h 이어서 예측 → PI margin
     print("[1차 학습: train]")
-    calib_model, calib_stats, _ = _train(raw[raw["datetime"] < calib_start], target_col, weather_col)
+    calib_train = raw[raw["datetime"] < calib_start]
+    calib_model, calib_stats, _ = _train(calib_train, target_col, weather_col)
     calib_origins = list(pd.date_range(calib_start, test_start - pd.Timedelta(hours=MAX_HORIZON),
                                        freq=f"{CALIB_ORIGIN_STEP_H}h"))
     cb = recursive_backtest(_predict_fn(calib_model), raw, target_col, weather_col, calib_stats,
@@ -231,16 +235,17 @@ def train_one(target: str, start: str | None = None, end: str | None = None) -> 
     # test: 매일 0시에 시작 → 24h / 168h (LightGBM과 같은 시점)
     pi_info = {"pi_type": "horizon", "margins": margins}
     test_metrics = {}
-    for H in (24, 168):
-        origins = list(pd.date_range(test_start, data_end - pd.Timedelta(hours=H) + pd.Timedelta(hours=1),
-                                     freq="D"))
-        tb = recursive_backtest(predict, raw, target_col, weather_col, stats, origins, H)
-        dts = [pd.date_range(o, periods=H, freq="h") for o in origins]
+    for hz in (24, 168):
+        last_origin = data_end - pd.Timedelta(hours=hz) + pd.Timedelta(hours=1)
+        origins = list(pd.date_range(test_start, last_origin, freq="D"))
+        tb = recursive_backtest(predict, raw, target_col, weather_col, stats, origins, hz)
+        dts = [pd.date_range(o, periods=hz, freq="h") for o in origins]
         rep = _report(target, tb, pi_info, dts)
-        test_metrics[f"{H}h"] = rep
-        ok = "통과" if _passes(target, f"{H}h", rep) else "미달"
-        print(f"[test {H:3d}h] {METRIC_NAME[target]} {rep['primary_value']:.2f}% / "
-              f"PI 커버리지 {rep['coverage']:.1f}% / 평균 구간폭 {rep['interval_width_mean']:.0f} MW "
+        test_metrics[f"{hz}h"] = rep
+        ok = "통과" if _passes(target, f"{hz}h", rep) else "미달"
+        print(f"[test {hz:3d}h] {METRIC_NAME[target]} {rep['primary_value']:.2f}% / "
+              f"PI 커버리지 {rep['coverage']:.1f}% / "
+              f"평균 구간폭 {rep['interval_width_mean']:.0f} MW "
               f"(시점 {len(origins)}개) → {ok}")
 
     torch.save({
@@ -279,11 +284,13 @@ def write_comparison(lstm_results: dict[str, dict]) -> str:
     for t, lstm in lstm_results.items():
         lgbm_path = SAVED_DIR / f"{t}_pi.json"
         if not lgbm_path.exists():
-            lines.append(f"| {t} | LightGBM | (saved/{t}_pi.json 없음 — train_lgbm.py 먼저 실행) |||||||")
+            lines.append(f"| {t} | LightGBM | (saved/{t}_pi.json 없음 — "
+                         f"train_lgbm.py 먼저 실행) |||||||")
             continue
         lgbm = json.loads(lgbm_path.read_text(encoding="utf-8"))
         if lgbm.get("test_period") != lstm["test_period"]:
-            print(f"[경고] {t}: LightGBM과 LSTM의 test 구간이 다름 → train_lgbm.py를 다시 실행하세요")
+            print(f"[경고] {t}: LightGBM과 LSTM의 test 구간이 다름 "
+                  "→ train_lgbm.py를 다시 실행하세요")
 
         scores = {}
         for name, res in (("LightGBM", lgbm), ("LSTM", lstm)):

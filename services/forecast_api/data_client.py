@@ -41,10 +41,11 @@ def _find_data_dir() -> Path:
     if env:
         return Path(env)
     here = Path(__file__).resolve().parent
-    candidates = [
-        here.parents[1] / "data" / "csv",  # 로컬: VPP/services/forecast_api -> VPP/data/csv
-        here / "data" / "csv",             # Docker: /app/data/csv
-    ]
+    candidates = [here / "data" / "csv"]  # Docker: /app/data/csv (docker-compose 볼륨)
+    if len(here.parents) > 1:
+        # 로컬: VPP/services/forecast_api -> VPP/data/csv
+        # (Docker의 /app 은 상위 폴더가 1단계뿐이라 parents[1]이 없어서 조건으로 막는다)
+        candidates.append(here.parents[1] / "data" / "csv")
     for c in candidates:
         if c.exists():
             return c

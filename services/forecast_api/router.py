@@ -39,7 +39,8 @@ def forecast(req: ForecastRequest) -> ForecastResponse:
         except NotImplementedError as e:
             raise HTTPException(
                 status_code=501,
-                detail={"result_code": "21", "result_msg": "MODEL_NOT_IMPLEMENTED", "detail": str(e)},
+                detail={"result_code": "21", "result_msg": "MODEL_NOT_IMPLEMENTED",
+                        "detail": str(e)},
             ) from e
 
     return ForecastResponse(

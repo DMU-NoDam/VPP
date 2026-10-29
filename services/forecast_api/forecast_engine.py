@@ -105,8 +105,8 @@ def _recursive_forecast(target: str, model, history: pd.DataFrame,
         rec[f"{target_col}_roll_mean_24h"] = float(np.mean(recent_24))
 
         # DataFrame을 매 스텝 만들면 느려서(백테스트에서 수만 번 호출) numpy 1행으로 넘긴다.
-        X = np.array([[rec[c] for c in feature_cols]], dtype=float)
-        pred = max(float(model.predict(X)[0]), 0.0)  # 수요/발전량은 음수가 될 수 없음
+        x_row = np.array([[rec[c] for c in feature_cols]], dtype=float)
+        pred = max(float(model.predict(x_row)[0]), 0.0)  # 수요/발전량은 음수가 될 수 없음
         values[ts] = pred
         rows.append({"datetime": ts, "predicted": pred})
     return pd.DataFrame(rows)
@@ -233,7 +233,8 @@ def run_forecast(target: str, start_date: str, end_date: str,
 
 
 if __name__ == "__main__":
-    result = run_forecast("demand", start_date="2025-07-01", end_date="2026-10-01", horizon_hours=24)
+    result = run_forecast("demand", start_date="2025-07-01", end_date="2026-10-01",
+                          horizon_hours=24)
     print(f"model_used: {result['model_used']}")
     print(f"metrics: {result['metrics']}")
     print(f"points[:3]: {json.dumps(result['points'][:3], indent=2, default=str)}")

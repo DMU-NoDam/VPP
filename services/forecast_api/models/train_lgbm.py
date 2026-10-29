@@ -65,12 +65,12 @@ CONFIDENCE = 0.9
 
 
 def _fit(target: str, df: pd.DataFrame) -> lgb.Booster:
-    X = df[feature_columns(target)].to_numpy(dtype=float)
+    x = df[feature_columns(target)].to_numpy(dtype=float)
     y = df[TARGET_COLUMN[target]].to_numpy(dtype=float)
     if TARGET_MODE[target] == "cf":
         y = y / df["capacity_mw"].to_numpy(dtype=float)  # 이용률로 학습
     model = lgb.LGBMRegressor(verbosity=-1, **LGBM_PARAMS[target])
-    model.fit(X, y)
+    model.fit(x, y)
     return model.booster_
 
 
@@ -127,7 +127,8 @@ def train_one(target: str, start: str | None = None, end: str | None = None) -> 
         start, end = available_range(target)
 
     print("=" * 60)
-    print(f"target = {target}  ({start} ~ {end})  방식: {STRATEGY[target]} / 정답: {TARGET_MODE[target]}")
+    print(f"target = {target}  ({start} ~ {end})  "
+          f"방식: {STRATEGY[target]} / 정답: {TARGET_MODE[target]}")
     print("=" * 60)
 
     raw = get_mock_data(target, start=start, end=end).sort_values("datetime").reset_index(drop=True)
@@ -159,17 +160,18 @@ def train_one(target: str, start: str | None = None, end: str | None = None) -> 
     # test: 매일 0시에 예측 시작 → 24h / 168h 성적 + PI 커버리지
     pi_info = {"pi_type": cal["pi_type"], "margins": m}
     test_metrics = {}
-    for H in (24, 168):
-        origins = list(pd.date_range(test_start, data_end - pd.Timedelta(hours=H) + pd.Timedelta(hours=1),
-                                     freq="D"))
-        tb = backtest(target, booster, raw, origins, H)
-        dts = [pd.date_range(o, periods=H, freq="h") for o in origins]
+    for hz in (24, 168):
+        last_origin = data_end - pd.Timedelta(hours=hz) + pd.Timedelta(hours=1)
+        origins = list(pd.date_range(test_start, last_origin, freq="D"))
+        tb = backtest(target, booster, raw, origins, hz)
+        dts = [pd.date_range(o, periods=hz, freq="h") for o in origins]
         rep = _report(target, tb, pi_info, dts)
-        test_metrics[f"{H}h"] = rep
-        ok = "통과" if _passes(target, f"{H}h", rep) else "미달"
+        test_metrics[f"{hz}h"] = rep
+        ok = "통과" if _passes(target, f"{hz}h", rep) else "미달"
         extra = f" (실제평균 기준 {rep['nmae_mean']:.1f}%)" if target != "demand" else ""
-        print(f"[test {H:3d}h] {METRIC_NAME[target]} {rep['primary_value']:.2f}%{extra} / "
-              f"PI 커버리지 {rep['coverage']:.1f}% / 평균 구간폭 {rep['interval_width_mean']:.0f} MW "
+        print(f"[test {hz:3d}h] {METRIC_NAME[target]} {rep['primary_value']:.2f}%{extra} / "
+              f"PI 커버리지 {rep['coverage']:.1f}% / "
+              f"평균 구간폭 {rep['interval_width_mean']:.0f} MW "
               f"(시점 {len(origins)}개) → {ok}")
 
     # 저장 (API가 이 파일들을 불러와서 씀)
