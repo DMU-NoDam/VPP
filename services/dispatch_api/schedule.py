@@ -108,7 +108,9 @@ def assemble(
         outputs = [0.0 if abs(x) < ZERO_MW else float(x) for x in p_mw[g.id]]
         starts = startup_flags(states, g.u_init)
 
-        fuel_cost += g.fuel_cost_krw_per_mwh * sum(outputs)
+        # 무부하 비용: 켜져 있는 시간마다 k x 단가 x p_max, 출력분은 (1 - k) x 단가
+        fuel_cost += (1 - g.no_load_frac) * g.fuel_cost_krw_per_mwh * sum(outputs)
+        fuel_cost += g.no_load_frac * g.fuel_cost_krw_per_mwh * g.p_max_mw * sum(states)
         startup_cost += g.startup_cost_krw * sum(starts)
 
         units.append(UnitSchedule(

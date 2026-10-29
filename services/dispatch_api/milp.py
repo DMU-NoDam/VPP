@@ -217,7 +217,11 @@ def build_model(
 
     # ── 목적함수: 연료비 + 기동비 (+ 부하차단 페널티) (+ 피크 가중치) ───────
     objective = (
-        pulp.lpSum(g.fuel_cost_krw_per_mwh * p[g.id][t] for g in gens for t in hours)
+        pulp.lpSum(
+            (1 - g.no_load_frac) * g.fuel_cost_krw_per_mwh * p[g.id][t]
+            + g.no_load_frac * g.fuel_cost_krw_per_mwh * g.p_max_mw * u[g.id][t]
+            for g in gens for t in hours
+        )
         + pulp.lpSum(g.startup_cost_krw * v[g.id][t] for g in gens for t in hours)
         + pulp.lpSum(shed_penalty_krw_per_mwh * shed[t] for t in hours)
     )

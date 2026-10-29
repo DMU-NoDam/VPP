@@ -35,6 +35,7 @@ class GeneratorSpec:
     u_init: int
     init_state_h: int
     fuel_cost_krw_per_mwh: float | None = None
+    no_load_frac: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,8 @@ class Generator:
     u_init: int
     init_state_h: int
     fuel_cost_krw_per_mwh: float
+    # 무부하 비중 k. 시간당 비용 = k x 단가 x p_max x u + (1 - k) x 단가 x p
+    no_load_frac: float = 0.0
 
 
 @dataclass(frozen=True)
