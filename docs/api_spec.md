@@ -28,7 +28,77 @@
 - "null"
 조회 결과가 없는 값
 
-## TODO: POST /api/v1/forecast
+## POST /api/v1/forecast (forecast_api `:8001`)
+
+수요·태양광·풍력 시계열 예측. 향후 24~168시간의 예측값과 90% 예측구간(conformal)을 반환한다.
+학습 데이터는 collector CSV(`power_demand`, `trading_by_fuel`, `weather`)를 쓴다.
+
+요청:
+
+| 필드 | 타입 | 필수 | 설명 |
+|---|---|---|---|
+| `start_date` | string (YYYY-MM-DD) | O | 과거 데이터 시작일 |
+| `end_date` | string (YYYY-MM-DD) | O | 과거 데이터 종료일. 예측은 이 시점(데이터가 끝나는 시점) 다음 시간부터 |
+| `target` | `"demand"` \| `"solar"` \| `"wind"` \| `"all"` | O | `all`이면 세 개를 한 번에 반환 |
+| `horizon_hours` | integer (24~168) | O | 예측 시간 범위 |
+| `model` | `"auto"` \| `"lightgbm"` \| `"lstm"` | X (기본 `auto`) | `auto`는 lightgbm. `lstm`은 서빙 미구현(501) |
+| `pi_method` | `"conformal"` \| `"quantile"` | X (기본 `conformal`) | 현재 conformal만 구현 |
+
+```json
+{ "start_date": "2025-07-01", "end_date": "2026-10-12", "target": "all", "horizon_hours": 24 }
+```
+
+응답 (200, `points`는 앞부분만):
+
+```json
+{
+  "result_code": "00", "result_msg": "OK",
+  "generated_at": "2026-10-15T10:00:00", "horizon_hours": 24,
+  "forecasts": {
+    "demand": {
+      "model_used": "lightgbm", "pi_method": "conformal",
+      "metrics": { "mape": 3.22, "nmae": 3.3, "nmae_mean": 3.3, "coverage": 86.2, "interval_width_mean": 8445.0, "n_origins": 13.0, "primary_value": 3.22 },
+      "points": [
+        { "datetime": "2026-10-12T01:00:00", "predicted": 51686.4,
+          "lower_bound": 50436.5, "upper_bound": 52936.3 }
+      ]
+    },
+    "solar": { "...": "demand와 동일 구조, primary_value = nMAE" },
+    "wind":  { "...": "demand와 동일 구조, primary_value = nMAE" }
+  }
+}
+```
+
+- `metrics`는 학습·PI 계산에 쓰지 않은 시험 구간(데이터 마지막 2주)에서 API와 같은 방식으로 예측한 성적이다
+  (`horizon_hours` ≤ 24면 24h 성적, 그보다 길면 168h 성적). `primary_value`는 스펙 판정 지표(수요=MAPE, 태양광/풍력=nMAE),
+  `coverage`는 90% 예측구간 커버리지(%), `interval_width_mean`은 평균 구간 폭(MW), `n_origins`는 평가에 쓴 예측 시작 시점 수,
+  `nmae_mean`은 참고용(실제값 평균 기준) nMAE.
+- **nMAE 정의**: `nMAE = 평균 절대오차 ÷ 설비용량 × 100`. 과제 문서에 정의가 없어 재생에너지 예측에서 일반적인
+  설비용량 기준을 쓴다 (대시보드 `dashboard/logic.py`와 동일). 설비용량은 `trading_by_fuel.capacity_mw`.
+- 예측 방식:
+  - `demand`: LightGBM recursive. 피처 = 과거 수요(1h/24h/168h 전, 24h 평균) + 전국 평균 기온·냉방도일(CDD, 24℃)·
+    난방도일(HDD, 18℃) + 시각·요일·공휴일(대체공휴일 포함).
+  - `solar`: LightGBM direct. 7개 지점 일사량(+이동평균) + 달력으로 이용률(발전량/설비용량)을 예측하고 최신 설비용량을 곱한다.
+  - `wind`: LightGBM direct. 6개 지점 풍속(+이동평균) + 달력으로 발전량(MW)을 예측한다.
+- 예측구간(90%, conformal): 시험 구간 직전 4주(calibration) 오차로 margin을 정한다 (`saved/{target}_pi.json`).
+  수요는 "몇 시간 뒤"별 margin(먼 미래일수록 넓음), 태양광/풍력은 "몇 시"별 margin(태양광은 밤에 거의 0).
+- 단위: `demand`·`solar`·`wind` 모두 MW (발전량은 `trading_by_fuel.trade_mwh` 1시간 거래량 = 평균 MW).
+- 태양광/풍력 예측은 `trading_by_fuel`의 마지막 시각 다음 시간부터 시작한다 (수요보다 데이터가 짧을 수 있음).
+- 미래 기상(기온·일사량·풍속)은 예보 API가 없어서 해당 시각의 관측값을 예보 대용으로 쓰고(완벽한 예보 가정),
+  관측값도 없으면 과거 시간대별 평균을 쓴다. 실제 운영 시에는 예보 오차만큼 성능이 낮아질 수 있다.
+
+에러:
+
+| HTTP | result_code | result_msg | 상황 |
+|---|---|---|---|
+| 500 | `21` | `MODEL_LOAD_ERROR` | 모델 파일 없음 (`models/train_lgbm.py` 미실행) |
+| 501 | `21` | `MODEL_NOT_IMPLEMENTED` | `model: "lstm"` 요청 (서빙 미구현) |
+| 422 | - | - | 요청 검증 실패 (FastAPI 기본 형식) |
+
+```json
+{ "detail": { "result_code": "21", "result_msg": "MODEL_LOAD_ERROR",
+              "detail": ".../models/saved/demand_lgbm.txt 없음 — models/train_lgbm.py 먼저 실행 필요" } }
+```
 
 ## POST /api/v1/dispatch/milp (dispatch_api `:8002`)
 
