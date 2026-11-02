@@ -7,7 +7,9 @@ COPY services/dispatch_api/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY shared/ shared/
-COPY services/dispatch_api/*.py .
+# 서비스 디렉터리 전체를 넣는다. *.py 글롭만 쓰면 loaders/ 같은 하위 패키지가
+# 빠져 컨테이너에서만 ImportError 가 난다 (__pycache__ 는 .dockerignore 가 막는다).
+COPY services/dispatch_api/ .
 
 EXPOSE 8002
 

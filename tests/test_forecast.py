@@ -28,7 +28,14 @@ import features  # noqa: E402
 import forecast_engine  # noqa: E402
 import metrics  # noqa: E402
 import pi  # noqa: E402
-from models import train_lgbm  # noqa: E402
+
+# dispatch_api 에도 models.py 가 있어 `from models import ...` 는 그쪽을 잡는다.
+# 그래서 train_lgbm 은 파일 경로로 직접 읽는다.
+_spec = importlib.util.spec_from_file_location(
+    "train_lgbm", FORECAST_DIR / "models" / "train_lgbm.py"
+)
+train_lgbm = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(train_lgbm)
 
 N_DAYS = 35
 START = "2026-01-01"
