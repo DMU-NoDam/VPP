@@ -938,6 +938,31 @@ def test_latest_demand_missing() -> None:
     assert logic.latest_demand(res) is None
 
 
+def test_latest_supply_reserve_and_hour_ago() -> None:
+    rows = [{"ts": f"2026-10-17 {8 + (m // 60):02d}:{m % 60:02d}:00",
+             "demand_mw": 50000.0, "supply_mw": 55000.0 + m * 10} for m in range(0, 65, 5)]
+    rows.append({"ts": "2026-10-17 09:05:00", "demand_mw": "None", "supply_mw": 99999.0})
+    d = logic.latest_supply(logic.ApiResult(data={"rows": rows}))
+    assert d["ts"] == pd.Timestamp("2026-10-17 09:00")  # 수요가 빈 마지막 행은 건너뛴다
+    assert d["supply_mw"] == 55600.0 and d["demand_mw"] == 50000.0
+    assert d["reserve_pct"] == pytest.approx(11.2)  # (55600 - 50000) / 50000 x 100
+    assert d["prev_supply_mw"] == 55000.0
+    assert d["prev_reserve_pct"] == pytest.approx(10.0)
+
+
+def test_latest_supply_missing() -> None:
+    assert logic.latest_supply(logic.ApiResult(error="down")) is None
+    # supply_mw 를 주지 않는 collector (컬럼 추가 전) 이면 목업으로 돌아가게 None
+    res = logic.ApiResult(data={"rows": [{"ts": "2026-10-17 09:00:00", "demand_mw": 50000.0}]})
+    assert logic.latest_supply(res) is None
+    res = logic.ApiResult(data={"rows": [
+        {"ts": "2026-10-17 09:00:00", "demand_mw": 50000.0, "supply_mw": "None"}]})
+    assert logic.latest_supply(res) is None
+    single = logic.latest_supply(logic.ApiResult(data={"rows": [
+        {"ts": "2026-10-17 09:00:00", "demand_mw": 50000.0, "supply_mw": 60000.0}]}))
+    assert single["prev_supply_mw"] is None and single["prev_reserve_pct"] is None
+
+
 def test_latest_full_day_skips_incomplete_day() -> None:
     res = logic.ApiResult(data={"rows": _trading_rows(
         ["2026-09-17", "2026-09-18"], skip=("2026-09-18", "nuclear"))})
