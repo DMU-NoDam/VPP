@@ -13,8 +13,9 @@ config/dashboard.yaml 에 있다.
 사이드바의 관측 시각·조정값은 앞의 세 페이지가 함께 쓴다 (main 에서 한 번 그린다).
 
 데이터 출처 (모두 REST, 다른 서비스 코드는 import 하지 않는다):
-    collector     GET  /data/{name}                    실측 수요·발전원별 출력·SMP
-                                                       (수요 게이지, Merit Order 실측 발전 믹스)
+    collector     GET  /data/{name}                    실측 수요·공급능력·발전원별 출력·SMP
+                                                       (수요·공급능력·예비율 게이지,
+                                                       Merit Order 실측 발전 믹스)
     forecast_api  GET  /health                         연결 상태
                   POST /api/v1/forecast                168h 수요 예측·90% PI (분석 상세)
     dispatch_api  GET  /health                         연결 상태
@@ -26,9 +27,10 @@ config/dashboard.yaml 에 있다.
 응답이 없거나 계약이 아직 없는 패널은 목업으로 그린다. 서비스 응답을 쓴 패널에는 LIVE,
 목업으로 그린 패널에는 목업 태그를 단다 (ui.source_tag, ui.mock_tag).
 
-TODO(통합): 수급 게이지의 공급능력·예비율, 위기 시나리오는 아직 목업이다. MILP 계획은
-수집 데이터의 최신 연속 24h(관측 시각과 다른 날일 수 있음) 기준이라 실시간 게이지에 바로
-쓰지 않았다.
+TODO(통합): 위기 시나리오는 아직 목업이다. 수급 게이지의 공급능력·예비율은 collector
+power_demand 의 supply_mw 실측을 쓰고, collector 가 supply_mw 를 주지 않으면 목업으로 돌아간다.
+MILP 계획은 수집 데이터의 최신 연속 24h(관측 시각과 다른 날일 수 있음) 기준이라 실시간 게이지에
+바로 쓰지 않았다.
 """
 
 from __future__ import annotations
@@ -729,21 +731,29 @@ def render_demand_card(ctx: Context) -> None:
 
 
 def render_supply_card(ctx: Context) -> None:
-    """공급능력 불릿 게이지. 공급능력 = 가용 설비 + 재생 + ESS 출력
-    (KPX 정의: 예비력 = 공급능력 − 수요). collector 에 없어 목업이다.
+    """공급능력 불릿 게이지 (KPX 정의: 예비력 = 공급능력 − 수요).
+    collector 실측 최신값(5분, supply_mw)이 있으면 그것, 없으면 목업.
     """
     now, prev = ctx.now, ctx.prev
     scale = 1000 if compact() else 1
     gmax = 110000 / scale
     ticks = [0, 55000 / scale, gmax]
-    cap, cap_prev = now.available_capacity_mw, prev.available_capacity_mw
+    real = logic.latest_supply(fetch_collector(ctx.urls["collector"], "power_demand", 13))
+    if real:
+        cap, demand = real["supply_mw"], real["demand_mw"]
+        tag = real_tag(f'실측 {real["ts"]:%m/%d %H:%M}')
+        cap_prev = real["prev_supply_mw"]
+        delta = _delta(_pct_change(cap, cap_prev)) if cap_prev else ""
+    else:
+        cap, demand, tag = now.available_capacity_mw, now.demand_mw, None
+        delta = _delta(_pct_change(cap, prev.available_capacity_mw))
     value, unit = pw(cap).split(" ")
     _bullet_card(
-        "공급 능력", value, unit, _delta(_pct_change(cap, cap_prev)),
-        _bullet(cap / scale, gmax, C_INDIGO, ticks, marker=now.demand_mw / scale,
-                stripe_from=now.demand_mw / scale),
-        f'<span class="vpp-key stripe"></span>예비력 <b>{pw(cap - now.demand_mw)}</b>',
-        value_color=C_INDIGO, stretch=False,
+        "공급 능력", value, unit, delta,
+        _bullet(cap / scale, gmax, C_INDIGO, ticks, marker=demand / scale,
+                stripe_from=demand / scale),
+        f'<span class="vpp-key stripe"></span>예비력 <b>{pw(cap - demand)}</b>',
+        value_color=C_INDIGO, tag=tag, stretch=False,
     )
 
 
@@ -767,19 +777,30 @@ def _reserve_ring(value: float, color: str, label: str, css_class: str,
 
 
 def render_reserve_hero(ctx: Context) -> None:
-    """벤토 히어로: 예비율 링 + 위기 시나리오 (둘 다 '예비율이 버티는가'를 본다)."""
+    """벤토 히어로: 예비율 링 + 위기 시나리오 (둘 다 '예비율이 버티는가'를 본다).
+
+    예비율 링은 collector 실측(공급능력·수요)이 있으면 그것, 없으면 목업. 위기 시나리오는 목업.
+    """
     s, now, prev = ctx.settings, ctx.now, ctx.prev
-    label, css_class = logic.reserve_status(s, now.reserve_pct)
+    real = logic.latest_supply(fetch_collector(ctx.urls["collector"], "power_demand", 13))
+    if real:
+        reserve, tag, when = real["reserve_pct"], real_tag("실측"), f'{real["ts"]:%m/%d %H:%M}'
+        reserve_prev = real["prev_reserve_pct"]
+        delta = "" if reserve_prev is None else _delta(reserve - reserve_prev, "%p")
+    else:
+        reserve, tag, when = now.reserve_pct, mock_tag(), f"{ctx.hour}시"
+        delta = _delta(now.reserve_pct - prev.reserve_pct, "%p")
+    label, css_class = logic.reserve_status(s, reserve)
     color = STATUS_COLOR[css_class]
     crit, warn = s.reserve_critical_pct, s.reserve_warning_pct
     with card(key="vpp-hero"):
         html(
-            f'<div class="vpp-kpi-head"><span>예비율{mock_tag()}</span>'
-            f"<small>{ctx.hour}시</small></div>"
+            f'<div class="vpp-kpi-head"><span>예비율{tag}</span>'
+            f"<small>{when}</small></div>"
             '<div class="vpp-alarm">'
-            f"{_reserve_ring(now.reserve_pct, color, label, css_class, crit, warn)}</div>"
+            f"{_reserve_ring(reserve, color, label, css_class, crit, warn)}</div>"
             '<div class="vpp-ring-sub">'
-            f'{_delta(now.reserve_pct - prev.reserve_pct, "%p")}'
+            f"{delta}"
             '<span class="vpp-legend">'
             f'<span><i style="background:{C_RED}"></i>Critical &lt;{crit:g}%</span>'
             f'<span><i style="background:{C_YELLOW}"></i>Warning &lt;{warn:g}%</span></span>'

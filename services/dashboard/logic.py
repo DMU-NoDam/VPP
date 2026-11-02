@@ -609,6 +609,34 @@ def latest_demand(result: ApiResult) -> dict | None:
     }
 
 
+def latest_supply(result: ApiResult) -> dict | None:
+    """collector power_demand(5분) 의 최신 공급능력·수요·예비율과 1시간 전 값 (없으면 None).
+
+    예비율 = (공급능력 − 수요) / 수요 x 100 (KPX 공급예비율 정의, 목업과 같은 식).
+    collector 가 supply_mw 를 주지 않거나 두 값 중 하나라도 비면 그 시각은 건너뛴다.
+    """
+    df = rows_frame(result, ("demand_mw", "supply_mw"))
+    if df.empty or "supply_mw" not in df:
+        return None
+    df = df.dropna(subset=["demand_mw", "supply_mw"], ignore_index=True)
+    df = df[df.demand_mw > 0].reset_index(drop=True)
+    if df.empty:
+        return None
+    df["ts"] = pd.to_datetime(df["ts"])
+    df["reserve_pct"] = (df.supply_mw - df.demand_mw) / df.demand_mw * 100
+    last = df.iloc[-1]
+    hour_ago = df.loc[df.ts == last.ts - pd.Timedelta(hours=1)]
+    prev = hour_ago.iloc[0] if len(hour_ago) else None
+    return {
+        "ts": last.ts,
+        "supply_mw": float(last.supply_mw),
+        "demand_mw": float(last.demand_mw),
+        "reserve_pct": float(last.reserve_pct),
+        "prev_supply_mw": None if prev is None else float(prev.supply_mw),
+        "prev_reserve_pct": None if prev is None else float(prev.reserve_pct),
+    }
+
+
 def latest_full_day(trading: pd.DataFrame) -> date | None:
     """trading_by_fuel 에서 CORE_FUELS 가 24시간 모두 있는 가장 최근 날."""
     if trading.empty:
