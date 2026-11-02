@@ -16,7 +16,7 @@
 
 ```json
 { "dataset": "power_demand", "count": 1,
-  "rows": [{ "ts": "2026-09-22 09:00:00", "demand_mw": 71612.0 }] }
+  "rows": [{ "ts": "2026-10-26 10:10:00", "demand_mw": 60622.3, "supply_mw": 92726.6 }] }
 ```
 
 ### 결측치 
