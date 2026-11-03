@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>커밋 단계 비교</title>
+<style>
+:root {
+  color-scheme: light;
+  --surface-0: #f4f4f2;
+  --surface-1: #fcfcfb;
+  --border: #e2e1dc;
+  --grid: #ecebe7;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #7a7974;
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100;
+  --ess: #e87ba4;
+  --good: #0ca30c; --critical: #d03b3b;
+  --accent-bg: #e8f0fb;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --surface-0: #121211; --surface-1: #1a1a19; --border: #33332f; --grid: #2a2a27;
+    --text-primary: #f0efec; --text-secondary: #c3c2b7; --text-muted: #8f8e86;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+    --ess: #d55181;
+    --accent-bg: #1d2a3b;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface-0: #121211; --surface-1: #1a1a19; --border: #33332f; --grid: #2a2a27;
+  --text-primary: #f0efec; --text-secondary: #c3c2b7; --text-muted: #8f8e86;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+  --ess: #d55181;
+  --accent-bg: #1d2a3b;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--surface-0); color: var(--text-primary);
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+}
+main { max-width: 1400px; margin: 0 auto; padding: 24px 16px 64px; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+h2 { font-size: 16px; margin: 0 0 12px; }
+h3 { font-size: 14px; margin: 0 0 4px; }
+.sub { color: var(--text-secondary); margin: 0 0 16px; }
+.card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+.filters { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; position: sticky; top: 0; z-index: 5;
+  background: var(--surface-0); padding: 10px 0; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+.filters label, .ctl label { color: var(--text-secondary); font-size: 13px; margin-right: 6px; }
+.ctl { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin-bottom: 12px; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.seg button { background: var(--surface-1); color: var(--text-secondary); border: 0; padding: 6px 12px; font: inherit; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--border); }
+.seg button[aria-pressed="true"] { background: var(--accent-bg); color: var(--text-primary); font-weight: 600; }
+.navbtn { background: var(--surface-1); color: var(--text-secondary); border: 1px solid var(--border); border-radius: 8px; padding: 5px 10px; font: inherit; cursor: pointer; }
+select { font: inherit; padding: 5px 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary); }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px; }
+.legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+.legend i.line { height: 0; border-top: 2px dotted var(--text-primary); border-radius: 0; vertical-align: 3px; }
+.tbl-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; font-variant-numeric: tabular-nums; }
+th, td { padding: 6px 10px; border-bottom: 1px solid var(--border); text-align: right; white-space: nowrap; }
+th { color: var(--text-secondary); font-weight: 600; background: var(--surface-1); }
+td:first-child, th:first-child, td.l, th.l { text-align: left; }
+tr.kpx td { color: var(--text-muted); }
+tr.sum td { font-weight: 600; border-top: 2px solid var(--border); }
+.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+.bad { color: var(--critical); font-weight: 600; }
+.ok { color: var(--good); }
+.grid4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 1200px) { .grid4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 680px) { .grid4 { grid-template-columns: 1fr; } }
+.panel { border: 1px solid var(--border); border-radius: 8px; padding: 10px 10px 0; }
+.panel .kpi { color: var(--text-secondary); font-size: 12px; min-height: 36px; }
+.panel .kpi b { color: var(--text-primary); font-size: 14px; }
+.chart { width: 100%; height: 340px; }
+.chart.mix { height: 320px; }
+.note { color: var(--text-secondary); font-size: 13px; margin: 8px 0 0; }
+.note li { margin: 2px 0; }
+.missing { color: var(--text-muted); }
+details > summary { cursor: pointer; font-weight: 600; font-size: 16px; }
+details[open] > summary { margin-bottom: 12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>날짜별 발전원 출력 비교 — KPX · Rule · MILP (ESS 끔 / 켬)</h1>
+  <p class="sub" id="subtitle"></p>
+
+  <div class="filters" role="group" aria-label="보기 조건">
+    <div><label for="dateSel">날짜</label>
+      <button class="navbtn" id="prevDay" aria-label="이전 날짜">◀</button>
+      <select id="dateSel"></select>
+      <button class="navbtn" id="nextDay" aria-label="다음 날짜">▶</button></div>
+    <div><label>단계</label><span class="seg" id="stageSeg"></span></div>
+    <div id="stageDesc" style="color:var(--text-secondary);font-size:13px"></div>
+  </div>
+
+  <section class="card">
+    <h2 id="mixTitle"></h2>
+    <div class="legend" id="fuelLegend"></div>
+    <div class="grid4" id="mainGrid">
+      <div class="panel"><h3>KPX 실측</h3><div class="kpi" id="kpi_kpx"></div><div id="mix_kpx" class="chart mix"></div></div>
+      <div class="panel"><h3>Rule-based</h3><div class="kpi" id="kpi_rule"></div><div id="mix_rule" class="chart mix"></div></div>
+      <div class="panel"><h3>MILP · ESS 끔</h3><div class="kpi" id="kpi_off"></div><div id="mix_off" class="chart mix"></div></div>
+      <div class="panel"><h3>MILP · ESS 켬</h3><div class="kpi" id="kpi_on"></div><div id="mix_on" class="chart mix"></div></div>
+    </div>
+    <ul class="note">
+      <li>시간별 발전원 출력을 누적한 영역 차트다. 네 차트는 y 축 범위가 같다. 점선 = 순수요 (급전 가능 6종 실측 합계).</li>
+      <li>Rule-based 에는 ESS 가 없어 ESS 끔 / 켬과 무관하게 하나다. ESS 켬 차트의 0 아래 영역은 ESS 충전, 위에 얹힌 층은 ESS 방전이다.</li>
+    </ul>
+  </section>
+
+  <section class="card">
+    <h2 id="fuelTblTitle"></h2>
+    <div class="tbl-wrap"><table id="fuelTbl"></table></div>
+  </section>
+
+  <section class="card">
+    <details id="moreSection">
+      <summary>단계 요약 · 지표 비교 (19일)</summary>
+      <div class="ctl">
+        <div><label>ESS</label><span class="seg" id="essSeg">
+          <button data-v="off" aria-pressed="true">끔</button><button data-v="on" aria-pressed="false">켬</button>
+        </span></div>
+        <div><label>지표</label><span class="seg" id="metricSeg"></span></div>
+      </div>
+      <div class="tbl-wrap"><table id="summaryTbl"></table></div>
+      <ul class="note" id="summaryNote"></ul>
+      <h2 id="totalTitle" style="margin-top:20px"></h2>
+      <div class="legend" id="stageLegend1"></div>
+      <div id="totalChart" class="chart"></div>
+      <h2 id="dailyTitle" style="margin-top:20px"></h2>
+      <div class="legend" id="stageLegend2"></div>
+      <div id="dailyChart" class="chart"></div>
+      <p class="note" id="dailyNote"></p>
+      <div class="tbl-wrap"><table id="dailyTbl"></table></div>
+      <h2 style="margin-top:20px">단계 · 커밋</h2>
+      <div class="tbl-wrap"><table id="stageTbl"></table></div>
+      <ul class="note">
+        <li>값은 단계마다 해당 커밋의 dispatch_api 코드 · config 로 19일을 실제로 풀어 받은 응답이다. 원문은 <code>data/raw/&lt;단계&gt;_&lt;off|on&gt;/&lt;날짜&gt;.json</code>.</li>
+        <li>날짜 · 순수요 · KPX 실측은 <code>scripts/compare_kpx_rule_milp.html</code> 과 같다 (급전 가능 6종 합계, 단가 2026-08).</li>
+        <li>Rule 유닛별 출력을 받으려고 실행용 사본에만 baseline 응답에 units 를 넣었다. 레포 코드는 그대로다.</li>
+      </ul>
+    </details>
+  </section>
+</main>
+
+<script src="vendor/plotly.js"></script>
+<script src="data/meta.js"></script>
+<script src="data/S1_off.js"></script>
+<script src="data/S1_on.js"></script>
+<script src="data/S2_off.js"></script>
+<script src="data/S2_on.js"></script>
+<script src="data/S3_off.js"></script>
+<script src="data/S3_on.js"></script>
+<script src="data/S4_off.js"></script>
+<script src="data/S4_on.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
