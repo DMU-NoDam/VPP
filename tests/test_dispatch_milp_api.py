@@ -102,14 +102,14 @@ def test_baseline_can_be_skipped(client):
 
 
 def test_unit_subset_is_respected(client):
-    # 원자력 5기만으로 풀 수 있는 수요를 준다 (설비 약 26,047 MW, 최소출력 80% 합 약 20,838 MW,
-    # 예비율 10% 포함 22,000 x 1.1 = 24,200 MW).
+    # 원자력 4기만으로 풀 수 있는 수요를 준다 (새울 3호기는 계획예방정비로 제외.
+    # 설비 20,840 MW, 최소출력 합 16,672 MW, 예비율 10% 포함 18,000 x 1.1 = 19,800 MW).
     body = {
         "horizon_h": 2,
-        "net_demand_mw": [22000.0, 22000.0],
+        "net_demand_mw": [18000.0, 18000.0],
         "unit_ids": [
             "nuclear_saeul_1", "nuclear_saeul_2", "nuclear_shinhanul_1",
-            "nuclear_shinhanul_2", "nuclear_saeul_3",
+            "nuclear_shinhanul_2",
         ],
     }
     payload = MilpResponse.model_validate(
