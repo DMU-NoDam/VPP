@@ -172,18 +172,23 @@ generators:
   co2_ton_per_mwh: 0.01
   u_init: 1
   init_state_h: 24
-- id: nuclear_saeul_3
-  fuel: nuclear
-  p_max_mw: 5210
-  p_min_mw: 4168
-  ramp_up_mw_per_h: 156.3
-  ramp_down_mw_per_h: 156.3
-  min_up_h: 24
-  min_down_h: 24
-  startup_cost_krw: 0
-  co2_ton_per_mwh: 0.01
-  u_init: 1
-  init_state_h: 24
+# [적용 2026-11-03] 원전 계획예방정비: 5기 중 1기 상시 정지 (가용 4기 20,840 MW = 80%)
+#   - 정비 주기 약 18개월, 1회 약 2개월 (고리4호기 3/5~5/7). 2025년 원전 이용률 84.6% (발전량 기준)
+#   - 실측 trading_by_fuel.csv 원자력 거래량/설비용량 2025-07~2026-04 월평균 65~76% (송전단 기준)
+#   - 새울 3호기를 뺀 이유: data-source.md 에 상업운전 여부 미확인으로 남아 있음
+#   - 되돌리려면 아래 주석을 풀면 된다
+# - id: nuclear_saeul_3
+#   fuel: nuclear
+#   p_max_mw: 5210
+#   p_min_mw: 4168
+#   ramp_up_mw_per_h: 156.3
+#   ramp_down_mw_per_h: 156.3
+#   min_up_h: 24
+#   min_down_h: 24
+#   startup_cost_krw: 0
+#   co2_ton_per_mwh: 0.01
+#   u_init: 1
+#   init_state_h: 24
 - id: lng_ulsan_gps
   fuel: lng
   p_max_mw: 11303.3
