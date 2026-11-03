@@ -29,7 +29,9 @@ ess:
   power_discharge_mw: 4700
 
   # 에너지 용량
-  capacity_mwh: 32900
+  # [2026-10-29] 확인된 5개소(양양·예천·청송·무주·삼랑진) 출력 x 지속시간 합. 청평·산청 [미정]
+  #              출처: data/data-source/data-source.md "ESS (양수)"
+  capacity_mwh: 29420
 
   # ── 효율 ───────────────────────────────────────────────────────────────────
   # 왕복효율(round-trip). 충전·방전에 반씩 나눈다: eta_ch = eta_dis = sqrt(rte).
