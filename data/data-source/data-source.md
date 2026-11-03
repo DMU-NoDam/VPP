@@ -963,3 +963,403 @@ generators:
 - 동일한 복제 발전기끼리 대칭성이 생겨 branch-and-bound가 느려집니다.
 - 개수는 정수여야 하므로 3.72배는 4기로 반올림하게 되어 EPSIS 합계와 오차가 생깁니다.
 - 비율이 바뀌면 발전기 개수, 즉 모델 구조가 바뀌어 1·2번 문제에 대응하기 어렵습니다.
+
+
+==== 재조사 결과 및 적용값 (조사 2026-10-28, 적용 2026-10-29, 기존 내용은 위에 그대로 둠) ====
+
+[ 적용 기준 ]
+- 근거 순위: [1] 국내 실측(호기별) / [2] 국내 규정·보고서 / [3] 국내 논문·기사 / [4] 해외 논문·시험계통
+- [1]~[3] 근거가 있으면 적용. [4] 근거만 있거나 찾지 못한 값은 [미정] 으로 두고 config/generators.yaml (v2) 값을 유지
+- [1] 호기별 실측은 이번에 계산하지 못함 (인증키 API, data.go.kr 파일 다운로드 차단). 절차는 아래 [미정 항목 확정 방법]
+- 배율(위 [ 배율 설정 ])은 적용하지 않은 호기 원래 용량 기준 값
+
+[ 최소출력 p_min_mw ]
+- 유연탄 = p_max x 60%  [2] 적용
+  기후솔루션 「재생에너지 고속도로의 과속방지턱: 화력발전기 최소발전용량」 2025-08, 표 2 (2025-03 기준, 발전 5사 석탄 48개, 범위 50~73%)
+  https://content.forourclimate.org/files/research/BSjRQ8e.pdf
+- LNG = p_max x 48%  [2] 적용
+  위 보고서 표 2 (발전 5사 가스발전기 85개, 범위 17~68%)
+- 원자력 = p_max x 80%  [3] 적용 (현행 감발 하한)
+  프레시안 2026-02-24 (한수원 인용) https://pressian.com/pages/articles/2026022411161701811
+  아시아경제 2025-09-05 https://v.daum.net/v/20250905101823240
+- 국내탄 = p_max x 40%  [미정] (generators.yaml v2 유지, 국내 값 찾지 못함)
+- 수력 = 0  [미정] (generators.yaml v2 유지)
+  - 위 Statkraft 60% 는 [4] 수차 일반론이라 쓰지 않음
+- 유류 = [미정] (generators.yaml v2 20% 유지)
+  - 후보: 57.5~66.7% [2] 기후솔루션·PLANiT 「제주 출력제어 사례로 본 최소발전용량 하향 조정의 편익」 표 2 (원출처 전력시장운영규칙 개정 제24-긴급 3차, 2024-04-01)
+    https://content.forourclimate.org/files/research/aunioBf.pdf
+    남제주#1,2 60/94MW, 제주기력#2,3 42/73MW, 제주내연#1,2 26/39MW. 세 발전기의 현재 연료가 중유인지 확인하지 못해 쓰지 않음
+
+[ 램프율 ramp_up_mw_per_h / ramp_down_mw_per_h ]
+- 유연탄 = p_max x 3.0%/분 x 60 (= 180%/h)  [2] 적용
+- LNG = p_max x 5.0%/분 x 60 (= 300%/h)  [2] 적용
+- 유류 = p_max x 4.5%/분 x 60 (= 270%/h)  [2] 적용
+  출처(3개 공통): docs/pdf/비용평가세부운영규정(전문)_20161101.pdf 9.3.2.2 (규정상 하한)
+  - 주의: 2025 최신판에서 같은 조항 유지 여부는 확인하지 못함 (파일 본문 열람 실패)
+- 원자력 = p_max x 3%/h  [3] 적용 (현행 운전 기준)
+  프레시안 2026-02-24 https://pressian.com/pages/articles/2026022411161701811
+  참고: KPX 「계통신뢰도를 고려한 양수발전기 운영방안에 관한 연구」 2013-03 표 2-3 원자력 "0 MW (고정출력 운전)" [2]
+- 국내탄 = p_max x 60%/h  [미정] (generators.yaml v2 유지)
+- 수력 = p_max  [미정] (generators.yaml v2 유지, 위 "기동 3~5분" 근거와 같음)
+
+[ 최소 운전/정지시간 min_up_h / min_down_h ]
+- 공통: 전력시장운영규칙 [별표 4] 7.8, 7.16 에 정의(hh:mm)만 있고, 값은 발전기별로 제출되며 공개되지 않음 [2]
+  https://marketrule.kpx.or.kr/lmxdata/attach/2025/5/upload_5127126665285383397_p9.pdf
+  - 모든 입찰 발전기의 제출 항목이므로 국내탄·유류도 값은 존재함 (공개 값만 없음)
+- 유연탄 6 / 6, LNG 2 / 2, 국내탄 6 / 6, 유류 1 / 1  [미정] (generators.yaml v2 유지)
+  - KPG 193 값 (유연탄 6/12, LNG 4/3, 원자력 8/12) 은 [4] 이라 쓰지 않음
+  - 참고 [2]: KERI 2012 <표-1> 당진화력 7·8호기 기동모드별 정지시간 조건 — 재기동 2시간 이하, 열간 6~12시간, 난간 56시간 이하, 냉간 96시간 이상 (기동 모드 구분이며 최소 정지시간 아님)
+    https://www.kpx.or.kr/boardDownload.es?bid=0045&list_no=51351&seq=16281
+  - 참고 [2]: KPX 2013 표 2-2 정지 소요시간 석탄 3~6h, 복합 15~60분 (정지에 걸리는 시간이며 최소 정지시간 아님)
+    https://new.kpx.or.kr/boardDownload.es?bid=0045&list_no=51427&seq=16063
+  - 참고 [3]: 석탄발전 기동·정지 2021~2025 6,257회, 낮에 출력을 줄였다가 저녁에 재가동하는 패턴 반복 (에너지신문 2026-10-14)
+    https://www.energy-news.co.kr/news/articleView.html?idxno=228962
+- 원자력 24 / 24  (generators.yaml v2 유지)
+  근거 [2]: docs/pdf/KPX_2012년도_발전설비현황_부록.pdf 경수로 기동시간 COLD 158~339h, WARM 91~150h, HOT 76~123h → 24h 창 안에서 재기동 불가
+- 수력 1 / 1  (위 "기동 3~5분" 근거의 0 과 같은 의미. 로더가 1 이상만 받으므로 1 로 적음)
+
+[ 기동비 startup_cost_krw ]
+- 원자력 = 0  [2] 적용 (시장 규정상 기동비용 미적용. 물리적 기동 비용이 0 이라는 뜻은 아님)
+  KERI 「발전기 기동비용 산정 및 적용기준 개선방안 연구」 2012 / 비용평가세부운영규정 2016 3.4.1.1
+  https://www.kpx.or.kr/boardDownload.es?bid=0045&list_no=51351&seq=16281
+- 수력 = 0  [2] 적용 (같은 조항)
+- 유연탄, LNG, 국내탄 = [미정] generators.yaml v2 의 1기당 값을 원/MW 로 바꿔 호기 용량에 곱함
+  유연탄 120,000,000 / 5,104.8MW = 23,507원/MW, LNG 40,000,000 / 4,031.6MW = 9,922원/MW, 국내탄 10,000,000 / 400MW = 25,000원/MW
+  - 기력(유류·국내탄·역청탄)은 규정상 기동비용이 적용됨 (KERI 2012: "분기별 유류, 국내탄, 역청탄 기동비용의 평균과 자기 비용 중 낮은 값") [2]. 금액은 비공개
+  - 후보 [3]: LNG 복합 Hot 2,749원/MW, 유류 Cold 80,353원/MW (2007년 연료가격 기준)
+    이정호 외 「계통운영보조서비스 비용산정 및 분담방안」 2007 대한전기학회 하계학술대회
+    https://koreascience.kr/article/CFKO200703977435136.pdf
+    현재 연료가격으로 보정하는 방법을 정한 뒤 적용
+  - KPG 193 값 (유연탄 12,606원/MW, LNG 53,862원/MW) 은 [4] 이라 쓰지 않음
+
+[ 유류 ]
+- 위 [ 가상 발전기 선정하기 ] 에 유류 호기가 없어 아래 generators 에도 넣지 않음
+
+[ ESS (양수) ]
+- 방전 출력 4,700MW (7개소 16기)  [2] 적용
+  청평 200x2, 삼랑진 300x2, 무주 300x2, 산청 350x2, 양양 250x4, 청송 300x2, 예천 400x2
+  KPX 2013 표 2-4 https://new.kpx.or.kr/boardDownload.es?bid=0045&list_no=51427&seq=16063
+- 충전(펌프) 출력: 찾지 못함 [미정] (config/ess.yaml 4,700MW 유지)
+- 지속시간 / 에너지 용량  [3] 5개소 적용, 2개소 [미정]
+  양양 1,000MW x 9시간 24분 = 9,400MWh  전기신문 2019-07-01 https://www.electimes.com/news/articleView.html?idxno=181795
+  예천   800MW x 약 8.4시간 = 6,720MWh  뉴스핌 2026-05-17 https://www.newspim.com/news/view/20260517000088
+  청송   600MW x 8시간 50분 = 5,300MWh  전기신문 2022-12-08 https://www.electimes.com/news/articleView.html?idxno=312596
+  무주   600MW x 7시간 20분 = 4,400MWh  전북일보 2024-02-27 https://www.jjan.kr/article/20240227580136
+  삼랑진 600MW x 6시간    = 3,600MWh  매일신문 2008-03-04 https://www.imaeil.com/page/view/2008030407423026426
+  합계 3,600MW, 29,420MWh (평균 약 8.2시간, 계산)
+  청평 400MW, 산청 700MW: 지속시간 찾지 못함 [미정]
+- 왕복효율 70~80%  [2] 적용 (config/ess.yaml 0.75 는 범위 안이라 유지)
+  KPX 2013 표 2-1. 참고 [3]: 무주 2023-10 실적 77.2% (전북일보 2024-02-27), 예천 약 84% (전자신문 2026-05-18 https://www.etnews.com/20260517000093)
+- 양수 외 ESS 는 넣지 않음
+  - 중앙계약시장 BESS: 급전 지시 대상 [2] (KPX 공고 제2025-06호 https://www.kpx.or.kr/boardDownload.es?bid=0042&list_no=76376&seq=1)
+    이지만 2025-07~2026-04 운전분은 제주 1차 68MW/272MWh 중 일부뿐 (한림 10MW 2025-12-12, 안덕 23MW 2026-03 상업운전) [3]
+    2025 1·2차(각 약 540MW, 6시간)는 준공 전
+  - 한전 주파수조정용 376MW, 계통안정화용 978MW/889MWh [3]: 주파수조정·발전제약 완화 용도 (이투데이 2024-09-26 https://www.etoday.co.kr/news/view/2404473)
+  - 재생에너지 연계 ESS: 충전 시간을 KPX 가 계절별로 정함, 방전은 사업자 임의 → 급전 지시 대상 아님 [2]·[3]
+    https://www.kpx.or.kr/board.es?mid=a11201000000&bid=0042&act=view&list_no=75939
+  - 수용가 피크저감 ESS 약 4GWh: 전기요금 특례할인으로 운영, 특례 2026-03 말 종료 [3] (전기신문 2026-03-26 https://www.electimes.com/news/articleView.html?idxno=366456)
+
+[ 미정 항목 확정 방법 ]
+- 최소 운전/정지시간, 최소출력, 램프율 실측: 한국남동발전 시간대별 화력 발전실적 API (data.go.kr 15130618)
+  활용신청 → 인증키 → 2025-07-01~2026-04-30 일자별 호출 → 호기별 연속 운전/정지 구간 분포 (최솟값, 하위 10%, 중앙값)
+  같은 방식: 한국남부발전 시간대별 발전량및송전량 (15125317)
+- 양수 청평·산청 지속시간, 충전 출력: 한국수력원자력 양수발전소 발전현황 조회 서비스 (15157729, 인증키)
+- 기동비: KPX 비용평가 세부운영규정 최신판 3.4 조항, 2007년 가격 보정 방법 결정
+
+[ generators (적용값, 배율 미적용, 급전 가능 발전원만) ]
+- 위 [ 가상 발전기 선정하기 ] 호기 중 수력·유연탄·원자력·LNG·국내탄 22기
+- co2_ton_per_mwh 는 위 [ 자료 조사 ] 값 그대로
+- u_init, init_state_h 는 위 [ 자료 조사 ] 규칙대로 0
+
+generators:
+  - id: hydro_chungju_1
+    fuel: hydro
+    fuel_cost_krw_per_mwh: 0
+    p_max_mw: 100
+    p_min_mw: 0
+    ramp_up_mw_per_h: 100
+    ramp_down_mw_per_h: 100
+    min_up_h: 1
+    min_down_h: 1
+    startup_cost_krw: 0
+    co2_ton_per_mwh: 0
+    u_init: 0
+    init_state_h: 0
+  - id: hydro_chungju_2
+    fuel: hydro
+    fuel_cost_krw_per_mwh: 0
+    p_max_mw: 100
+    p_min_mw: 0
+    ramp_up_mw_per_h: 100
+    ramp_down_mw_per_h: 100
+    min_up_h: 1
+    min_down_h: 1
+    startup_cost_krw: 0
+    co2_ton_per_mwh: 0
+    u_init: 0
+    init_state_h: 0
+  - id: hydro_chungju_3
+    fuel: hydro
+    fuel_cost_krw_per_mwh: 0
+    p_max_mw: 100
+    p_min_mw: 0
+    ramp_up_mw_per_h: 100
+    ramp_down_mw_per_h: 100
+    min_up_h: 1
+    min_down_h: 1
+    startup_cost_krw: 0
+    co2_ton_per_mwh: 0
+    u_init: 0
+    init_state_h: 0
+  - id: hydro_chungju_4
+    fuel: hydro
+    fuel_cost_krw_per_mwh: 0
+    p_max_mw: 100
+    p_min_mw: 0
+    ramp_up_mw_per_h: 100
+    ramp_down_mw_per_h: 100
+    min_up_h: 1
+    min_down_h: 1
+    startup_cost_krw: 0
+    co2_ton_per_mwh: 0
+    u_init: 0
+    init_state_h: 0
+  - id: hydro_soyanggang_1
+    fuel: hydro
+    fuel_cost_krw_per_mwh: 0
+    p_max_mw: 100
+    p_min_mw: 0
+    ramp_up_mw_per_h: 100
+    ramp_down_mw_per_h: 100
+    min_up_h: 1
+    min_down_h: 1
+    startup_cost_krw: 0
+    co2_ton_per_mwh: 0
+    u_init: 0
+    init_state_h: 0
+  - id: coal_taean_9
+    fuel: bituminous_coal
+    p_max_mw: 1050
+    p_min_mw: 630
+    ramp_up_mw_per_h: 1890
+    ramp_down_mw_per_h: 1890
+    min_up_h: 6
+    min_down_h: 6
+    startup_cost_krw: 24682652
+    co2_ton_per_mwh: 0.991
+    u_init: 0
+    init_state_h: 0
+  - id: coal_taean_10
+    fuel: bituminous_coal
+    p_max_mw: 1050
+    p_min_mw: 630
+    ramp_up_mw_per_h: 1890
+    ramp_down_mw_per_h: 1890
+    min_up_h: 6
+    min_down_h: 6
+    startup_cost_krw: 24682652
+    co2_ton_per_mwh: 0.991
+    u_init: 0
+    init_state_h: 0
+  - id: coal_samcheok_blue_1
+    fuel: bituminous_coal
+    p_max_mw: 1050
+    p_min_mw: 630
+    ramp_up_mw_per_h: 1890
+    ramp_down_mw_per_h: 1890
+    min_up_h: 6
+    min_down_h: 6
+    startup_cost_krw: 24682652
+    co2_ton_per_mwh: 0.991
+    u_init: 0
+    init_state_h: 0
+  - id: coal_samcheok_blue_2
+    fuel: bituminous_coal
+    p_max_mw: 1050
+    p_min_mw: 630
+    ramp_up_mw_per_h: 1890
+    ramp_down_mw_per_h: 1890
+    min_up_h: 6
+    min_down_h: 6
+    startup_cost_krw: 24682652
+    co2_ton_per_mwh: 0.991
+    u_init: 0
+    init_state_h: 0
+  - id: coal_goseong_hi_1
+    fuel: bituminous_coal
+    p_max_mw: 1040
+    p_min_mw: 624
+    ramp_up_mw_per_h: 1872
+    ramp_down_mw_per_h: 1872
+    min_up_h: 6
+    min_down_h: 6
+    startup_cost_krw: 24447579
+    co2_ton_per_mwh: 0.991
+    u_init: 0
+    init_state_h: 0
+  - id: nuclear_saeul_1
+    fuel: nuclear
+    p_max_mw: 1400
+    p_min_mw: 1120
+    ramp_up_mw_per_h: 42
+    ramp_down_mw_per_h: 42
+    min_up_h: 24
+    min_down_h: 24
+    startup_cost_krw: 0
+    co2_ton_per_mwh: 0.01
+    u_init: 0
+    init_state_h: 0
+  - id: nuclear_saeul_2
+    fuel: nuclear
+    p_max_mw: 1400
+    p_min_mw: 1120
+    ramp_up_mw_per_h: 42
+    ramp_down_mw_per_h: 42
+    min_up_h: 24
+    min_down_h: 24
+    startup_cost_krw: 0
+    co2_ton_per_mwh: 0.01
+    u_init: 0
+    init_state_h: 0
+  - id: nuclear_shinhanul_1
+    fuel: nuclear
+    p_max_mw: 1400
+    p_min_mw: 1120
+    ramp_up_mw_per_h: 42
+    ramp_down_mw_per_h: 42
+    min_up_h: 24
+    min_down_h: 24
+    startup_cost_krw: 0
+    co2_ton_per_mwh: 0.01
+    u_init: 0
+    init_state_h: 0
+  - id: nuclear_shinhanul_2
+    fuel: nuclear
+    p_max_mw: 1400
+    p_min_mw: 1120
+    ramp_up_mw_per_h: 42
+    ramp_down_mw_per_h: 42
+    min_up_h: 24
+    min_down_h: 24
+    startup_cost_krw: 0
+    co2_ton_per_mwh: 0.01
+    u_init: 0
+    init_state_h: 0
+  - id: nuclear_saeul_3
+    fuel: nuclear
+    p_max_mw: 1400
+    p_min_mw: 1120
+    ramp_up_mw_per_h: 42
+    ramp_down_mw_per_h: 42
+    min_up_h: 24
+    min_down_h: 24
+    startup_cost_krw: 0
+    co2_ton_per_mwh: 0.01
+    u_init: 0
+    init_state_h: 0
+  - id: lng_ulsan_gps
+    fuel: lng
+    p_max_mw: 1227
+    p_min_mw: 589
+    ramp_up_mw_per_h: 3681
+    ramp_down_mw_per_h: 3681
+    min_up_h: 2
+    min_down_h: 2
+    startup_cost_krw: 12173827
+    co2_ton_per_mwh: 0.549
+    u_init: 0
+    init_state_h: 0
+  - id: lng_tongyeong_eco
+    fuel: lng
+    p_max_mw: 1012
+    p_min_mw: 485.8
+    ramp_up_mw_per_h: 3036
+    ramp_down_mw_per_h: 3036
+    min_up_h: 2
+    min_down_h: 2
+    startup_cost_krw: 10040679
+    co2_ton_per_mwh: 0.549
+    u_init: 0
+    init_state_h: 0
+  - id: lng_yeoju
+    fuel: lng
+    p_max_mw: 1000
+    p_min_mw: 480
+    ramp_up_mw_per_h: 3000
+    ramp_down_mw_per_h: 3000
+    min_up_h: 2
+    min_down_h: 2
+    startup_cost_krw: 9921619
+    co2_ton_per_mwh: 0.549
+    u_init: 0
+    init_state_h: 0
+  - id: lng_sinpyeongtaek
+    fuel: lng
+    p_max_mw: 940
+    p_min_mw: 451.2
+    ramp_up_mw_per_h: 2820
+    ramp_down_mw_per_h: 2820
+    min_up_h: 2
+    min_down_h: 2
+    startup_cost_krw: 9326322
+    co2_ton_per_mwh: 0.549
+    u_init: 0
+    init_state_h: 0
+  - id: lng_paju_munsan_1
+    fuel: lng
+    p_max_mw: 900
+    p_min_mw: 432
+    ramp_up_mw_per_h: 2700
+    ramp_down_mw_per_h: 2700
+    min_up_h: 2
+    min_down_h: 2
+    startup_cost_krw: 8929457
+    co2_ton_per_mwh: 0.549
+    u_init: 0
+    init_state_h: 0
+  - id: anthracite_donghae_1
+    fuel: anthracite
+    p_max_mw: 200
+    p_min_mw: 80
+    ramp_up_mw_per_h: 120
+    ramp_down_mw_per_h: 120
+    min_up_h: 6
+    min_down_h: 6
+    startup_cost_krw: 5000000
+    co2_ton_per_mwh: 0.991
+    u_init: 0
+    init_state_h: 0
+  - id: anthracite_donghae_2
+    fuel: anthracite
+    p_max_mw: 200
+    p_min_mw: 80
+    ramp_up_mw_per_h: 120
+    ramp_down_mw_per_h: 120
+    min_up_h: 6
+    min_down_h: 6
+    startup_cost_krw: 5000000
+    co2_ton_per_mwh: 0.991
+    u_init: 0
+    init_state_h: 0
+
+
+[ 무부하 비중 no_load_frac (2026-10-29) ]
+- 시간당 비용 = k x 연료비 단가 x p_max x u + (1 - k) x 연료비 단가 x p
+  - 연료비 단가는 data/csv/fuel_cost.csv 월별 값 그대로 (동적). k 는 열소비율 곡선 모양에서 나오는 기술 계수 (정적)
+  - 정격 출력에서는 기존과 같은 비용, 부분 부하에서는 무부하분만큼 비용이 커짐
+- 유연탄·국내탄 k = 0.033, LNG k = 0.058  [미정] [4]
+  KPG 193 TABLE IV (arXiv 2411.14756v2) https://arxiv.org/abs/2411.14756v2
+  k = Cg(0) / (Cg(0) + Cg(1) x P + Cg(2) x P^2), 각 계수 범위의 중간값, P = 위 호기 용량 (유연탄 1,050MW, LNG 1,000MW) (계산)
+  범위: 유연탄 1.9~4.8%, LNG 0.8~14.3% (Cg(0) 최소·Cg(1),Cg(2) 최대 조합 ~ 반대 조합)
+  - 주의: KPG 193 은 한국 실측이 아님. Cg(2) 2차항은 모델이 1차식이라 k 계산에만 쓰고 비용식에는 넣지 않음
+- 원자력 k = 0: KPG 193 Cg(0) = 0 [4]. 수력 k = 0: 연료비 0 이라 해당 없음
+- 국내 값: 비용평가에서 발전기별 열소비율 곡선으로 무부하비·증분비를 산정하지만 값은 비공개 (찾지 못함)
+
+[ config 반영 (2026-10-29) ]
+- config/generators.yaml: 위 [ generators (적용값 ...) ] 22기에 발전원별 배율 적용 + no_load_frac
+  배율 = 위 [ 배율 설정 ] EPSIS 2026/08 설비용량 / 22기 발전원별 합
+    원자력 26,050.0 / 7,000 = 3.721, 유연탄 40,366.7 / 5,240 = 7.704, LNG 46,788.3 / 5,079 = 9.212, 국내탄 400 / 400 = 1.000, 수력 1,815.7 / 500 = 3.631
+  p_max, p_min, ramp, startup_cost 에 같은 배율을 곱함 (min_up/min_down, co2 는 그대로)
+  u_init / init_state_h: 원자력·수력 전부, 유연탄 4/5기, LNG 2/5기 가동, 국내탄 정지. 가동 유닛은 init_state_h = min_up_h, 정지 유닛은 min_down_h
+    (조사 값이 아닌 초기 조건. 위 [ 자료 조사 ] 규칙대로 계획 수립 때 따로 정할 것)
+- config/ess.yaml: capacity_mwh 29,420 (위 [ ESS (양수) ] 5개소 합)
