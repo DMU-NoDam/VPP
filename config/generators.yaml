@@ -76,6 +76,7 @@ generators:
   co2_ton_per_mwh: 0.991
   u_init: 1
   init_state_h: 6
+  no_load_frac: 0.033
 - id: coal_taean_10
   fuel: bituminous_coal
   p_max_mw: 8088.7
@@ -88,6 +89,7 @@ generators:
   co2_ton_per_mwh: 0.991
   u_init: 1
   init_state_h: 6
+  no_load_frac: 0.033
 - id: coal_samcheok_blue_1
   fuel: bituminous_coal
   p_max_mw: 8088.7
@@ -100,6 +102,7 @@ generators:
   co2_ton_per_mwh: 0.991
   u_init: 1
   init_state_h: 6
+  no_load_frac: 0.033
 - id: coal_samcheok_blue_2
   fuel: bituminous_coal
   p_max_mw: 8088.7
@@ -112,6 +115,7 @@ generators:
   co2_ton_per_mwh: 0.991
   u_init: 1
   init_state_h: 6
+  no_load_frac: 0.033
 - id: coal_goseong_hi_1
   fuel: bituminous_coal
   p_max_mw: 8011.7
@@ -124,6 +128,7 @@ generators:
   co2_ton_per_mwh: 0.991
   u_init: 0
   init_state_h: 6
+  no_load_frac: 0.033
 - id: nuclear_saeul_1
   fuel: nuclear
   p_max_mw: 5210
@@ -196,6 +201,7 @@ generators:
   co2_ton_per_mwh: 0.549
   u_init: 1
   init_state_h: 2
+  no_load_frac: 0.058
 - id: lng_tongyeong_eco
   fuel: lng
   p_max_mw: 9322.7
@@ -208,6 +214,7 @@ generators:
   co2_ton_per_mwh: 0.549
   u_init: 1
   init_state_h: 2
+  no_load_frac: 0.058
 - id: lng_yeoju
   fuel: lng
   p_max_mw: 9212.1
@@ -220,6 +227,7 @@ generators:
   co2_ton_per_mwh: 0.549
   u_init: 0
   init_state_h: 2
+  no_load_frac: 0.058
 - id: lng_sinpyeongtaek
   fuel: lng
   p_max_mw: 8659.4
@@ -232,6 +240,7 @@ generators:
   co2_ton_per_mwh: 0.549
   u_init: 0
   init_state_h: 2
+  no_load_frac: 0.058
 - id: lng_paju_munsan_1
   fuel: lng
   p_max_mw: 8290.9
@@ -244,6 +253,7 @@ generators:
   co2_ton_per_mwh: 0.549
   u_init: 0
   init_state_h: 2
+  no_load_frac: 0.058
 - id: anthracite_donghae_1
   fuel: anthracite
   p_max_mw: 200
@@ -256,6 +266,7 @@ generators:
   co2_ton_per_mwh: 0.991
   u_init: 0
   init_state_h: 6
+  no_load_frac: 0.033
 - id: anthracite_donghae_2
   fuel: anthracite
   p_max_mw: 200
@@ -268,3 +279,4 @@ generators:
   co2_ton_per_mwh: 0.991
   u_init: 0
   init_state_h: 6
+  no_load_frac: 0.033

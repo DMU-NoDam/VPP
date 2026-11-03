@@ -111,7 +111,12 @@ def _parse_generator(entry: Any, index: int, path: str | Path) -> GeneratorSpec:
             if "fuel_cost_krw_per_mwh" in entry
             else None
         ),
+        no_load_frac=(
+            _number(entry, "no_load_frac", where) if "no_load_frac" in entry else 0.0
+        ),
     )
+    if not 0.0 <= spec.no_load_frac < 1.0:
+        raise ConfigError(f"{where}: no_load_frac({spec.no_load_frac}) 는 0 이상 1 미만이어야 한다")
     _check_generator_invariants(spec, where)
     return spec
 
@@ -278,6 +283,7 @@ def resolve_fuel_costs(
                 if s.fuel_cost_krw_per_mwh is not None
                 else cost_krw_per_mwh[s.fuel]
             ),
+            no_load_frac=s.no_load_frac,
         )
         for s in specs
     ]
