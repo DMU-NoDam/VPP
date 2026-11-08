@@ -22,7 +22,7 @@ def client() -> TestClient:
 
 
 # 수요를 직접 주는 요청. 수집 데이터에 의존하지 않아 빠르고 결정적이다.
-FLAT_DEMAND = [60000.0] * 24
+FLAT_DEMAND = [65000.0] * 24  # 수집 데이터 1시간 평균 수요 65,152 MW 기준
 
 
 def test_health(client):
@@ -69,7 +69,7 @@ def test_all_constraints_pass_on_normal_case(client):
 
 
 def test_units_are_returned_when_requested(client):
-    body = {"horizon_h": 3, "net_demand_mw": [60000.0] * 3, "include_units": True}
+    body = {"horizon_h": 3, "net_demand_mw": [65000.0] * 3, "include_units": True}
     payload = MilpResponse.model_validate(
         client.post("/api/v1/dispatch/milp", json=body).json()
     )
@@ -126,7 +126,7 @@ def test_unknown_unit_id_is_rejected(client):
 
 
 def test_demand_length_mismatch_is_422(client):
-    body = {"horizon_h": 24, "net_demand_mw": [60000.0, 60000.0]}
+    body = {"horizon_h": 24, "net_demand_mw": [65000.0, 65000.0]}
     response = client.post("/api/v1/dispatch/milp", json=body)
 
     assert response.status_code == 422
@@ -166,7 +166,7 @@ def test_load_shedding_option_quantifies_shortage(client):
 
 def test_reserve_ratio_override(client):
     """요청으로 예비율을 바꿀 수 있다 (위기 시나리오 판정에 쓴다)."""
-    body = {"horizon_h": 1, "net_demand_mw": [60000.0], "reserve_ratio": 0.3,
+    body = {"horizon_h": 1, "net_demand_mw": [65000.0], "reserve_ratio": 0.3,
             "include_units": False, "include_baseline": False}
     payload = MilpResponse.model_validate(
         client.post("/api/v1/dispatch/milp", json=body).json()
@@ -178,7 +178,7 @@ def test_reserve_ratio_override(client):
 
 def test_hydro_limit_shows_in_response(client):
     """저수율을 낮게 주면 hydro_factor 와 notes 에 드러난다."""
-    body = {"horizon_h": 1, "net_demand_mw": [60000.0], "storage_rate_pct": 15.0,
+    body = {"horizon_h": 1, "net_demand_mw": [65000.0], "storage_rate_pct": 15.0,
             "include_units": False, "include_baseline": False}
     payload = MilpResponse.model_validate(
         client.post("/api/v1/dispatch/milp", json=body).json()
@@ -256,7 +256,7 @@ def test_ess_can_be_disabled(client):
 
 def test_peak_shaving_mode_meets_target(client):
     """peak_shaving 모드는 피크 감소율 5% 를 하드 제약으로 보장한다."""
-    demand = [60000.0] * 12 + [78000.0, 82000.0, 84000.0, 83000.0] + [65000.0] * 8
+    demand = [65000.0] * 12 + [78000.0, 82000.0, 84000.0, 83000.0] + [65000.0] * 8
     body = {"net_demand_mw": demand, "include_units": False, "include_baseline": False,
             "ess_mode": "peak_shaving", "ess_peak_target_pct": 5.0}
     payload = MilpResponse.model_validate(
@@ -274,7 +274,7 @@ def test_peak_shaving_mode_meets_target(client):
 
 def test_impossible_peak_target_is_infeasible(client):
     """달성 불가한 목표는 infeasible 로 드러나고 제약 검증은 생략된다."""
-    demand = [60000.0] * 23 + [90000.0]
+    demand = [65000.0] * 23 + [90000.0]
     body = {"net_demand_mw": demand, "include_units": False, "include_baseline": False,
             "ess_mode": "peak_shaving", "ess_peak_target_pct": 30.0}
     payload = MilpResponse.model_validate(
@@ -287,7 +287,7 @@ def test_impossible_peak_target_is_infeasible(client):
 
 def test_ess_energy_balance_in_response(client):
     """응답의 충전·방전·손실이 왕복효율과 일치한다."""
-    demand = [60000.0] * 12 + [80000.0] * 4 + [65000.0] * 8
+    demand = [65000.0] * 12 + [80000.0] * 4 + [65000.0] * 8
     body = {"net_demand_mw": demand, "include_units": False, "include_baseline": False,
             "ess_mode": "peak_shaving"}
     payload = MilpResponse.model_validate(
