@@ -347,7 +347,7 @@ generators:
   # ---- 수력 (충주 4기, 소양강 2기 모두 100MW 동률, 5개만 적음) ----
   # 찾은 곳: K-water 한강유역본부 시설현황 https://www.kwater.or.kr/busi/sub02/facilitiespresentPage.do?s_mid=1511
   #          충주댐 41만2천kW (10만kW급 4기), 소양강댐 20만kW (10만kW x 2대)
-  - id: hydro_chungju_1  # 충주 1호기
+  - id: hydro_1  # 충주 1호기
     fuel: hydro
     p_max_mw: 100
     p_min_mw: 60  // 추정
@@ -359,7 +359,7 @@ generators:
     co2_ton_per_mwh: 0
     u_init: 0
     init_state_h: 0
-  - id: hydro_chungju_2  # 충주 2호기
+  - id: hydro_2  # 충주 2호기
     fuel: hydro
     p_max_mw: 100
     p_min_mw: 60  // 추정
@@ -371,7 +371,7 @@ generators:
     co2_ton_per_mwh: 0
     u_init: 0
     init_state_h: 0
-  - id: hydro_chungju_3  # 충주 3호기
+  - id: hydro_3  # 충주 3호기
     fuel: hydro
     p_max_mw: 100
     p_min_mw: 60  // 추정
@@ -383,7 +383,7 @@ generators:
     co2_ton_per_mwh: 0
     u_init: 0
     init_state_h: 0
-  - id: hydro_chungju_4  # 충주 4호기
+  - id: hydro_4  # 충주 4호기
     fuel: hydro
     p_max_mw: 100
     p_min_mw: 60  // 추정
@@ -395,7 +395,7 @@ generators:
     co2_ton_per_mwh: 0
     u_init: 0
     init_state_h: 0
-  - id: hydro_soyanggang_1  # 소양강 1호기 (2호기 동률)
+  - id: hydro_5  # 소양강 1호기 (2호기 동률)
     fuel: hydro
     p_max_mw: 100
     p_min_mw: 60  // 추정
@@ -413,7 +413,7 @@ generators:
   # ---- 유연탄 (고성하이 1·2, 강릉안인 1·2 가 1,040MW 로 5위 동률) ----
   # 찾은 곳: 한국서부발전 발전설비 현황 https://www.iwest.co.kr/iwest/555/subview.do (태안 9·10 1,050MW x 2)
   #          https://www.sedaily.com/article/14010031 (삼척블루파워 1호기 1,050MW 2024-05, 2호기 1,050MW 2025-01-01 상업운전, 초초임계압)
-  - id: coal_taean_9  # 태안 9호기
+  - id: coal_1  # 태안 9호기
     fuel: bituminous_coal
     p_max_mw: 1050
     p_min_mw: 630  // 추정
@@ -425,7 +425,7 @@ generators:
     co2_ton_per_mwh: 0.991
     u_init: 0
     init_state_h: 0
-  - id: coal_taean_10  # 태안 10호기
+  - id: coal_2  # 태안 10호기
     fuel: bituminous_coal
     p_max_mw: 1050
     p_min_mw: 630  // 추정
@@ -437,7 +437,7 @@ generators:
     co2_ton_per_mwh: 0.991
     u_init: 0
     init_state_h: 0
-  - id: coal_samcheok_blue_1  # 삼척블루파워 1호기
+  - id: coal_3  # 삼척블루파워 1호기
     fuel: bituminous_coal
     p_max_mw: 1050
     p_min_mw: 630  // 추정
@@ -449,7 +449,7 @@ generators:
     co2_ton_per_mwh: 0.991
     u_init: 0
     init_state_h: 0
-  - id: coal_samcheok_blue_2  # 삼척블루파워 2호기
+  - id: coal_4  # 삼척블루파워 2호기
     fuel: bituminous_coal
     p_max_mw: 1050
     p_min_mw: 630  // 추정
@@ -461,7 +461,7 @@ generators:
     co2_ton_per_mwh: 0.991
     u_init: 0
     init_state_h: 0
-  - id: coal_goseong_hi_1  # 고성하이 1호기 (총 2,080MW 를 2기로 나눈 값)
+  - id: coal_5  # 고성하이 1호기 (총 2,080MW 를 2기로 나눈 값)
     fuel: bituminous_coal
     p_max_mw: 1040
     p_min_mw: 624  // 추정
@@ -479,7 +479,7 @@ generators:
   # 능력치: 탄력운전 최대 출력 변동률 30%/h = 420 MW/h (한국원자력학회 2026 춘계 워크숍 「APR1400 탄력운전」, 검색 결과 문구만 확인)
   #         https://www.kns.org/boards/download/33888
   # startup_cost 0 = 규정상 기동비용 미적용
-  - id: nuclear_saeul_1  # 새울 1호기 (구 신고리 3호기)
+  - id: nuclear_1  # 새울 1호기 (구 신고리 3호기)
     fuel: nuclear
     p_max_mw: 1400
     p_min_mw: 1120
@@ -491,7 +491,7 @@ generators:
     co2_ton_per_mwh: 0.01
     u_init: 0
     init_state_h: 0
-  - id: nuclear_saeul_2  # 새울 2호기 (구 신고리 4호기)
+  - id: nuclear_2  # 새울 2호기 (구 신고리 4호기)
     fuel: nuclear
     p_max_mw: 1400
     p_min_mw: 1120
@@ -503,7 +503,7 @@ generators:
     co2_ton_per_mwh: 0.01
     u_init: 0
     init_state_h: 0
-  - id: nuclear_shinhanul_1  # 신한울 1호기
+  - id: nuclear_3  # 신한울 1호기
     fuel: nuclear
     p_max_mw: 1400
     p_min_mw: 1120
@@ -515,7 +515,7 @@ generators:
     co2_ton_per_mwh: 0.01
     u_init: 0
     init_state_h: 0
-  - id: nuclear_shinhanul_2  # 신한울 2호기
+  - id: nuclear_4  # 신한울 2호기
     fuel: nuclear
     p_max_mw: 1400
     p_min_mw: 1120
@@ -527,7 +527,7 @@ generators:
     co2_ton_per_mwh: 0.01
     u_init: 0
     init_state_h: 0
-  - id: nuclear_saeul_3  # 새울 3호기 (상업운전 여부 미확인)
+  - id: nuclear_5  # 새울 3호기 (상업운전 여부 미확인)
     fuel: nuclear
     p_max_mw: 1400
     p_min_mw: 1120
@@ -609,7 +609,7 @@ generators:
   #          https://www.smarttoday.co.kr/ko-kr/articles/63125 (통영에코파워 1,012MW, GT 2기 + ST 1기, 2024-10-29 상업운전)
   #          https://www.skens.com/yeoju/content/view.do?cate=energy (여주 1,000MW = GT 2대 670MW + ST 1대 330MW, 2023-07-05 상업운전)
   #          https://www.inews24.com/view/1026321 (신평택 940MW)
-  - id: lng_ulsan_gps  # 울산GPS, LNG·LPG 겸용 (용량 미확인)
+  - id: lng_1  # 울산GPS, LNG·LPG 겸용 (용량 미확인)
     fuel: lng
     p_max_mw: 1227
     p_min_mw: 589  // 추정
@@ -621,7 +621,7 @@ generators:
     co2_ton_per_mwh: 0.549
     u_init: 0
     init_state_h: 0
-  - id: lng_tongyeong_eco  # 통영에코파워
+  - id: lng_2  # 통영에코파워
     fuel: lng
     p_max_mw: 1012
     p_min_mw: 485.8  // 추정
@@ -633,7 +633,7 @@ generators:
     co2_ton_per_mwh: 0.549
     u_init: 0
     init_state_h: 0
-  - id: lng_yeoju  # 여주천연가스 (앞서 적은 1,004MW 는 미확인 값, 사업자 사이트는 1,000MW)
+  - id: lng_3  # 여주천연가스 (앞서 적은 1,004MW 는 미확인 값, 사업자 사이트는 1,000MW)
     fuel: lng
     p_max_mw: 1000
     p_min_mw: 480  // 추정
@@ -645,7 +645,7 @@ generators:
     co2_ton_per_mwh: 0.549
     u_init: 0
     init_state_h: 0
-  - id: lng_sinpyeongtaek  # 신평택
+  - id: lng_4  # 신평택
     fuel: lng
     p_max_mw: 940
     p_min_mw: 451.2  // 추정
@@ -657,7 +657,7 @@ generators:
     co2_ton_per_mwh: 0.549
     u_init: 0
     init_state_h: 0
-  - id: lng_paju_munsan_1  # 파주문산 1호기 (약 900MW, 미확인)
+  - id: lng_5  # 파주문산 1호기 (약 900MW, 미확인)
     fuel: lng
     p_max_mw: 900
     p_min_mw: 432  // 추정
@@ -672,7 +672,7 @@ generators:
   # ---- 국내탄 (2기뿐) ----
   # 찾은 곳: EPSIS 무연탄 설비용량 400MW 와 일치. 호기별 200MW 는 미확인
   #          https://www.koreascience.or.kr/article/CFKO200735738816309.pdf (동해화력 순환유동층 보일러, 150~200MW 범위로만 언급)
-  - id: anthracite_donghae_1  # 동해 1호기 (미확인, co2 는 석탄 공통 값)
+  - id: anthracite_1  # 동해 1호기 (미확인, co2 는 석탄 공통 값)
     fuel: anthracite
     p_max_mw: 200
     p_min_mw: 120  // 추정
@@ -684,7 +684,7 @@ generators:
     co2_ton_per_mwh: 0.991
     u_init: 0
     init_state_h: 0
-  - id: anthracite_donghae_2  # 동해 2호기 (미확인, co2 는 석탄 공통 값)
+  - id: anthracite_2  # 동해 2호기 (미확인, co2 는 석탄 공통 값)
     fuel: anthracite
     p_max_mw: 200
     p_min_mw: 120  // 추정
@@ -1072,7 +1072,7 @@ generators:
 - u_init, init_state_h 는 위 [ 자료 조사 ] 규칙대로 0
 
 generators:
-  - id: hydro_chungju_1
+  - id: hydro_1  # 충주 1호기
     fuel: hydro
     fuel_cost_krw_per_mwh: 0
     p_max_mw: 100
@@ -1085,7 +1085,7 @@ generators:
     co2_ton_per_mwh: 0
     u_init: 0
     init_state_h: 0
-  - id: hydro_chungju_2
+  - id: hydro_2  # 충주 2호기
     fuel: hydro
     fuel_cost_krw_per_mwh: 0
     p_max_mw: 100
@@ -1098,7 +1098,7 @@ generators:
     co2_ton_per_mwh: 0
     u_init: 0
     init_state_h: 0
-  - id: hydro_chungju_3
+  - id: hydro_3  # 충주 3호기
     fuel: hydro
     fuel_cost_krw_per_mwh: 0
     p_max_mw: 100
@@ -1111,7 +1111,7 @@ generators:
     co2_ton_per_mwh: 0
     u_init: 0
     init_state_h: 0
-  - id: hydro_chungju_4
+  - id: hydro_4  # 충주 4호기
     fuel: hydro
     fuel_cost_krw_per_mwh: 0
     p_max_mw: 100
@@ -1124,7 +1124,7 @@ generators:
     co2_ton_per_mwh: 0
     u_init: 0
     init_state_h: 0
-  - id: hydro_soyanggang_1
+  - id: hydro_5  # 소양강 1호기
     fuel: hydro
     fuel_cost_krw_per_mwh: 0
     p_max_mw: 100
@@ -1137,7 +1137,7 @@ generators:
     co2_ton_per_mwh: 0
     u_init: 0
     init_state_h: 0
-  - id: coal_taean_9
+  - id: coal_1  # 태안 9호기
     fuel: bituminous_coal
     p_max_mw: 1050
     p_min_mw: 630
@@ -1149,7 +1149,7 @@ generators:
     co2_ton_per_mwh: 0.991
     u_init: 0
     init_state_h: 0
-  - id: coal_taean_10
+  - id: coal_2  # 태안 10호기
     fuel: bituminous_coal
     p_max_mw: 1050
     p_min_mw: 630
@@ -1161,7 +1161,7 @@ generators:
     co2_ton_per_mwh: 0.991
     u_init: 0
     init_state_h: 0
-  - id: coal_samcheok_blue_1
+  - id: coal_3  # 삼척블루파워 1호기
     fuel: bituminous_coal
     p_max_mw: 1050
     p_min_mw: 630
@@ -1173,7 +1173,7 @@ generators:
     co2_ton_per_mwh: 0.991
     u_init: 0
     init_state_h: 0
-  - id: coal_samcheok_blue_2
+  - id: coal_4  # 삼척블루파워 2호기
     fuel: bituminous_coal
     p_max_mw: 1050
     p_min_mw: 630
@@ -1185,7 +1185,7 @@ generators:
     co2_ton_per_mwh: 0.991
     u_init: 0
     init_state_h: 0
-  - id: coal_goseong_hi_1
+  - id: coal_5  # 고성하이 1호기
     fuel: bituminous_coal
     p_max_mw: 1040
     p_min_mw: 624
@@ -1197,7 +1197,7 @@ generators:
     co2_ton_per_mwh: 0.991
     u_init: 0
     init_state_h: 0
-  - id: nuclear_saeul_1
+  - id: nuclear_1  # 새울 1호기
     fuel: nuclear
     p_max_mw: 1400
     p_min_mw: 1120
@@ -1209,7 +1209,7 @@ generators:
     co2_ton_per_mwh: 0.01
     u_init: 0
     init_state_h: 0
-  - id: nuclear_saeul_2
+  - id: nuclear_2  # 새울 2호기
     fuel: nuclear
     p_max_mw: 1400
     p_min_mw: 1120
@@ -1221,7 +1221,7 @@ generators:
     co2_ton_per_mwh: 0.01
     u_init: 0
     init_state_h: 0
-  - id: nuclear_shinhanul_1
+  - id: nuclear_3  # 신한울 1호기
     fuel: nuclear
     p_max_mw: 1400
     p_min_mw: 1120
@@ -1233,7 +1233,7 @@ generators:
     co2_ton_per_mwh: 0.01
     u_init: 0
     init_state_h: 0
-  - id: nuclear_shinhanul_2
+  - id: nuclear_4  # 신한울 2호기
     fuel: nuclear
     p_max_mw: 1400
     p_min_mw: 1120
@@ -1245,7 +1245,7 @@ generators:
     co2_ton_per_mwh: 0.01
     u_init: 0
     init_state_h: 0
-  - id: nuclear_saeul_3
+  - id: nuclear_5  # 새울 3호기
     fuel: nuclear
     p_max_mw: 1400
     p_min_mw: 1120
@@ -1257,7 +1257,7 @@ generators:
     co2_ton_per_mwh: 0.01
     u_init: 0
     init_state_h: 0
-  - id: lng_ulsan_gps
+  - id: lng_1  # 울산GPS
     fuel: lng
     p_max_mw: 1227
     p_min_mw: 589
@@ -1269,7 +1269,7 @@ generators:
     co2_ton_per_mwh: 0.549
     u_init: 0
     init_state_h: 0
-  - id: lng_tongyeong_eco
+  - id: lng_2  # 통영에코파워
     fuel: lng
     p_max_mw: 1012
     p_min_mw: 485.8
@@ -1281,7 +1281,7 @@ generators:
     co2_ton_per_mwh: 0.549
     u_init: 0
     init_state_h: 0
-  - id: lng_yeoju
+  - id: lng_3  # 여주천연가스
     fuel: lng
     p_max_mw: 1000
     p_min_mw: 480
@@ -1293,7 +1293,7 @@ generators:
     co2_ton_per_mwh: 0.549
     u_init: 0
     init_state_h: 0
-  - id: lng_sinpyeongtaek
+  - id: lng_4  # 신평택
     fuel: lng
     p_max_mw: 940
     p_min_mw: 451.2
@@ -1305,7 +1305,7 @@ generators:
     co2_ton_per_mwh: 0.549
     u_init: 0
     init_state_h: 0
-  - id: lng_paju_munsan_1
+  - id: lng_5  # 파주문산 1호기
     fuel: lng
     p_max_mw: 900
     p_min_mw: 432
@@ -1317,7 +1317,7 @@ generators:
     co2_ton_per_mwh: 0.549
     u_init: 0
     init_state_h: 0
-  - id: anthracite_donghae_1
+  - id: anthracite_1  # 동해 1호기
     fuel: anthracite
     p_max_mw: 200
     p_min_mw: 80
@@ -1329,7 +1329,7 @@ generators:
     co2_ton_per_mwh: 0.991
     u_init: 0
     init_state_h: 0
-  - id: anthracite_donghae_2
+  - id: anthracite_2  # 동해 2호기
     fuel: anthracite
     p_max_mw: 200
     p_min_mw: 80
@@ -1342,3 +1342,24 @@ generators:
     u_init: 0
     init_state_h: 0
 
+
+[ 무부하 비중 no_load_frac (2026-10-29) ]
+- 시간당 비용 = k x 연료비 단가 x p_max x u + (1 - k) x 연료비 단가 x p
+  - 연료비 단가는 data/csv/fuel_cost.csv 월별 값 그대로 (동적). k 는 열소비율 곡선 모양에서 나오는 기술 계수 (정적)
+  - 정격 출력에서는 기존과 같은 비용, 부분 부하에서는 무부하분만큼 비용이 커짐
+- 유연탄·국내탄 k = 0.033, LNG k = 0.058  [미정] [4]
+  KPG 193 TABLE IV (arXiv 2411.14756v2) https://arxiv.org/abs/2411.14756v2
+  k = Cg(0) / (Cg(0) + Cg(1) x P + Cg(2) x P^2), 각 계수 범위의 중간값, P = 위 호기 용량 (유연탄 1,050MW, LNG 1,000MW) (계산)
+  범위: 유연탄 1.9~4.8%, LNG 0.8~14.3% (Cg(0) 최소·Cg(1),Cg(2) 최대 조합 ~ 반대 조합)
+  - 주의: KPG 193 은 한국 실측이 아님. Cg(2) 2차항은 모델이 1차식이라 k 계산에만 쓰고 비용식에는 넣지 않음
+- 원자력 k = 0: KPG 193 Cg(0) = 0 [4]. 수력 k = 0: 연료비 0 이라 해당 없음
+- 국내 값: 비용평가에서 발전기별 열소비율 곡선으로 무부하비·증분비를 산정하지만 값은 비공개 (찾지 못함)
+
+[ config 반영 (2026-10-29) ]
+- config/generators.yaml: 위 [ generators (적용값 ...) ] 22기에 발전원별 배율 적용 + no_load_frac
+  배율 = 위 [ 배율 설정 ] EPSIS 2026/08 설비용량 / 22기 발전원별 합
+    원자력 26,050.0 / 7,000 = 3.721, 유연탄 40,366.7 / 5,240 = 7.704, LNG 46,788.3 / 5,079 = 9.212, 국내탄 400 / 400 = 1.000, 수력 1,815.7 / 500 = 3.631
+  p_max, p_min, ramp, startup_cost 에 같은 배율을 곱함 (min_up/min_down, co2 는 그대로)
+  u_init / init_state_h: 원자력·수력 전부, 유연탄 4/5기, LNG 2/5기 가동, 국내탄 정지. 가동 유닛은 init_state_h = min_up_h, 정지 유닛은 min_down_h
+    (조사 값이 아닌 초기 조건. 위 [ 자료 조사 ] 규칙대로 계획 수립 때 따로 정할 것)
+- config/ess.yaml: capacity_mwh 29,420 (위 [ ESS (양수) ] 5개소 합)
