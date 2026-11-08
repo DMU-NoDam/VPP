@@ -1,4 +1,4 @@
-"""power_demand ← KPX 전력수급현황 화면 (sukub.do) 의 현재수요.
+"""power_demand ← KPX 전력수급현황 화면 (sukub.do) 의 현재수요·공급능력.
 
 공식 API 가 아니라 HTML 화면이다. 표의 <tr> 하나가 한 시각이고 <td> 가 8칸이다.
 주의할 점 세 가지.
@@ -20,8 +20,10 @@ ROWS_PER_PAGE = 17
 MAX_PAGES = 20  # 하루 17페이지
 STEP_MINUTES = 5
 API_TS_FORMAT = "%Y%m%d%H%M%S"
-I_TS, I_DEMAND = 0, 2  # 기준일시, 현재수요(MW)
+I_TS = 0  # 기준일시
 CELLS_PER_ROW = 8
+# 칸 번호 -> 컬럼. 화면 8칸 중 공급능력(1)·현재수요(2)만 쓴다
+COLUMN_BY_CELL = {1: "supply_mw", 2: "demand_mw"}
 
 _TR = re.compile(r"<tr[^>]*>(.*?)</tr>", re.S | re.I)
 _TD = re.compile(r"<td[^>]*>(.*?)</td>", re.S | re.I)
@@ -31,15 +33,15 @@ def fetch(start: datetime, end: datetime) -> list[dict]:
     rows: list[dict] = []
     for day in common.days(start, end):
         first_page = _page_of(start) if day == start.date() else 1
-        for ts, demand in _fetch_day(day, first_page, start, end):
+        for ts, values in _fetch_day(day, first_page, start, end):
             if start <= ts <= end:
-                rows.append({"ts": common.fmt_ts(ts), "demand_mw": demand})
+                rows.append({"ts": common.fmt_ts(ts), **values})
     return rows
 
 
 def _fetch_day(day: date, first_page: int, start: datetime,
-               end: datetime) -> list[tuple[datetime, float | None]]:
-    picked: list[tuple[datetime, float | None]] = []
+               end: datetime) -> list[tuple[datetime, dict]]:
+    picked: list[tuple[datetime, dict]] = []
 
     # 원본에 빠진 시각이 있으면 행이 앞으로 당겨져서 계산한 페이지가 start 를 지나쳐 있다.
     # 그 페이지의 첫 시각이 start 보다 뒤면 한 페이지씩 물러난다.
@@ -61,7 +63,7 @@ def _fetch_day(day: date, first_page: int, start: datetime,
     return picked
 
 
-def _fetch_page(day: date, page: int) -> list[tuple[datetime, float | None]]:
+def _fetch_page(day: date, page: int) -> list[tuple[datetime, dict]]:
     text = common.get_text(URL, {
         "startDate": day.isoformat(),
         "endDate": day.isoformat(),
@@ -76,7 +78,7 @@ def _page_of(ts: datetime) -> int:
     return index // ROWS_PER_PAGE + 1
 
 
-def _parse(text: str) -> list[tuple[datetime, float | None]]:
+def _parse(text: str) -> list[tuple[datetime, dict]]:
     rows = []
     for tr in _TR.findall(text):
         cells = [c.replace("&nbsp;", "").strip() for c in _TD.findall(tr)]
@@ -88,5 +90,6 @@ def _parse(text: str) -> list[tuple[datetime, float | None]]:
         except ValueError:
             continue  # 첫 칸이 14자리 시각이 아니면 데이터 행이 아니다
 
-        rows.append((ts, common.num(cells[I_DEMAND])))  # 값이 비어 있으면 None 으로 둔다
+        # 값이 비어 있으면 None 으로 둔다
+        rows.append((ts, {col: common.num(cells[i]) for i, col in COLUMN_BY_CELL.items()}))
     return rows

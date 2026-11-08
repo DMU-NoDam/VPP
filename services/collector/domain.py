@@ -64,7 +64,8 @@ class Dataset:
 
 POWER_DEMAND = Dataset(
     name="power_demand",
-    columns=("ts", "demand_mw"),
+    # 현재수요 + 공급능력 (예비력 = 공급능력 - 수요 로 계산한다). 기존 2칸 순서를 지킨다
+    columns=("ts", "demand_mw", "supply_mw"),
     key=("ts",),
     time_column="ts",
     interval_sec=5 * MINUTE,

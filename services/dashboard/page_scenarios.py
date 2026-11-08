@@ -16,9 +16,11 @@ from plotly.subplots import make_subplots
 import logic
 from logic import API_PREFIX, ApiResult
 from ui import (
-    C_GREEN,
+    C_BLUE,
+    C_BRIGHT,
+    C_ORANGE,
     C_TEXT,
-    C_YELLOW,
+    CFG,
     badge,
     get_settings,
     panel_title,
@@ -27,16 +29,9 @@ from ui import (
     style_dark,
 )
 
-# 생성 조건 기본값 (shared/schemas.py ScenarioRequest 와 같다)
-DEFAULTS: dict[str, float] = {
-    "n_scenarios": 10,
-    "n_samples": 300,
-    "seed": 42,
-    "demand_sigma_pct": 2.5,
-    "demand_ar": 0.9,
-    "solar_cloud_pct": 10.0,
-    "wind_sigma_pct": 25.0,
-}
+# 생성 조건 초기값. config/dashboard.yaml 의 page_defaults.scenarios
+# (서버 config/stochastic.yaml 의 scenario_generator 와 같은 값으로 맞춘다)
+DEFAULTS: dict[str, float] = dict(CFG.page_defaults["scenarios"])
 
 VARIABLES = {
     "순부하": ("net", "수요 − 태양광 − 풍력. 발전기가 실제로 메워야 하는 양"),
@@ -46,11 +41,12 @@ VARIABLES = {
 }
 
 
-@st.cache_data(ttl=600, show_spinner="시나리오 생성 중…")
+@st.cache_data(ttl=CFG.api.ttl_scenarios_s, show_spinner="시나리오 생성 중…")
 def fetch_scenarios(base_url: str, payload_json: str) -> ApiResult:
     """POST /scenarios. 같은 조건이면 캐시를 쓴다 (payload 를 JSON 문자열로 받아 키로 쓴다)."""
     return logic.call_api(
-        "POST", f"{base_url}{API_PREFIX}/scenarios", payload=json.loads(payload_json), timeout=30
+        "POST", f"{base_url}{API_PREFIX}/scenarios", payload=json.loads(payload_json),
+        timeout=CFG.api.timeout_scenarios_s,
     )
 
 
@@ -212,7 +208,7 @@ def render_fan_chart(data: dict, selected: str) -> None:
         fig.add_scatter(x=hours, y=band["p95"], mode="lines", line=dict(width=0),
                         showlegend=False, hoverinfo="skip")
         fig.add_scatter(x=hours, y=band["p5"], mode="lines", line=dict(width=0), fill="tonexty",
-                        fillcolor="rgba(163,230,53,.10)", name="표본 P5–P95")
+                        fillcolor="rgba(56,189,248,.10)", name="표본 P5–P95")
 
     for sc in data["scenarios"]:
         if sc["scenario_id"] not in visible:
@@ -222,7 +218,7 @@ def render_fan_chart(data: dict, selected: str) -> None:
             x=hours, y=series(sc, key), mode="lines",
             name=f"{sc['scenario_id']} {sc['label']}",
             line=dict(
-                color=C_YELLOW if is_sel else "rgba(163,230,53,.45)",
+                color=C_ORANGE if is_sel else "rgba(56,189,248,.45)",
                 width=(3.5 if is_sel else 1) + sc["probability"] * 12,
             ),
             opacity=1 if is_sel else 0.8,
@@ -231,7 +227,7 @@ def render_fan_chart(data: dict, selected: str) -> None:
             showlegend=is_sel,
         )
     fig.add_scatter(x=hours, y=series(data["base"], key), mode="lines", name="기준 예측",
-                    line=dict(color="#f4f5f6", width=2, dash="dash"))
+                    line=dict(color=C_BRIGHT, width=2, dash="dash"))
     fig.update_layout(legend=dict(orientation="h", y=-0.18), xaxis_title="시간", yaxis_title="MW")
     st.plotly_chart(style_dark(fig, height=380), width="stretch", key="c_fan")
     shown = f"{len(visible)}/{len(data['scenarios'])}개 표시"
@@ -274,7 +270,7 @@ def render_detail(data: dict, selected: str) -> None:
                         line=dict(color=C_TEXT, width=1.3, dash="dash"), showlegend=row == 1,
                         row=row, col=1)
         fig.add_scatter(x=hours, y=sc[key], mode="lines", name=sc["scenario_id"],
-                        line=dict(color=C_YELLOW, width=2), showlegend=row == 1, row=row, col=1)
+                        line=dict(color=C_ORANGE, width=2), showlegend=row == 1, row=row, col=1)
     fig.update_annotations(font=dict(size=11, color=C_TEXT))
     fig.update_layout(legend=dict(orientation="h", y=-0.08))
     st.plotly_chart(style_dark(fig, height=430), width="stretch", key="c_detail")
@@ -286,7 +282,7 @@ def render_probability(data: dict) -> None:
     frame = scenario_frame(data).iloc[::-1]
     fig = go.Figure(go.Bar(
         x=frame["확률"], y=frame["ID"] + " " + frame["라벨"], orientation="h",
-        marker_color=C_GREEN, marker_line_width=0, marker_cornerradius=6,
+        marker_color=C_BLUE, marker_line_width=0, marker_cornerradius=6,
         text=[f"{p:.1%}" for p in frame["확률"]], textposition="outside",
     ))
     fig.update_layout(xaxis_tickformat=".0%", margin=dict(l=12, r=40, t=10, b=12))
