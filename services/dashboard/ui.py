@@ -11,15 +11,26 @@ import streamlit as st
 import logic
 from logic import ApiResult, Settings
 
-# 관제 화면 팔레트 (차콜 + 라임 그린)
-C_GREEN = "#a3e635"
-C_TEXT = "#9a9ca3"
-C_BRIGHT = "#f4f5f6"
-C_YELLOW = "#facc15"
-C_ORANGE = "#fb923c"
-C_RED = "#f87171"
-C_CARD = "#232529"
-HEAT_SCALE = [[0.0, "#232529"], [0.35, "#3f6212"], [0.7, "#84cc16"], [1.0, "#d9f99d"]]
+# 관제 화면 팔레트 (네이비-블랙 + 블루).
+# 데이터·브랜드는 블루 계열, 초록·주황·빨강(C_GREEN·C_YELLOW·C_RED)은 상태(정상·경고·위험)에만 쓴다.
+# 대비: 보조 글자 C_TEXT 는 카드 위에서 약 6.9:1, 상태색은 4.5:1 이상 (WCAG AA).
+C_BG = "#0b0f17"
+C_CARD = "#121826"
+C_CARD_2 = "#1a2232"
+C_TEXT = "#94a3b8"      # 보조 글자
+C_BRIGHT = "#e6edf3"    # 본문·강조 글자
+C_BLUE = "#38bdf8"      # 데이터 주 계열·브랜드
+C_INDIGO = "#818cf8"    # 데이터 보조 계열 (공급능력·SoC 등)
+C_ORANGE = "#fb923c"    # 대비 계열 (예측·배출·충전) — 상태색 아님
+C_GREEN = "#22c55e"     # 상태: 정상
+C_YELLOW = "#f59e0b"    # 상태: 경고
+C_RED = "#ef4444"       # 상태: 위험
+HEAT_SCALE = [[0.0, C_CARD], [0.35, "#0c4a6e"], [0.7, "#0284c7"], [1.0, "#7dd3fc"]]
+
+
+# st.cache_data 의 ttl 은 함수를 정의할 때 정해져야 해서, 모듈을 불러올 때 설정을 한 번 읽는다.
+# (app.py·page_*.py 의 캐시 TTL·timeout 이 이 값을 쓴다)
+CFG: Settings = logic.load_settings()
 
 
 @st.cache_resource
@@ -28,10 +39,10 @@ def get_settings() -> Settings:
     return logic.load_settings()
 
 
-@st.cache_data(ttl=30, show_spinner=False)
+@st.cache_data(ttl=CFG.api.ttl_health_s, show_spinner=False)
 def fetch_health(base_url: str) -> ApiResult:
     """서비스 /health. 꺼져 있을 때 화면이 오래 멈추지 않게 타임아웃을 짧게 둔다."""
-    return logic.call_api("GET", f"{base_url}/health", timeout=2.0)
+    return logic.call_api("GET", f"{base_url}/health", timeout=CFG.api.timeout_health_s)
 
 
 # ── 스타일 (차콜 배경 + 둥근 카드 + 라임 포인트) ────────────────────────────
@@ -44,10 +55,22 @@ def inject_custom_css() -> None:
         <style>
         @import url("https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.min.css");
         :root {
-            --vpp-bg: #17181c; --vpp-card: #232529; --vpp-card-2: #2b2d32;
-            --vpp-line: rgba(255,255,255,.07); --vpp-green: #a3e635;
-            --vpp-yellow: #facc15; --vpp-red: #f87171;
-            --vpp-text: #f4f5f6; --vpp-muted: #9a9ca3;
+            --vpp-bg: #0b0f17; --vpp-card: #121826; --vpp-card-2: #1a2232;
+            --vpp-line: rgba(148,163,184,.14);
+            --vpp-blue: #38bdf8; --vpp-indigo: #818cf8;
+            --vpp-green: #22c55e; --vpp-yellow: #f59e0b; --vpp-red: #ef4444;
+            --vpp-text: #e6edf3; --vpp-muted: #94a3b8;
+        }
+        /* 움직임 줄이기 설정을 따른다 (깜박임·전환 끔) */
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+                animation: none !important; transition: none !important;
+            }
+        }
+        /* 키보드 포커스 표시 */
+        a:focus-visible, button:focus-visible, [tabindex]:focus-visible,
+        input:focus-visible, select:focus-visible {
+            outline: 2px solid var(--vpp-blue); outline-offset: 2px;
         }
         html, body, .stApp, [class*="st-"], button, input, textarea, select {
             font-family: "Pretendard Variable", Pretendard, -apple-system, "Segoe UI",
@@ -84,10 +107,10 @@ def inject_custom_css() -> None:
         }
         a[data-testid="stSidebarNavLink"]:hover { background: var(--vpp-card-2); }
         a[data-testid="stSidebarNavLink"][aria-current="page"] {
-            background: rgba(163,230,53,.12); box-shadow: inset 3px 0 0 var(--vpp-green);
+            background: rgba(56,189,248,.12); box-shadow: inset 3px 0 0 var(--vpp-blue);
         }
         a[data-testid="stSidebarNavLink"][aria-current="page"] span {
-            color: var(--vpp-green) !important; font-weight: 600;
+            color: var(--vpp-blue) !important; font-weight: 600;
         }
 
         /* 패널: 차콜 카드 + 큰 라운드. st.container(border=True) 는
@@ -112,8 +135,8 @@ def inject_custom_css() -> None:
         .vpp-title {
             font-size: 1.45rem; font-weight: 700; color: var(--vpp-text); letter-spacing: -.01em;
         }
-        .vpp-title .vpp-logo { color: var(--vpp-green); margin-right: .35rem; }
-        .vpp-subtitle { color: var(--vpp-muted); font-size: .8rem; }
+        .vpp-title .vpp-logo { color: var(--vpp-blue); margin-right: .35rem; }
+        .vpp-subtitle { color: var(--vpp-muted); font-size: .82rem; }
 
         /* 예비율 알람 배지 (Warning / Critical) — Critical 이면 깜박인다 */
         .vpp-alarm .vpp-badge.critical { animation: vpp-blink 1.6s ease-in-out infinite; }
@@ -123,18 +146,21 @@ def inject_custom_css() -> None:
         .vpp-badge {
             display: inline-flex; align-items: center; gap: .35rem;
             padding: .16rem .7rem; border-radius: 999px; margin: .14rem .2rem .14rem 0;
-            font-size: .74rem; font-weight: 600; line-height: 1.6;
+            font-size: .78rem; font-weight: 600; line-height: 1.6;
         }
-        .vpp-badge.ok { background: rgba(163,230,53,.14); color: var(--vpp-green); }
-        .vpp-badge.warn { background: rgba(250,204,21,.14); color: var(--vpp-yellow); }
-        .vpp-badge.critical { background: rgba(248,113,113,.15); color: var(--vpp-red); }
+        .vpp-badge.ok { background: rgba(34,197,94,.14); color: var(--vpp-green); }
+        .vpp-badge.warn { background: rgba(245,158,11,.15); color: var(--vpp-yellow); }
+        .vpp-badge.critical { background: rgba(239,68,68,.16); color: var(--vpp-red); }
 
         /* 데이터 출처 태그 (패널 제목 오른쪽) */
         .vpp-src {
-            font-size: .64rem; font-weight: 700; letter-spacing: .04em; margin-left: .5rem;
+            font-size: .75rem; font-weight: 700; letter-spacing: .03em; margin-left: .5rem;
             padding: .08rem .5rem; border-radius: 999px; vertical-align: middle;
+            white-space: nowrap;
         }
-        .vpp-src.live { color: #17181c; background: var(--vpp-green); }
+        .vpp-src.live { color: var(--vpp-bg); background: var(--vpp-green); }
+        /* 목업은 경고(주황)와 헷갈리지 않게 중립 회색 */
+        .vpp-src.mock { color: var(--vpp-muted); border: 1px solid rgba(148,163,184,.45); }
 
         /* 카드 머리글·큰 값 */
         .vpp-kpi-head {
@@ -142,23 +168,29 @@ def inject_custom_css() -> None:
             font-size: .95rem; font-weight: 600; color: var(--vpp-text);
             margin-bottom: .65rem;  /* 제목과 내용 사이 */
         }
+        /* 제목과 출처 태그(실측·목업)는 한 줄에 둔다. 줄이 모자라면 오른쪽 보조 글이 접힌다 */
+        .vpp-kpi-head > span:first-child { white-space: nowrap; }
         .vpp-kpi-head small {
-            font-size: .7rem; color: var(--vpp-muted); font-weight: 500; text-align: right;
+            font-size: .75rem; color: var(--vpp-muted); font-weight: 500; text-align: right;
         }
         .vpp-kpi-row {
             display: flex; align-items: baseline; gap: .55rem; flex-wrap: wrap; margin-top: .3rem;
         }
         .vpp-kpi-value {
-            font-size: 1.85rem; font-weight: 700; color: var(--vpp-green);
+            font-variant-numeric: tabular-nums;  /* 고정폭 숫자: 값이 바뀌어도 폭이 흔들리지 않게 */
+            font-size: 1.85rem; font-weight: 700; color: var(--vpp-blue);
             line-height: 1.05; letter-spacing: -.01em; white-space: nowrap;
         }
         .vpp-kpi-value.sm { font-size: 1.4rem; }
         .vpp-kpi-value .u { font-size: .9rem; margin-left: .2rem; }
         .vpp-kpi-line { display: flex; align-items: center; gap: .4rem; margin-top: .3rem; }
-        .vpp-kpi-delta { font-size: .76rem; color: var(--vpp-text); white-space: nowrap; }
+        .vpp-kpi-delta {
+            font-size: .78rem; color: var(--vpp-text); white-space: nowrap;
+            font-variant-numeric: tabular-nums;
+        }
         .vpp-kpi-delta.up::before { content: "↑ "; color: var(--vpp-green); }
         .vpp-kpi-delta.down::before { content: "↓ "; color: var(--vpp-red); }
-        .vpp-kpi-sub { font-size: .72rem; color: var(--vpp-muted); margin-top: .2rem; }
+        .vpp-kpi-sub { font-size: .75rem; color: var(--vpp-muted); margin-top: .2rem; }
         .nw { white-space: nowrap; }
         .vpp-empty { margin-top: .8rem; line-height: 1.6; }
 
@@ -166,7 +198,7 @@ def inject_custom_css() -> None:
         .vpp-bullet { margin: .85rem 0 .1rem; }
         .vpp-bullet .track {
             position: relative; height: 14px; border-radius: 999px; overflow: hidden;
-            background: rgba(255,255,255,.07);
+            background: rgba(148,163,184,.12);
         }
         .vpp-bullet .zone { position: absolute; top: 0; bottom: 0; }
         .vpp-bullet .fill {
@@ -179,11 +211,11 @@ def inject_custom_css() -> None:
         .vpp-bullet .stripe {
             position: absolute; top: 3px; bottom: 3px; border-radius: 0 999px 999px 0;
             background: repeating-linear-gradient(135deg,
-                rgba(23,24,28,.55) 0 3px, transparent 3px 6px);
+                rgba(11,15,23,.55) 0 3px, transparent 3px 6px);
         }
         .vpp-bullet .ticks {
             position: relative; height: 1.1rem; margin-top: .3rem;
-            font-size: .74rem; color: #c3c5ca;
+            font-size: .75rem; color: var(--vpp-muted); font-variant-numeric: tabular-nums;
         }
         .vpp-bullet .ticks span { position: absolute; transform: translateX(-50%); }
         .vpp-bullet .ticks span:first-child { transform: none; }
@@ -192,14 +224,14 @@ def inject_custom_css() -> None:
         .vpp-bullet-sub {
             margin: .35rem 0 .7rem; font-size: .82rem; color: var(--vpp-text);
         }
-        .vpp-bullet-sub b { color: var(--vpp-yellow); font-weight: 700; }
+        .vpp-bullet-sub b { color: var(--vpp-indigo); font-weight: 700; }
         .vpp-key {
             display: inline-block; width: 22px; height: 10px; margin-right: .45rem;
             border-radius: 999px; vertical-align: -1px;
         }
         .vpp-key.stripe {
             background: repeating-linear-gradient(135deg,
-                rgba(23,24,28,.55) 0 3px, transparent 3px 6px), var(--vpp-yellow);
+                rgba(11,15,23,.55) 0 3px, transparent 3px 6px), var(--vpp-indigo);
         }
         .vpp-legend { display: flex; flex-wrap: wrap; gap: .25rem .9rem; }
         .vpp-legend span { white-space: nowrap; }
@@ -215,39 +247,42 @@ def inject_custom_css() -> None:
         }
         .vpp-tile + .vpp-tile { margin-top: .45rem; }
         .vpp-tile span { font-size: .84rem; color: var(--vpp-muted); font-weight: 600; }
-        .vpp-tile b { font-size: 1.45rem; font-weight: 700; line-height: 1.1; }
+        .vpp-tile b {
+            font-variant-numeric: tabular-nums;  /* 고정폭 숫자: 값이 바뀌어도 폭이 흔들리지 않게 */
+            font-size: 1.4rem; font-weight: 600; line-height: 1.1;
+        }
         .vpp-tile b small {
             font-size: .78rem; margin-left: .25rem; color: var(--vpp-muted); font-weight: 600;
         }
         .vpp-sync {
             display: inline-flex; align-items: center; gap: .35rem;
-            font-size: .7rem; font-weight: 600; padding: .12rem .55rem; border-radius: 999px;
+            font-size: .75rem; font-weight: 600; padding: .12rem .55rem; border-radius: 999px;
         }
         .vpp-sync::before {
             content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor;
         }
-        .vpp-sync.ok { color: var(--vpp-green); background: rgba(163,230,53,.12); }
+        .vpp-sync.ok { color: var(--vpp-green); background: rgba(34,197,94,.12); }
         .vpp-sync.ok::before { animation: vpp-blink 1.6s ease-in-out infinite; }
-        .vpp-sync.off { color: var(--vpp-red); background: rgba(248,113,113,.14); }
+        .vpp-sync.off { color: var(--vpp-red); background: rgba(239,68,68,.14); }
 
         /* 최적화 결과: 큰 절감률 + 기준 칩 + 값 타일 */
         .vpp-hero-sub {
             display: inline-flex; align-items: center; gap: .45rem; flex-wrap: wrap;
-            font-size: .8rem; color: var(--vpp-text);
+            font-size: .82rem; color: var(--vpp-text);
         }
         .vpp-tiles { margin-top: .5rem; }
         .vpp-tiles .vpp-tile + .vpp-tile { margin-top: .65rem; }  /* 타일 사이 간격 */
         .vpp-tile.opt { align-items: center; padding: .45rem .75rem; }
         .vpp-tile.opt > div { display: flex; flex-direction: column; gap: .05rem; }
         .vpp-tile.opt > div:last-child { align-items: flex-end; }
-        .vpp-tile.opt small { font-size: .7rem; color: var(--vpp-muted); }
-        .vpp-tile.opt b { font-size: 1.15rem; color: var(--vpp-text); }
+        .vpp-tile.opt small { font-size: .75rem; color: var(--vpp-muted); }
+        .vpp-tile.opt b { font-size: 1.1rem; color: var(--vpp-text); }
         .vpp-chk {
-            font-style: normal; font-size: .68rem; font-weight: 700; white-space: nowrap;
+            font-style: normal; font-size: .75rem; font-weight: 700; white-space: nowrap;
             padding: .08rem .5rem; border-radius: 999px;
         }
-        .vpp-chk.ok { color: var(--vpp-green); background: rgba(163,230,53,.14); }
-        .vpp-chk.bad { color: var(--vpp-red); background: rgba(248,113,113,.15); }
+        .vpp-chk.ok { color: var(--vpp-green); background: rgba(34,197,94,.14); }
+        .vpp-chk.bad { color: var(--vpp-red); background: rgba(239,68,68,.16); }
 
         /* 이름 · 값 · 보조 한 줄 */
         .vpp-stat {
@@ -256,9 +291,12 @@ def inject_custom_css() -> None:
             font-size: .8rem;
         }
         .vpp-stat span { color: var(--vpp-muted); }
-        .vpp-stat b { color: var(--vpp-text); text-align: right; font-size: .92rem; }
+        .vpp-stat b {
+            color: var(--vpp-text); text-align: right; font-size: .92rem;
+            font-variant-numeric: tabular-nums;
+        }
         .vpp-stat small {
-            grid-column: 1 / -1; color: var(--vpp-muted); font-size: .68rem; text-align: right;
+            grid-column: 1 / -1; color: var(--vpp-muted); font-size: .75rem; text-align: right;
         }
         .vpp-kpi-head + .vpp-stat { margin-top: .5rem; }
         /* 남은 카드 높이를 채우고 항목을 고르게 배치 (KPX 실측) */
@@ -278,19 +316,19 @@ def inject_custom_css() -> None:
         }
         .vpp-checktip {
             position: relative; display: inline-flex; align-items: center; gap: .45rem;
-            font-size: .72rem; color: var(--vpp-muted); cursor: help; outline: none;
+            font-size: .75rem; color: var(--vpp-muted); cursor: help;
         }
         .vpp-checktip .ic {
             width: 22px; height: 22px; border-radius: 50%; display: inline-grid;
             place-items: center; font-size: .78rem; font-weight: 700;
         }
-        .vpp-checktip.ok .ic { background: rgba(163,230,53,.16); color: var(--vpp-green); }
-        .vpp-checktip.bad .ic { background: rgba(248,113,113,.16); color: var(--vpp-red); }
+        .vpp-checktip.ok .ic { background: rgba(34,197,94,.16); color: var(--vpp-green); }
+        .vpp-checktip.bad .ic { background: rgba(239,68,68,.16); color: var(--vpp-red); }
         .vpp-checktip .tip {
             position: absolute; left: 0; bottom: calc(100% + 8px); z-index: 20;
             display: grid; gap: .3rem; min-width: 180px; padding: .65rem .8rem;
             border-radius: 12px; background: var(--vpp-card-2); color: var(--vpp-text);
-            box-shadow: 0 10px 28px rgba(0,0,0,.5); font-size: .74rem;
+            box-shadow: 0 10px 28px rgba(0,0,0,.55); font-size: .78rem;
             opacity: 0; visibility: hidden; transform: translateY(4px);
             transition: opacity .15s, transform .15s, visibility .15s;
         }
@@ -302,18 +340,18 @@ def inject_custom_css() -> None:
         }
 
         /* 위기 시나리오 행 */
-        .vpp-crisis-cap { font-size: .68rem; color: var(--vpp-muted); margin: .55rem 0 .2rem; }
+        .vpp-crisis-cap { font-size: .75rem; color: var(--vpp-muted); margin: .55rem 0 .2rem; }
         .vpp-crisis-row {
             display: grid; grid-template-columns: 1fr 70px 3.2rem; align-items: center;
-            gap: .5rem; padding: .3rem 0; font-size: .74rem; color: var(--vpp-text);
+            gap: .5rem; padding: .3rem 0; font-size: .78rem; color: var(--vpp-text);
         }
         .vpp-crisis-row .n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .vpp-crisis-row b { text-align: right; }
+        .vpp-crisis-row b { text-align: right; font-variant-numeric: tabular-nums; }
 
         /* 가로 진행 막대 (위기 시나리오·발전원 공용) */
         .vpp-crisis-row .bar, .vpp-gen-row .bar {
             position: relative; height: 7px; border-radius: 999px;
-            background: rgba(255,255,255,.08);
+            background: rgba(148,163,184,.14);
         }
         .vpp-crisis-row .bar i, .vpp-gen-row .bar i {
             display: block; height: 100%; border-radius: 999px;
@@ -327,12 +365,18 @@ def inject_custom_css() -> None:
         .vpp-gen-row {
             display: grid; grid-template-columns: 18px 3.4rem 4.2rem 1fr 2.2rem;
             align-items: center; gap: .5rem; padding: .36rem 0;
-            font-size: .76rem;
+            font-size: .78rem;
         }
         .vpp-kpi-head + .vpp-gen-row { margin-top: .45rem; }
+        .vpp-gen-cap { margin: -.35rem 0 .35rem; }
         .vpp-gen-row .n { color: var(--vpp-text); }
-        .vpp-gen-row b { color: var(--vpp-text); text-align: right; white-space: nowrap; }
-        .vpp-gen-row small { color: var(--vpp-muted); text-align: right; }
+        .vpp-gen-row b {
+            color: var(--vpp-text); text-align: right; white-space: nowrap;
+            font-variant-numeric: tabular-nums;
+        }
+        .vpp-gen-row small {
+            color: var(--vpp-muted); text-align: right; font-variant-numeric: tabular-nums;
+        }
 
         /* 게이지 라벨 (plotly 밖이라 폭 변화에도 안 잘림) */
         .vpp-gauge-label {
@@ -354,21 +398,70 @@ def inject_custom_css() -> None:
             font-size: .76rem; color: var(--vpp-muted); font-weight: 600;
         }
         div[data-testid="stMetricValue"] {
-            font-size: 1.35rem; font-weight: 700; color: var(--vpp-green);
+            font-variant-numeric: tabular-nums;  /* 고정폭 숫자: 값이 바뀌어도 폭이 흔들리지 않게 */
+            font-size: 1.3rem; font-weight: 600; color: var(--vpp-blue);
         }
 
         /* 버튼 */
         div[data-testid="stButton"] button, div[data-testid="stDownloadButton"] button {
             border-radius: 10px; border: 1px solid var(--vpp-line);
-            background: var(--vpp-card-2);
+            background: var(--vpp-card-2); cursor: pointer;
+            transition: border-color .15s, background-color .15s;
         }
+        div[data-testid="stButton"] button:hover { border-color: rgba(56,189,248,.5); }
         div[data-testid="stDownloadButton"] button,
         div[data-testid="stButton"] button[kind="primary"],
         div[data-testid="stFormSubmitButton"] button[kind="primaryFormSubmit"] {
-            background: var(--vpp-green); color: #17181c; border: none; font-weight: 600;
+            background: var(--vpp-blue); color: var(--vpp-bg); border: none; font-weight: 600;
+            cursor: pointer;
         }
         div[data-testid="stButton"] button[kind="primary"] p,
-        div[data-testid="stFormSubmitButton"] button p { color: #17181c; }
+        div[data-testid="stFormSubmitButton"] button p { color: var(--vpp-bg); }
+
+        /* ── 벤토 그리드 ── */
+        /* 히어로 카드 (예비율 + 위기 시나리오): 위쪽에 옅은 블루 빛 */
+        div.st-key-vpp-hero {
+            background: radial-gradient(120% 70% at 50% 0%, rgba(56,189,248,.10), transparent 62%),
+                        var(--vpp-card) !important;
+            box-shadow: inset 0 0 0 1px rgba(56,189,248,.14);
+        }
+        /* 예비율 링 게이지: conic-gradient 로 채움, 안쪽 원으로 구멍 */
+        .vpp-ring {
+            position: relative; width: 176px; aspect-ratio: 1; border-radius: 50%;
+            margin: .5rem auto .7rem; display: grid; place-items: center;
+            background: conic-gradient(var(--c) calc(var(--p) * 1%), rgba(148,163,184,.14) 0);
+        }
+        .vpp-ring::before {
+            content: ""; position: absolute; inset: 15px; border-radius: 50%;
+            background: var(--vpp-card);
+        }
+        /* 기준 눈금 (Critical·Warning): 링 바깥쪽에서 안쪽으로 짧은 선 */
+        .vpp-ring .tick {
+            position: absolute; top: -3px; left: calc(50% - 1px); width: 2px; height: 21px;
+            background: var(--vpp-text); border-radius: 1px; transform-origin: 1px 91px;
+        }
+        .vpp-ring .in {
+            position: relative; display: flex; flex-direction: column; align-items: center;
+            gap: .2rem;
+        }
+        .vpp-ring .in b {
+            font-size: 2.5rem; font-weight: 700; line-height: 1; letter-spacing: -.02em;
+            font-variant-numeric: tabular-nums;
+        }
+        .vpp-ring .in b small { font-size: 1rem; margin-left: .15rem; }
+        .vpp-ring .in .vpp-badge { margin: 0; }
+        .vpp-ring-sub {
+            display: flex; justify-content: center; align-items: center; flex-wrap: wrap;
+            gap: .3rem .9rem; font-size: .8rem; color: var(--vpp-text);
+        }
+        /* 카드 안 구획선 (히어로 아래쪽 위기 시나리오) */
+        .vpp-divider {
+            border-top: 1px solid var(--vpp-line); padding-top: .85rem; margin-top: .9rem;
+        }
+        /* 아이콘이 없는 발전원: 색 점 */
+        .vpp-dot {
+            width: 10px; height: 10px; border-radius: 50%; justify-self: center;
+        }
 
         /* 표·확장 패널 */
         div[data-testid="stDataFrame"] { border-radius: 12px; overflow: hidden; }
@@ -387,17 +480,17 @@ def style_dark(fig: go.Figure, height: int = 300) -> go.Figure:
         height=height,
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color=C_TEXT, size=11, family="Pretendard Variable, Malgun Gothic, sans-serif"),
+        font=dict(color=C_TEXT, size=12, family="Pretendard Variable, Malgun Gothic, sans-serif"),
         margin=dict(l=12, r=12, t=28, b=12),
-        legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=10)),
+        legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=12)),
         hoverlabel=dict(
-            bgcolor="#2b2d32", bordercolor="rgba(255,255,255,.18)", font_color=C_BRIGHT
+            bgcolor=C_CARD_2, bordercolor="rgba(148,163,184,.3)", font_color=C_BRIGHT
         ),
         bargap=0.35,
     )
     axis = dict(
-        gridcolor="rgba(255,255,255,.06)",
-        zerolinecolor="rgba(255,255,255,.12)",
+        gridcolor="rgba(148,163,184,.10)",
+        zerolinecolor="rgba(148,163,184,.22)",
         linecolor="rgba(0,0,0,0)",
     )
     fig.update_xaxes(**axis)
@@ -422,12 +515,18 @@ def kpi_badge(settings: Settings, key: str, label: str, value: float) -> str:
     return badge(text, "ok" if ok else "critical")
 
 
-def source_tag(live: bool, latency_s: float | None = None) -> str:
-    """패널 제목 옆 LIVE 태그 (서비스 응답일 때만, 지연시간 포함)."""
+def mock_tag(text: str = "목업") -> str:
+    """패널 제목 옆 목업 태그. 서비스 응답이 아닌 더미 값으로 그린 패널에 단다."""
+    return f'<span class="vpp-src mock">{text}</span>'
+
+
+def source_tag(live: bool, latency_s: float | None = None, label: str = "") -> str:
+    """패널 제목 옆 출처 태그. 서비스 응답이면 LIVE(지연시간 포함), 아니면 목업."""
+    prefix = f"{label} " if label else ""
     if not live:
-        return ""
+        return mock_tag(f"{prefix}목업")
     suffix = f" · {latency_s:.2f}s" if latency_s is not None else ""
-    return f'<span class="vpp-src live">LIVE{suffix}</span>'
+    return f'<span class="vpp-src live">{prefix}LIVE{suffix}</span>'
 
 
 def panel_title(text: str, tag: str = "") -> None:

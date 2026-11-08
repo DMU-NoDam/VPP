@@ -6,6 +6,8 @@ dependencies = [
   "fastapi>=0.110", "uvicorn[standard]>=0.29", "pandas>=2.2",
   "pydantic>=2.6", "requests>=2.31", "streamlit>=1.35",
   "plotly>=5.20", "numpy>=1.26",
+  # Two-Stage Stochastic (선택 A): 과제 제약상 Pyomo 사용, 솔버는 아래 HiGHS 공용
+  "pyomo>=6.8",
   # PuLP 4.0은 Rust 코어로 전면 재작성되어 LpVariable.dicts 등 기존 API가 제거됨.
   # UC 모델의 u[g,t] 인덱싱 관용구를 유지하기 위해 3.x 계열로 핀한다.
   "pulp>=2.8,<4",
@@ -13,6 +15,10 @@ dependencies = [
   "pyyaml>=6.0",
   # MILP solver: PuLP 기본 CBC 외에 HiGHS 사용 (C 담당 성능 KPI 10초)
   "highspy>=1.7",
+  # forecast_api (B 담당): LightGBM / LSTM 예측 모델
+  "lightgbm>=4.0", "torch>=2.2", "scikit-learn>=1.4",
+  # 한국 공휴일(대체공휴일·선거일 포함) — 수요 예측 is_holiday 피처
+  "holidays>=0.50",
 ]
 
 [project.optional-dependencies]
@@ -25,7 +31,7 @@ select = ["E", "F", "I", "N", "UP"]
 
 [tool.ruff.lint.isort]
 # collector 는 패키지 없이 평평한 모듈로 돌아간다 (main.py 가 같은 폴더에서 import).
-# dispatch_api 도 같은 관례를 따른다 (constants, models, loaders).
+# dispatch_api·forecast_api 도 같은 관례를 따른다.
 known-first-party = [
   "shared",
   # collector
@@ -33,8 +39,11 @@ known-first-party = [
   # dispatch_api
   "main", "constants", "models", "loaders",
   "milp", "baseline", "schedule", "validation", "carbon", "scenarios", "service",
+  "units", "stochastic", "precompute",
+  # forecast_api
+  "data_client", "features", "metrics", "pi", "forecast_engine", "router", "schemas",
   # dashboard
-  "logic", "ui", "page_scenarios",
+  "logic", "ui", "page_scenarios", "page_stochastic_test",
 ]
 
 [tool.pytest.ini_options]
@@ -47,6 +56,10 @@ filterwarnings = [
   "ignore:Constructing LpVariable:DeprecationWarning",
   "ignore:Using LpProblem.constraints as a dict mapping:DeprecationWarning",
 ]
+
+[tool.coverage.run]
+# 서비스 폴더 안의 로컬 가상환경(venv)이 커버리지 계산에 섞이지 않게 제외
+omit = ["*/venv/*", "*/.venv/*", "*/site-packages/*"]
 
 [build-system]
 requires = ["setuptools>=68"]

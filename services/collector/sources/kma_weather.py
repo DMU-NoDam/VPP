@@ -12,7 +12,11 @@ from datetime import datetime, timedelta
 from . import common
 
 URL = "https://apihub.kma.go.kr/api/typ01/url/kma_sfctm3.php"
-STATION_IDS = [s.strip() for s in os.getenv("KMA_STATION_IDS", "108").split(",") if s.strip()]
+# 기상 지점 (기상청 지점번호 그대로)
+STATION_IDS = [
+    "108", "165", "156", "146", "129", "136", "143",   # 태양광 (일사량)
+    "100", "216", "277", "185", "188", "252",          # 풍력 (풍속)
+]
 CHUNK_DAYS = int(os.getenv("KMA_CHUNK_DAYS", "10"))
 TM_FORMAT = "%Y%m%d%H%M"
 

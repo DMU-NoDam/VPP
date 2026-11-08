@@ -1,48 +1,171 @@
-# 대시보드 설정. 최적화 파라미터 원본은 generators.yaml / ess.yaml 이고,
-# 여기에는 화면 판정 기준과 API 연동 전 목업용 값만 둔다.
+# 대시보드 설정 (담당: D). 최적화 파라미터 원본은 generators.yaml / ess.yaml / stochastic.yaml 이고,
+# 여기에는 화면 판정 기준, API 호출 조건, 페이지 초기값, API 연동 전 목업 값만 둔다.
+#
+# 형식: 숫자 파라미터는 모두 {value, unit, source}. logic.load_settings 는 unit 이 기대와 다르면 멈춘다.
+#       출처가 없으면 source 를 "[미정]" 또는 "[가정]" 으로 시작한다. L숫자 = docs/mission.md 줄 번호.
+
+# ── 알람 (과제 원문 L115) ────────────────────────────────────────────────────
 
 alarm:
-  reserve_warning_pct: 7.0
-  reserve_critical_pct: 5.0
+  reserve_warning_pct: {value: 7.0, unit: "%", source: 과제 원문 L115 "예비율 7% 미만 Warning"}
+  reserve_critical_pct: {value: 5.0, unit: "%", source: 과제 원문 L115 "5% 미만 Critical"}
 
-# 미션 성능 기준 — 각 패널의 달성/미달 배지를 이 값으로 판정한다.
+# ── 미션 성능 기준 — 각 패널의 달성/미달 배지를 이 값으로 판정한다 (과제 원문 L268-281) ──
+
 targets:
-  mape_24h_pct: 4.0        # 이하
-  mape_168h_pct: 7.0       # 이하
-  pi_coverage_pct: 85.0    # 이상
-  nmae_solar_pct: 12.0     # 이하
-  nmae_wind_pct: 15.0      # 이하
-  milp_saving_pct: 10.0    # 이상
-  milp_latency_s: 10.0     # 이하
-  vss_pct: 3.0             # 이상
-  ess_peak_cut_pct: 5.0    # 이상
-  crisis_reserve_pct: 5.0  # 이상
+  mape_24h_pct: {value: 4.0, unit: "%", source: 과제 원문 L72 (이하)}
+  mape_168h_pct: {value: 7.0, unit: "%", source: 과제 원문 L73 (이하)}
+  pi_coverage_pct: {value: 85.0, unit: "%", source: 과제 원문 L74 (이상)}
+  nmae_solar_pct: {value: 12.0, unit: "%", source: 과제 원문 L76 (이하)}
+  nmae_wind_pct: {value: 15.0, unit: "%", source: 과제 원문 L77 (이하)}
+  milp_saving_pct: {value: 10.0, unit: "%", source: 과제 원문 L86 (이상)}
+  milp_latency_s: {value: 10.0, unit: s, source: 과제 원문 L281 (이하)}
+  vss_pct: {value: 3.0, unit: "%", source: 과제 원문 L90 (이상)}
+  ess_peak_cut_pct: {value: 5.0, unit: "%", source: 과제 원문 L103 (이상)}
+  crisis_reserve_pct: {value: 5.0, unit: "%", source: 과제 원문 L109 (이상)}
+
+# ── API 호출 ─────────────────────────────────────────────────────────────────
 
 api:
-  timeout_s: 12.0          # MILP 10초 기준 + 여유
-  cache_ttl_s: 60
+  timeout: {value: 12.0, unit: s, source: "[가정] forecast·MILP 호출. MILP 10초 기준(L281) + 여유"}
+  timeout_short: {value: 5.0, unit: s, source: "[가정] collector 조회·미리 계산 결과 조회 (바로 응답)"}
+  timeout_health: {value: 2.0, unit: s, source: "[가정] /health. 꺼진 서비스 때문에 화면이 오래 멈추지 않게"}
+  timeout_scenarios: {value: 30, unit: s, source: "[가정] POST /scenarios (표본 생성·축약)"}
+  stochastic_timeout_margin:
+    value: 60.0
+    unit: s
+    source: "[가정] Two-Stage 호출 timeout = 문제당 제한 x 풀이 횟수 + 이 여유 (모델 생성 시간)"
+  cache_ttl: {value: 60, unit: s, source: "[가정] collector 최신값·미리 계산 결과 캐시"}
+  cache_ttl_range: {value: 300, unit: s, source: "[가정] collector 구간 조회·forecast·MILP 캐시"}
+  cache_ttl_scenarios: {value: 600, unit: s, source: "[가정] 시나리오 생성 결과 캐시"}
+  cache_ttl_stochastic: {value: 1800, unit: s, source: "[가정] Two-Stage 테스트 결과 캐시 (풀이가 길다)"}
+  cache_ttl_health: {value: 30, unit: s, source: "[가정] /health 캐시"}
+
+# POST /forecast 요청 조건
+forecast_request:
+  history: {value: 365, unit: day, source: 과제 원문 L63 "최소 1년 이상" 데이터로 예측}
+  horizon: {value: 168, unit: h, source: 과제 원문 L21 "향후 24~168시간"}
+
+# ── 위기 시나리오 (과제 원문 L104-109) ───────────────────────────────────────
 
 crisis_scenarios:
   - name: 폭염 (수요 +15%)
-    demand_mult: 1.15
+    demand_mult: {value: 1.15, unit: ratio, source: 과제 원문 L106 "수요 급증 +15%"}
   - name: 발전소 탈락 (-1,400MW)
-    capacity_delta_mw: -1400
+    capacity_delta_mw: {value: -1400, unit: MW, source: '과제 원문 L107 "1,400MW 탈락"'}
   - name: 재생에너지 램프다운 (태양광 -50%)
-    solar_mult: 0.5
+    solar_mult: {value: 0.5, unit: ratio, source: 과제 원문 L108 "태양광 출력 50% 급감"}
 
-# --- 목업 전용 (dispatch_api 연동 후 제거) ---------------------------------------
-# 미션 문서 EPSIS 예시표. 순서 = 급전 우선순위.
+# ── 페이지 초기값 ─────────────────────────────────────────────────────────────
+# 서버(dispatch_api)는 요청에서 비운 값을 자기 config/stochastic.yaml 로 채운다. 대시보드는 다른
+# 서비스의 파일을 읽지 않으므로(REST 규칙) 슬라이더 초기값은 여기 따로 둔다. 서버 값과 맞출 것.
+
+page_defaults:
+  scenarios:
+    n_scenarios: {value: 10, unit: count, source: stochastic.yaml scenario_generator.n_scenarios 와 같게}
+    n_samples: {value: 300, unit: count, source: stochastic.yaml scenario_generator.n_samples 와 같게}
+    seed: {value: 42, unit: "-", source: stochastic.yaml scenario_generator.seed 와 같게}
+    demand_sigma_pct: {value: 2.5, unit: "%", source: stochastic.yaml scenario_generator.demand_sigma 와 같게}
+    demand_ar: {value: 0.9, unit: "-", source: stochastic.yaml scenario_generator.demand_ar 와 같게}
+    solar_cloud_pct: {value: 10.0, unit: "%", source: stochastic.yaml scenario_generator.solar_cloud 와 같게}
+    wind_sigma_pct: {value: 25.0, unit: "%", source: stochastic.yaml scenario_generator.wind_sigma 와 같게}
+  stochastic_test:
+    seed: {value: 42, unit: "-", source: stochastic.yaml scenario_generator.seed 와 같게}
+    n_scenarios: {value: 10, unit: count, source: 과제 원문 L87 "시나리오 최소 10개"}
+    time_limit_s:
+      value: 60
+      unit: s
+      source: >-
+        [가정] API 기본(10초)보다 길게. 25기 x 24h x 10 시나리오의 RP 는 PC 에 따라 10초를 넘기고,
+        덜 풀리면 VSS 가 음수로 나온다 (docs/api_spec.md 경고)
+    mip_gap_pct: {value: 0.5, unit: "%", source: "[가정] team_plan.md \"MIP gap 0.5% 정도\""}
+    compute_ws: false
+
+# ── 목업 전용 (dispatch_api·forecast_api 연동 후 제거) ────────────────────────
+# API 가 응답하지 않을 때 화면을 채우는 값이다. 화면에는 "목업" 태그가 붙는다.
+
+# 과제 원문 예시표 (L214-223). 순서 = 급전 우선순위.
 fleet:
-  - {code: nuclear, name: 원자력, capacity_mw: 24000, fuel_cost_won_per_kwh: 6.5, co2_t_per_mwh: 0.0}
-  - {code: hydro, name: 수력, capacity_mw: 6500, fuel_cost_won_per_kwh: 0.0, co2_t_per_mwh: 0.0}
-  - {code: solar, name: 태양광, capacity_mw: 12000, fuel_cost_won_per_kwh: 0.0, co2_t_per_mwh: 0.0}
-  - {code: wind, name: 풍력, capacity_mw: 3500, fuel_cost_won_per_kwh: 0.0, co2_t_per_mwh: 0.0}
-  - {code: coal, name: 석탄, capacity_mw: 28000, fuel_cost_won_per_kwh: 45.2, co2_t_per_mwh: 0.91}
-  - {code: lng, name: LNG, capacity_mw: 32000, fuel_cost_won_per_kwh: 125.8, co2_t_per_mwh: 0.45}
+  - code: nuclear
+    name: 원자력
+    capacity_mw: {value: 24000, unit: MW, source: 과제 원문 L218 예시표}
+    fuel_cost_won_per_kwh: {value: 6.5, unit: KRW/kWh, source: 과제 원문 L218 예시표}
+    co2_t_per_mwh: {value: 0.0, unit: tCO2/MWh, source: 과제 원문 L218 예시표}
+  - code: hydro
+    name: 수력
+    capacity_mw: {value: 6500, unit: MW, source: 과제 원문 L221 예시표}
+    fuel_cost_won_per_kwh: {value: 0.0, unit: KRW/kWh, source: 과제 원문 L221 예시표}
+    co2_t_per_mwh: {value: 0.0, unit: tCO2/MWh, source: 과제 원문 L221 예시표}
+  - code: solar
+    name: 태양광
+    capacity_mw: {value: 12000, unit: MW, source: 과제 원문 L222 예시표}
+    fuel_cost_won_per_kwh: {value: 0.0, unit: KRW/kWh, source: 과제 원문 L222 예시표}
+    co2_t_per_mwh: {value: 0.0, unit: tCO2/MWh, source: 과제 원문 L222 예시표}
+  - code: wind
+    name: 풍력
+    capacity_mw: {value: 3500, unit: MW, source: 과제 원문 L223 예시표}
+    fuel_cost_won_per_kwh: {value: 0.0, unit: KRW/kWh, source: 과제 원문 L223 예시표}
+    co2_t_per_mwh: {value: 0.0, unit: tCO2/MWh, source: 과제 원문 L223 예시표}
+  - code: coal
+    name: 석탄
+    capacity_mw: {value: 28000, unit: MW, source: 과제 원문 L219 예시표}
+    fuel_cost_won_per_kwh: {value: 45.2, unit: KRW/kWh, source: 과제 원문 L219 예시표}
+    co2_t_per_mwh: {value: 0.91, unit: tCO2/MWh, source: 과제 원문 L219 예시표}
+  - code: lng
+    name: LNG
+    capacity_mw: {value: 32000, unit: MW, source: 과제 원문 L220 예시표}
+    fuel_cost_won_per_kwh: {value: 125.8, unit: KRW/kWh, source: 과제 원문 L220 예시표}
+    co2_t_per_mwh: {value: 0.45, unit: tCO2/MWh, source: 과제 원문 L220 예시표}
 
-# 피크 5% 감축은 방전 출력이 피크의 5% 이상이어야 나온다 (CLAUDE.md "ESS 규모" 참고).
-# ess.yaml 이 아직 0 이라 시연용 가정값을 둔다.
+# 피크 5% 감축은 방전 출력이 피크의 5% 이상이어야 나온다 (team_plan.md "ESS 규모").
 ess:
-  power_mw: 5000
-  energy_mwh: 15000
-  round_trip_efficiency: 0.85
+  power_mw: {value: 5000, unit: MW, source: "[가정] 시연용. 피크(약 86GW)의 5% 이상"}
+  energy_mwh: {value: 15000, unit: MWh, source: "[가정] 시연용. 출력 x 3시간"}
+  round_trip_efficiency: {value: 0.85, unit: ratio, source: "[가정] team_plan.md \"Round-trip 효율 85% 정도\""}
+
+mock:
+  seed: {value: 42, unit: "-", source: "[가정] 하루 목업 seed (날짜별 목업은 날짜로 seed 를 정한다)"}
+  forecast_seed: {value: 7, unit: "-", source: "[가정] 예측 목업 seed"}
+  # 하루 수요·태양광 곡선 (전형적인 한국 부하 패턴을 본뜬 토이 값)
+  demand_shape:
+    value: [
+      52000, 50000, 49000, 48000, 49000, 52000,
+      58000, 66000, 72000, 76000, 79000, 81000,
+      82000, 80000, 78000, 77000, 78000, 80000,
+      84000, 86000, 83000, 74000, 65000, 57000,
+    ]
+    unit: MW
+    source: "[가정] 전형적인 한국 부하 패턴을 본뜬 토이 값"
+  solar_shape:
+    value: [
+      0, 0, 0, 0, 0, 200,
+      1200, 3600, 6400, 8800, 10400, 11200,
+      11600, 11200, 10000, 8000, 5600, 2800,
+      800, 100, 0, 0, 0, 0,
+    ]
+    unit: MW
+    source: "[가정] 토이 값"
+  weekday_factor:
+    value: [1.0, 1.02, 1.02, 1.01, 1.0, 0.9, 0.85]
+    unit: ratio
+    source: "[가정] 월~일 수요 계수 (토이 값)"
+  wind_base: {value: 800, unit: MW, source: "[가정] 풍력 곡선 = base + amplitude x sin(4πh/24)"}
+  wind_amplitude: {value: 700, unit: MW, source: "[가정] 위와 같음"}
+  nuclear_availability: {value: 0.95, unit: ratio, source: "[가정] 원자력 이용률"}
+  hydro_base_ratio: {value: 0.12, unit: ratio, source: "[가정] 수력 중 유입식 기저 출력 비율"}
+  demand_noise: {value: 0.015, unit: ratio, source: "[가정] 하루 목업 수요 노이즈 (±)"}
+  solar_noise: {value: 0.05, unit: ratio, source: "[가정] 하루 목업 태양광 노이즈 (±)"}
+  wind_noise: {value: 300, unit: MW, source: "[가정] 하루 목업 풍력 노이즈 (±)"}
+  forecast_demand_actual_sd: {value: 0.01, unit: ratio, source: "[가정] 예측 목업 실측 노이즈"}
+  forecast_demand_sd: {value: 0.02, unit: ratio, source: "[가정] 예측 오차 표준편차 (1시간 앞)"}
+  forecast_demand_sd_growth: {value: 0.03, unit: ratio, source: "[가정] 예측 끝(168h)까지 늘어나는 표준편차"}
+  forecast_solar_actual_sd: {value: 0.1, unit: ratio, source: "[가정] 예측 목업 태양광 실측 노이즈"}
+  forecast_solar_sd: {value: 0.06, unit: ratio, source: "[가정] 태양광 예측 오차 (설비용량 대비)"}
+  forecast_wind_actual_sd: {value: 200, unit: MW, source: "[가정] 예측 목업 풍력 실측 노이즈"}
+  forecast_wind_sd: {value: 350, unit: MW, source: "[가정] 풍력 예측 오차"}
+  pi_z: {value: 1.645, unit: "-", source: 90% 양측 예측구간의 표준정규 분위수 (반올림)}
+  milp_saving: {value: 0.124, unit: ratio, source: "[가정] 목업 절감률"}
+  milp_latency: {value: 3.2, unit: s, source: "[가정] 목업 응답 시간"}
+  milp_n_scenarios: {value: 12, unit: count, source: "[가정] 목업 시나리오 수"}
+  constraint_reserve_pct: {value: 10, unit: "%", source: 과제 원문 L81 제약 2 (목업 라벨)}
+  constraint_hydro_pct: {value: 30, unit: "%", source: 과제 원문 L85 제약 6 (목업 라벨)}

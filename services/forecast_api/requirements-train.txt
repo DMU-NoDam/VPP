@@ -1,0 +1,3 @@
+# 오프라인 학습(models/train_lgbm.py, models/train_lstm.py)용 추가 패키지.
+#   pip install -r requirements.txt -r requirements-train.txt
+torch>=2.2
