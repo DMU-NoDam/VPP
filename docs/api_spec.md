@@ -42,7 +42,7 @@
 | `target` | `"demand"` \| `"solar"` \| `"wind"` \| `"all"` | O | `all`이면 세 개를 한 번에 반환 |
 | `horizon_hours` | integer (24~168) | O | 예측 시간 범위 |
 | `model` | `"auto"` \| `"lightgbm"` \| `"lstm"` | X (기본 `auto`) | `auto`는 대상별로 더 정확한 모델 (수요·풍력 LSTM, 태양광 LightGBM). LSTM을 쓸 수 없으면 LightGBM으로 대체 |
-| `pi_method` | `"conformal"` \| `"quantile"` | X (기본 `conformal`) | 현재 conformal만 구현 |
+| `pi_method` | `"conformal"` \| `"quantile"` | X (기본 `conformal`) | 현재 conformal만 구현. `quantile`은 501 (`MODEL_NOT_IMPLEMENTED`) |
 
 ```json
 { "start_date": "2025-07-01", "end_date": "2026-10-12", "target": "all", "horizon_hours": 24 }

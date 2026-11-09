@@ -246,6 +246,10 @@ def run_forecast(target: str, start_date: str, end_date: str,
     metrics: 저장된 평가 파일이 있으면 "학습에 안 쓴 시험 구간에서 API와 같은 방식으로 예측한"
              성적(24h 이하 요청이면 24h 성적, 그보다 길면 168h 성적)을 돌려준다.
     """
+    if pi_method != "conformal":
+        # quantile regression 구간은 아직 구현하지 않았다. 조용히 conformal로 바꾸지 않고 501로 알린다.
+        raise NotImplementedError(f"pi_method={pi_method!r}는 아직 지원하지 않음 (conformal만 구현)")
+
     raw = get_mock_data(target, start=start_date, end=end_date)
     choice = SERVING_MODEL[target] if model_name == "auto" else model_name
 

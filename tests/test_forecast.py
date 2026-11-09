@@ -396,6 +396,9 @@ def test_api_forecast_all(client):
 
 def test_api_errors(client, saved_dir):
     assert client.post("/api/v1/forecast", json=_body(horizon_hours=10)).status_code == 422
+    # quantile 구간은 미구현 → conformal로 몰래 바꾸지 않고 501
+    r = client.post("/api/v1/forecast", json=_body(target="demand", pi_method="quantile"))
+    assert r.status_code == 501
     (saved_dir / "demand_lstm.pt").write_bytes(b"broken")
     (saved_dir / "demand_lstm_eval.json").write_text("{}")
     r = client.post("/api/v1/forecast", json=_body(target="demand", model="lstm"))
