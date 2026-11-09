@@ -12,7 +12,7 @@ router.py는 이 모듈을 호출하기만 하고, HTTP 관련 코드는 여기 
 - wind  : direct — 기상 + 달력만으로 각 시각의 발전량(MW)을 바로 예측.
 
 서빙 모델 (model="auto"일 때, models/saved/model_comparison.md 비교 결과로 정함):
-- demand: LSTM, solar: LightGBM, wind: LSTM
+- demand: LightGBM, solar: LSTM, wind: LSTM (기준 통과 모델 중 더 정확한 쪽)
   LSTM 파일/torch가 없으면 자동으로 LightGBM으로 대체한다.
 
 미래 기상(기온/일사량/풍속)은 원래 기상청 "예보"를 써야 하지만, 예보 API가 아직 없어서
@@ -45,8 +45,8 @@ TARGET_MODE = {"demand": "mw", "solar": "cf", "wind": "mw"}  # cf = 이용률(�
 _CONTEXT_BEFORE_H = 24
 _CONTEXT_AFTER_H = 12
 
-# model="auto"일 때 target별로 쓰는 모델 (같은 test 구간에서 더 정확했던 쪽)
-SERVING_MODEL = {"demand": "lstm", "solar": "lightgbm", "wind": "lstm"}
+# model="auto"일 때 target별로 쓰는 모델 (같은 test 구간에서 기준을 통과한 모델 중 더 정확한 쪽)
+SERVING_MODEL = {"demand": "lightgbm", "solar": "lstm", "wind": "lstm"}
 
 # 하위 호환: 예전 코드에서 쓰던 이름
 FEATURE_COLUMNS = {t: feature_columns(t) for t in TARGET_COLUMN}
@@ -247,8 +247,10 @@ def run_forecast(target: str, start_date: str, end_date: str,
              성적(24h 이하 요청이면 24h 성적, 그보다 길면 168h 성적)을 돌려준다.
     """
     if pi_method != "conformal":
-        # quantile regression 구간은 아직 구현하지 않았다. 조용히 conformal로 바꾸지 않고 501로 알린다.
-        raise NotImplementedError(f"pi_method={pi_method!r}는 아직 지원하지 않음 (conformal만 구현)")
+        # quantile regression 구간은 아직 구현하지 않았다.
+        # 조용히 conformal로 바꾸지 않고 501로 알린다.
+        raise NotImplementedError(
+            f"pi_method={pi_method!r}는 아직 지원하지 않음 (conformal만 구현)")
 
     raw = get_mock_data(target, start=start_date, end=end_date)
     choice = SERVING_MODEL[target] if model_name == "auto" else model_name

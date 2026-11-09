@@ -330,8 +330,9 @@ def write_comparison(lstm_results: dict[str, dict]) -> str:
     lines = ["# 예측 모델 비교: LightGBM vs LSTM", ""]
     lines.append("test 구간에서 매일 0시에 시작해 24h/168h를 이어서 예측한 결과 "
                  "(학습·PI 계산에 쓰지 않은 구간, 두 모델 같은 시점).")
-    lines.append("두 모델 모두 같은 달력·기상 정보(기온·냉난방도일·공휴일·지점별 일사량/풍속)를 "
-                 "쓴다. LightGBM은 과거값을 lag 피처로, LSTM은 최근 24시간 시퀀스로 본다.")
+    lines.append("두 모델 모두 같은 달력·기상 정보(수요: 기온·냉난방도일·일사량·공휴일 / "
+                 "태양광·풍력: 지점별 일사량·풍속)를 쓴다. "
+                 "LightGBM은 과거값을 lag 피처로, LSTM은 최근 24시간 시퀀스로 본다.")
     lines.append("수요=MAPE, 태양광/풍력=nMAE(설비용량 기준). PI 커버리지 목표 ≥ 85%.")
     lines.append("")
     lines.append("| 대상 | 모델 | 오차(24h) | 오차(168h) | PI 커버리지(24h) | PI 커버리지(168h) "
@@ -350,7 +351,7 @@ def write_comparison(lstm_results: dict[str, dict]) -> str:
             print(f"[경고] {t}: LightGBM과 LSTM의 test 구간이 다름 "
                   "→ train_lgbm.py를 다시 실행하세요")
 
-        scores = {}
+        scores, passed = {}, {}
         for name, res in (("LightGBM", lgbm), ("LSTM", lstm)):
             m24, m168 = res["test_metrics"]["24h"], res["test_metrics"]["168h"]
             ok = _passes(t, "24h", m24) and _passes(t, "168h", m168)
@@ -360,10 +361,13 @@ def write_comparison(lstm_results: dict[str, dict]) -> str:
                 f"| {m24['coverage']:.1f}% | {m168['coverage']:.1f}% "
                 f"| {f'{secs:.1f}초' if secs is not None else '-'} | {'✅' if ok else '❌'} |")
             scores[name] = (m24["primary_value"] + m168["primary_value"]) / 2
-        winners[t] = min(scores, key=scores.get)
+            passed[name] = ok
+        # 기준을 통과한 모델 중에서 더 정확한 쪽 (둘 다 미달이면 그냥 더 정확한 쪽)
+        pool = [n for n in scores if passed[n]] or list(scores)
+        winners[t] = min(pool, key=scores.get)
 
     lines.append("")
-    lines.append("대상별 더 정확한 모델(24h·168h 오차 평균 기준): "
+    lines.append("대상별 서빙 모델(기준 통과 모델 중 24h·168h 오차 평균이 낮은 쪽): "
                  + ", ".join(f"{t}={w}" for t, w in winners.items()))
     text = "\n".join(lines) + "\n"
     (SAVED_DIR / "model_comparison.md").write_text(text, encoding="utf-8")

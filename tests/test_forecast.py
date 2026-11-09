@@ -103,7 +103,7 @@ def boosters(raw):
 
 
 def test_weather_columns():
-    assert data_client.weather_columns("demand") == ["temperature_c"]
+    assert data_client.weather_columns("demand") == ["temperature_c", "irradiance"]
     solar_cols = data_client.weather_columns("solar")
     assert len(solar_cols) == len(data_client.SOLAR_STATIONS) + 1 and solar_cols[-1] == "irradiance"
     assert data_client.weather_columns("wind")[-1] == "wind_speed"
@@ -111,7 +111,7 @@ def test_weather_columns():
 
 def test_get_demand_hourly_with_temperature(raw):
     df = raw["demand"]
-    assert list(df.columns) == ["datetime", "demand_mw", "temperature_c"]
+    assert list(df.columns) == ["datetime", "demand_mw", "temperature_c", "irradiance"]
     assert len(df) == 24 * N_DAYS
     assert df.isna().sum().sum() == 0
 
@@ -362,11 +362,11 @@ def test_load_lstm_errors(saved_dir):
 
 def test_auto_falls_back_to_lightgbm_without_lstm(saved_dir):
     end = str(pd.Timestamp(START) + pd.Timedelta(days=N_DAYS - 1))
-    assert forecast_engine.SERVING_MODEL["demand"] == "lstm"
-    res = forecast_engine.run_forecast("demand", START, end, 24)  # LSTM 파일 없음 → 대체
+    assert forecast_engine.SERVING_MODEL["wind"] == "lstm"
+    res = forecast_engine.run_forecast("wind", START, end, 24)  # LSTM 파일 없음 → 대체
     assert res["model_used"] == "lightgbm" and len(res["points"]) == 24
     with pytest.raises(FileNotFoundError):  # 직접 lstm을 지정하면 대체하지 않고 에러
-        forecast_engine.run_forecast("demand", START, end, 24, model_name="lstm")
+        forecast_engine.run_forecast("wind", START, end, 24, model_name="lstm")
 
 
 # --- router (HTTP) -------------------------------------------------------------
@@ -439,6 +439,6 @@ def test_lstm_train_and_serve(tmp_path, monkeypatch):
     train_lstm.train_one("demand")
     monkeypatch.setattr(forecast_engine, "SAVED_DIR", tmp_path)
     end = str(pd.Timestamp(START) + pd.Timedelta(days=N_DAYS - 1))
-    res = forecast_engine.run_forecast("demand", START, end, 48)
+    res = forecast_engine.run_forecast("demand", START, end, 48, model_name="lstm")
     assert res["model_used"] == "lstm" and len(res["points"]) == 48
     assert all(p["lower_bound"] <= p["predicted"] <= p["upper_bound"] for p in res["points"])

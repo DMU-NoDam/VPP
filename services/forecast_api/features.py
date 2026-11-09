@@ -6,6 +6,7 @@ data_client.py가 주는 원본 표(datetime + 정답 컬럼 + 기상 컬럼)에
 
 - 달력 힌트: hour, dayofweek, is_weekend, dayofyear, is_holiday(공휴일), is_offday(주말 또는 공휴일)
 - 기온 힌트(수요): 냉방도일 CDD / 난방도일 HDD (일평균 기온 기준) + 시간별 냉·난방 도시(CDH/HDH)
+- 일사량 힌트(수요): 태양광 지점 평균 일사량. 맑은 낮에는 자가용(비계량) 태양광만큼 계통 수요가 준다
 - 과거값 힌트(lag, 수요): 1시간/24시간/168시간 전 값, 최근 24시간 평균
 - 기상 힌트(태양광/풍력): 지점별 일사량·풍속 + 이동평균(3/6/12/24시간) + 지점 간 최대·편차
 
@@ -20,7 +21,7 @@ import holidays
 import numpy as np
 import pandas as pd
 
-from data_client import TEMPERATURE_COLUMN, weather_columns
+from data_client import DEMAND_IRRADIANCE_COLUMN, TEMPERATURE_COLUMN, weather_columns
 
 # 냉·난방도일 기준온도 (℃). 기상청 냉난방도일 기준: 냉방 24℃, 난방 18℃
 CDD_BASE = 24.0
@@ -103,7 +104,8 @@ def feature_columns(target: str) -> list[str]:
     calendar = ["hour", "dayofweek", "is_weekend", "dayofyear", "is_holiday", "is_offday"]
     if target == "demand":
         col = TARGET_COLUMN[target]
-        return (calendar + [TEMPERATURE_COLUMN, "cdd", "hdd", "cdh", "hdh"]
+        weather = [TEMPERATURE_COLUMN, DEMAND_IRRADIANCE_COLUMN, "cdd", "hdd", "cdh", "hdh"]
+        return (calendar + weather
                 + [f"{col}_lag_1h", f"{col}_lag_24h", f"{col}_lag_168h", f"{col}_roll_mean_24h"])
     cols = weather_columns(target)
     rolled = [f"{c}_r{w}" for w in WEATHER_ROLL_WINDOWS for c in cols]
