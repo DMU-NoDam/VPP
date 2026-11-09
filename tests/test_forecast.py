@@ -239,6 +239,25 @@ def test_check_spec():
 # --- pi ------------------------------------------------------------------------
 
 
+def test_horizon_hour_pi_widens_hard_hours():
+    """낮(10~15시) 오차가 3배인 데이터 → 낮 배율이 크고, 새 데이터에서 커버리지 ≈ 90%."""
+    rng = np.random.default_rng(0)
+    origins = list(pd.date_range("2026-01-01", periods=200, freq="4h"))
+    hours = pi.target_hours(origins, 48)
+    assert hours[0, 0] == origins[0].hour and hours.shape == (200, 48)
+    scale = np.where((hours >= 10) & (hours <= 15), 3.0, 1.0)
+    params = pi.compute_horizon_hour_pi(np.abs(rng.normal(0, 1, (200, 48)) * scale), hours)
+    assert params["hour_scale"][12] > 2 * params["hour_scale"][3]
+    new = np.abs(rng.normal(0, 1, (200, 48)) * scale)
+    zero = np.zeros(48)  # 예측값 0 → 상한 = 폭
+    widths = np.array([
+        pi.apply_horizon_hour_pi(zero, params["horizon_scale"], params["hour_scale"],
+                                 params["q"], hours[i])[1]
+        for i in range(200)
+    ])
+    assert 0.85 < np.mean(new <= widths) < 0.95
+
+
 def test_conformal_quantile_finite_sample():
     r = np.arange(1, 10, dtype=float)  # n=9 → ceil(10*0.9)/9 = 1 → 최댓값
     assert pi.conformal_quantile(r, 0.9) == 9.0
@@ -419,7 +438,10 @@ def test_train_one_end_to_end(target, tmp_path, monkeypatch):
     result = train_lgbm.train_one(target)
     assert set(result) == {"24h", "168h"}
     saved = json.loads((tmp_path / f"{target}_pi.json").read_text(encoding="utf-8"))
-    assert saved["pi_type"] == ("horizon" if target == "demand" else "hourly")
+    assert saved["pi_type"] == ("horizon_hour" if target == "demand" else "hourly")
+    if target == "demand":  # 가변 폭: 시각 배율 24개(평균 1) + 분위수 q
+        assert len(saved["hour_scale"]) == 24 and abs(np.mean(saved["hour_scale"]) - 1) < 1e-3
+        assert saved["q"] > 0
     assert len(saved["margins"]) == (168 if target == "demand" else 24)
     assert (tmp_path / f"{target}_lgbm.txt").exists()
     assert 0 <= result["24h"]["coverage"] <= 100

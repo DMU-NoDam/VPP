@@ -41,7 +41,7 @@
 | `end_date` | string (YYYY-MM-DD) | O | 과거 데이터 종료일. 예측은 이 시점(데이터가 끝나는 시점) 다음 시간부터 |
 | `target` | `"demand"` \| `"solar"` \| `"wind"` \| `"all"` | O | `all`이면 세 개를 한 번에 반환 |
 | `horizon_hours` | integer (24~168) | O | 예측 시간 범위 |
-| `model` | `"auto"` \| `"lightgbm"` \| `"lstm"` | X (기본 `auto`) | `auto`는 대상별로 기준을 통과한 모델 중 더 정확한 모델 (수요 LightGBM, 태양광·풍력 LSTM). LSTM을 쓸 수 없으면 LightGBM으로 대체 |
+| `model` | `"auto"` \| `"lightgbm"` \| `"lstm"` | X (기본 `auto`) | `auto`는 대상별로 기준을 통과한 모델 중 더 정확한 모델 (현재 세 대상 모두 LSTM). LSTM을 쓸 수 없으면 LightGBM으로 대체 |
 | `pi_method` | `"conformal"` \| `"quantile"` | X (기본 `conformal`) | 현재 conformal만 구현. `quantile`은 501 (`MODEL_NOT_IMPLEMENTED`) |
 
 ```json
@@ -56,11 +56,13 @@
   "generated_at": "2026-11-09T10:00:00", "horizon_hours": 24,
   "forecasts": {
     "demand": {
-      "model_used": "lightgbm", "pi_method": "conformal",
-      "metrics": { "mape": 3.77, "nmae": 3.6, "nmae_mean": 3.6, "coverage": 85.26, "interval_width_mean": 9379.43, "n_origins": 13.0, "primary_value": 3.77 },
+      "model_used": "lstm", "pi_method": "conformal",
+      "metrics": { "mape": 3.42, "nmae": 3.28, "nmae_mean": 3.28, "coverage": 88.78, "interval_width_mean": 6492.49, "n_origins": 13.0, "primary_value": 3.42 },
       "points": [
-        { "datetime": "2026-11-08T01:00:00", "predicted": 56114.4,
-          "lower_bound": 52491.6, "upper_bound": 59737.3 }
+        { "datetime": "2026-11-08T01:00:00", "predicted": 55723.7,
+          "lower_bound": 54570.5, "upper_bound": 56876.9 },
+        { "datetime": "2026-11-08T13:00:00", "predicted": 49646.8,
+          "lower_bound": 43178.1, "upper_bound": 56115.5 }
       ]
     },
     "solar": { "...": "demand와 동일 구조, primary_value = nMAE" },
@@ -76,10 +78,11 @@
 - **nMAE 정의**: `nMAE = 평균 절대오차 ÷ 설비용량 × 100`. 과제 문서에 정의가 없어 재생에너지 예측에서 일반적인
   설비용량 기준을 쓴다 (대시보드 `dashboard/logic.py`와 동일). 설비용량은 `trading_by_fuel.capacity_mw`.
 - 서빙 모델 (`model: "auto"`): LightGBM과 LSTM을 같은 시험 구간·같은 입력 정보로 비교해서
-  대상별로 기준(MAPE/nMAE·Coverage)을 통과한 모델 중 더 정확한 쪽을 쓴다 → 수요 LightGBM, 태양광 LSTM, 풍력 LSTM
+  대상별로 기준(MAPE/nMAE·Coverage)을 통과한 모델 중 더 정확한 쪽을 쓴다 → 수요 LSTM, 태양광 LSTM, 풍력 LSTM
   (`services/forecast_api/models/saved/model_comparison.md`). `model_used`에 실제로 쓴 모델이 나온다.
 - 예측 방식:
-  - `demand`(LightGBM): recursive(1시간씩 이어서 예측). 피처 = 과거 수요(1h/24h/168h 전, 24h 평균)
+  - `demand`(LSTM): 최근 24시간 시퀀스(1시간 전 수요 + 기온·냉난방도일·일사량·달력)로 1시간씩 이어서 예측.
+    LightGBM일 때는 recursive. 피처 = 과거 수요(1h/24h/168h 전, 24h 평균)
     + 태양광 7개 지점 평균 일사량(맑은 낮에 자가용 태양광만큼 계통 수요가 줄어드는 효과) + 전국 평균 기온·냉방도일(CDD, 24℃)·
     난방도일(HDD, 18℃) + 시각·요일·공휴일(대체공휴일 포함).
   - `solar`(LSTM): 최근 24시간 시퀀스(1시간 전 발전량 + 7개 지점 일사량·이동평균 + 달력)로 이어서 예측.
@@ -87,7 +90,9 @@
   - `wind`(LSTM): 최근 24시간 시퀀스(1시간 전 발전량 + 6개 지점 풍속·이동평균 + 달력)로 이어서 예측.
     LightGBM일 때는 direct (풍속 + 달력으로 각 시각의 발전량을 바로 예측).
 - 예측구간(90%, conformal): 시험 구간 직전 4주(calibration) 오차로 margin을 정한다 (`saved/{target}_pi.json`).
-  LSTM과 LightGBM recursive(수요)는 "몇 시간 뒤"별 margin(먼 미래일수록 넓음),
+  LSTM과 LightGBM recursive(수요)는 "몇 시간 뒤 × 몇 시" 가변 폭: 폭 = q × (몇 시간 뒤 크기) × (몇 시 배율).
+  먼 미래일수록 넓고, 오차가 큰 낮(10~15시, 맑은/흐린 날 차이)은 넓게, 새벽은 좁게 잡는다
+  (수요 배율 예: 3시 약 0.5, 12시 약 2.0). `pi_type: "horizon_hour"`, 파라미터 `horizon_scale`·`hour_scale`·`q`.
   LightGBM direct(태양광·풍력)는 "몇 시"별 margin(태양광은 밤에 거의 0). LSTM은 `saved/{target}_lstm_eval.json`.
 - 단위: `demand`·`solar`·`wind` 모두 MW (발전량은 `trading_by_fuel.trade_mwh` 1시간 거래량 = 평균 MW).
 - 태양광/풍력 예측은 `trading_by_fuel`의 마지막 시각 다음 시간부터 시작한다 (수요보다 데이터가 짧을 수 있음).

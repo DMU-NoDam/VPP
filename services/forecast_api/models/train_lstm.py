@@ -22,7 +22,8 @@ LSTM은 "최근 24시간의 흐름(시퀀스)"을 순서대로 읽어서 다음 
      1차 학습                            PI margin 계산          최종 평가만
      |----------- 2차 학습 (train + calib) -------------------|
 
-- PI  : calib 구간에서 168시간 이어서 예측한 오차로 "몇 시간 뒤"별 90% margin (conformal)
+- PI  : calib 구간에서 168시간 이어서 예측한 오차로
+        "몇 시간 뒤 × 몇 시" 가변 폭 90% 구간 (conformal)
 - 평가: test 구간에서 매일 0시에 시작한 24h/168h 예측의 MAPE / nMAE(설비용량 기준) / PI 커버리지
 
 하이퍼파라미터는 test 결과를 보고 고른 값이 아니라 일반적인 기본값이다
@@ -62,7 +63,7 @@ from data_client import available_range, get_mock_data
 from features import TARGET_COLUMN, build_exog_features, feature_columns
 from forecast_engine import TARGET_MODE
 from metrics import mape, nmae
-from pi import compute_horizon_margins
+from pi import compute_horizon_hour_pi, target_hours
 from train_lgbm import (
     CALIB_DAYS,
     CALIB_ORIGIN_STEP_H,
@@ -71,6 +72,7 @@ from train_lgbm import (
     METRIC_NAME,
     TEST_DAYS,
     _passes,
+    _pi_extra,
     _report,
 )
 
@@ -268,8 +270,11 @@ def train_one(target: str, start: str | None = None, end: str | None = None) -> 
                                        freq=f"{CALIB_ORIGIN_STEP_H}h"))
     cb = recursive_backtest(predict_fn(calib_model), df, target, calib_stats,
                             calib_origins, MAX_HORIZON)
-    margins = compute_horizon_margins(np.abs(cb["actual"] - cb["pred"]), CONFIDENCE)
-    print(f"PI margin(몇 시간 뒤): 1h {margins[0]:.0f} / 24h {margins[23]:.0f} / "
+    cal = {"pi_type": "horizon_hour",
+           **compute_horizon_hour_pi(np.abs(cb["actual"] - cb["pred"]),
+                                     target_hours(calib_origins, MAX_HORIZON), CONFIDENCE)}
+    margins = cal["margins"]
+    print(f"PI margin(몇 시간 뒤, 하루 평균): 1h {margins[0]:.0f} / 24h {margins[23]:.0f} / "
           f"168h {margins[-1]:.0f} MW")
 
     # 2차 학습(train + calib) → 최종 모델
@@ -287,7 +292,7 @@ def train_one(target: str, start: str | None = None, end: str | None = None) -> 
     print(f"[참고] 1시간 앞 예측 {METRIC_NAME[target]}: {one_step:.2f}%")
 
     # test: 매일 0시에 시작 → 24h / 168h (LightGBM과 같은 시점)
-    pi_info = {"pi_type": "horizon", "margins": margins}
+    pi_info = {k: v for k, v in cal.items()}
     test_metrics = {}
     for hz in (24, 168):
         last_origin = data_end - pd.Timedelta(hours=hz) + pd.Timedelta(hours=1)
@@ -316,7 +321,9 @@ def train_one(target: str, start: str | None = None, end: str | None = None) -> 
         "train_seconds": round(train_seconds, 1),
         "test_period": [str(test_start), str(data_end)],
         "one_step": one_step,
+        "pi_type": "horizon_hour",
         "margins": [round(float(x), 3) for x in margins],
+        **_pi_extra(cal),
         "test_metrics": test_metrics,
     }
     (SAVED_DIR / f"{target}_lstm_eval.json").write_text(

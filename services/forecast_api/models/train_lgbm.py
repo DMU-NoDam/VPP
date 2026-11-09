@@ -12,7 +12,7 @@ forecast_api가 요청마다 재학습하지 않도록, 이 스크립트는 따�
      |----------- 2차 학습 (train + calib) -------------------|
 
 - calib: 1차 모델(train만 학습)로 API와 같은 방식으로 예측해보고, 그 오차로 90% PI margin을 정한다.
-    수요(recursive)  : "몇 시간 뒤" 별 margin 168개
+    수요(recursive)  : "몇 시간 뒤"(168) × "몇 시"(24) 가변 폭 (낮처럼 어려운 시간대는 넓게)
     태양광/풍력(direct): "몇 시" 별 margin 24개
 - 2차 학습: margin을 정한 뒤 train+calib 전체로 다시 학습해서 저장 (최근 4주까지 반영)
 - test : 학습/margin 계산 어디에도 안 쓴 구간. 24h·168h 성적과 PI 커버리지를 여기서만 잰다.
@@ -42,7 +42,7 @@ from data_client import available_range, get_mock_data
 from features import TARGET_COLUMN, build_features, feature_columns
 from forecast_engine import STRATEGY, TARGET_MODE, backtest, interval
 from metrics import PRIMARY_METRIC, SPEC_THRESHOLDS, mape, nmae
-from pi import compute_horizon_margins, compute_hourly_margins
+from pi import compute_horizon_hour_pi, compute_hourly_margins, target_hours
 
 SAVED_DIR = Path(__file__).resolve().parent / "saved"
 SAVED_DIR.mkdir(exist_ok=True)
@@ -81,8 +81,9 @@ def _calibrate(target: str, model: lgb.Booster, raw: pd.DataFrame,
         origins = list(pd.date_range(calib_start, test_start - pd.Timedelta(hours=MAX_HORIZON),
                                      freq=f"{CALIB_ORIGIN_STEP_H}h"))
         cb = backtest(target, model, raw, origins, MAX_HORIZON)
-        margins = compute_horizon_margins(np.abs(cb["actual"] - cb["pred"]), CONFIDENCE)
-        return {"pi_type": "horizon", "margins": margins, "calib_origins": len(origins)}
+        params = compute_horizon_hour_pi(np.abs(cb["actual"] - cb["pred"]),
+                                         target_hours(origins, MAX_HORIZON), CONFIDENCE)
+        return {"pi_type": "horizon_hour", **params, "calib_origins": len(origins)}
 
     # direct: 예측이 시작 시점과 무관하므로, 매일 0시에 24시간씩 이어붙여 calib 전체를 덮는다
     origins = list(pd.date_range(calib_start, test_start - pd.Timedelta(hours=24), freq="D"))
@@ -90,6 +91,15 @@ def _calibrate(target: str, model: lgb.Booster, raw: pd.DataFrame,
     margins = compute_hourly_margins(np.abs(cb["actual"] - cb["pred"]).ravel(),
                                      cb["hour"].ravel(), CONFIDENCE)
     return {"pi_type": "hourly", "margins": margins, "calib_origins": len(origins)}
+
+
+def _pi_extra(cal: dict) -> dict:
+    """가변 폭 PI의 추가 파라미터(있을 때만)를 JSON으로 저장할 수 있게 변환."""
+    if cal["pi_type"] != "horizon_hour":
+        return {}
+    return {"horizon_scale": [round(float(x), 3) for x in cal["horizon_scale"]],
+            "hour_scale": [round(float(x), 4) for x in cal["hour_scale"]],
+            "q": round(float(cal["q"]), 4)}
 
 
 def _report(target: str, bt: dict, pi_info: dict, datetimes: list[pd.DatetimeIndex]) -> dict:
@@ -146,8 +156,11 @@ def train_one(target: str, start: str | None = None, end: str | None = None) -> 
     calib_model = _fit(target, train)
     cal = _calibrate(target, calib_model, raw, calib_start, test_start)
     m = cal["margins"]
-    if cal["pi_type"] == "horizon":
-        print(f"PI margin(몇 시간 뒤): 1h {m[0]:.0f} / 24h {m[23]:.0f} / 168h {m[-1]:.0f} MW")
+    if cal["pi_type"] == "horizon_hour":
+        hs = cal["hour_scale"]
+        print(f"PI margin(몇 시간 뒤, 하루 평균): 1h {m[0]:.0f} / 24h {m[23]:.0f} / "
+              f"168h {m[-1]:.0f} MW, 시각 배율 3시 {hs[3]:.2f} / 13시 {hs[13]:.2f} / "
+              f"19시 {hs[19]:.2f}")
     else:
         print(f"PI margin(몇 시): 0시 {m[0]:.0f} / 6시 {m[6]:.0f} / 12시 {m[12]:.0f} / "
               f"18시 {m[18]:.0f} MW")
@@ -158,7 +171,7 @@ def train_one(target: str, start: str | None = None, end: str | None = None) -> 
     train_seconds = time.time() - t0
 
     # test: 매일 0시에 예측 시작 → 24h / 168h 성적 + PI 커버리지
-    pi_info = {"pi_type": cal["pi_type"], "margins": m}
+    pi_info = {k: v for k, v in cal.items() if k != "calib_origins"}
     test_metrics = {}
     for hz in (24, 168):
         last_origin = data_end - pd.Timedelta(hours=hz) + pd.Timedelta(hours=1)
@@ -188,6 +201,7 @@ def train_one(target: str, start: str | None = None, end: str | None = None) -> 
         "calib_origins": cal["calib_origins"],
         "test_period": [str(test_start), str(data_end)],
         "margins": [round(float(x), 3) for x in m],
+        **_pi_extra(cal),
         "test_metrics": test_metrics,
     }
     (SAVED_DIR / f"{target}_pi.json").write_text(

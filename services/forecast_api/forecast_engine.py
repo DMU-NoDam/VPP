@@ -12,7 +12,7 @@ router.py는 이 모듈을 호출하기만 하고, HTTP 관련 코드는 여기 
 - wind  : direct — 기상 + 달력만으로 각 시각의 발전량(MW)을 바로 예측.
 
 서빙 모델 (model="auto"일 때, models/saved/model_comparison.md 비교 결과로 정함):
-- demand: LightGBM, solar: LSTM, wind: LSTM (기준 통과 모델 중 더 정확한 쪽)
+- demand: LSTM, solar: LSTM, wind: LSTM (기준 통과 모델 중 더 정확한 쪽)
   LSTM 파일/torch가 없으면 자동으로 LightGBM으로 대체한다.
 
 미래 기상(기온/일사량/풍속)은 원래 기상청 "예보"를 써야 하지만, 예보 API가 아직 없어서
@@ -33,7 +33,7 @@ import pandas as pd
 from data_client import get_mock_data, get_weather, weather_columns
 from features import TARGET_COLUMN, build_exog_features, build_features, feature_columns
 from metrics import evaluate
-from pi import apply_horizon_pi, apply_hourly_pi, fit_conformal
+from pi import apply_horizon_hour_pi, apply_horizon_pi, apply_hourly_pi, fit_conformal
 
 MODELS_DIR = Path(__file__).resolve().parent / "models"
 SAVED_DIR = MODELS_DIR / "saved"
@@ -46,7 +46,7 @@ _CONTEXT_BEFORE_H = 24
 _CONTEXT_AFTER_H = 12
 
 # model="auto"일 때 target별로 쓰는 모델 (같은 test 구간에서 기준을 통과한 모델 중 더 정확한 쪽)
-SERVING_MODEL = {"demand": "lightgbm", "solar": "lstm", "wind": "lstm"}
+SERVING_MODEL = {"demand": "lstm", "solar": "lstm", "wind": "lstm"}
 
 # 하위 호환: 예전 코드에서 쓰던 이름
 FEATURE_COLUMNS = {t: feature_columns(t) for t in TARGET_COLUMN}
@@ -229,10 +229,14 @@ def _load_pi(target: str) -> dict | None:
 def interval(pi_info: dict, preds: np.ndarray,
              datetimes: pd.Series | pd.DatetimeIndex) -> tuple[np.ndarray, np.ndarray]:
     """pi.json의 margin 종류에 맞게 예측구간을 씌운다.
-    horizon: "몇 시간 뒤"별 margin (수요) / hourly: "몇 시"별 margin (태양광·풍력)"""
+    horizon_hour: "몇 시간 뒤 × 몇 시" 가변 폭 (이어서 예측하는 모델: 수요 LightGBM, LSTM)
+    horizon: "몇 시간 뒤"별 margin (예전 저장 파일 호환) / hourly: "몇 시"별 margin (direct)"""
+    hours = pd.DatetimeIndex(datetimes).hour
     if pi_info["pi_type"] == "hourly":
-        hours = pd.DatetimeIndex(datetimes).hour
         return apply_hourly_pi(preds, np.array(pi_info["margins"]), hours)
+    if pi_info["pi_type"] == "horizon_hour":
+        return apply_horizon_hour_pi(preds, pi_info["horizon_scale"], pi_info["hour_scale"],
+                                     pi_info["q"], hours)
     return apply_horizon_pi(preds, np.array(pi_info["margins"]))
 
 
@@ -269,8 +273,9 @@ def run_forecast(target: str, start_date: str, end_date: str,
         forecast_df = _lstm_forecast(target, train_lstm, lstm_model, stats, raw, horizon_hours)
         model_used = "lstm"
         model = None
-        pi_info = {"pi_type": "horizon", "margins": evaluation["margins"],
-                   "test_metrics": evaluation["test_metrics"]}
+        pi_info = {k: evaluation[k] for k in ("margins", "horizon_scale", "hour_scale", "q",
+                                              "test_metrics") if k in evaluation}
+        pi_info["pi_type"] = evaluation.get("pi_type", "horizon")
     else:
         model, model_used = _load_model(target)
         forecast_df = forecast_path(target, model, raw, horizon_hours)
