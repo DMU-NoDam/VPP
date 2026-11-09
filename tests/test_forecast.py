@@ -35,6 +35,7 @@ _spec = importlib.util.spec_from_file_location(
     "train_lgbm", FORECAST_DIR / "models" / "train_lgbm.py"
 )
 train_lgbm = importlib.util.module_from_spec(_spec)
+sys.modules["train_lgbm"] = train_lgbm  # train_lstm 이 `from train_lgbm import` 로 같은 모듈을 쓰게
 _spec.loader.exec_module(train_lgbm)
 
 N_DAYS = 35
@@ -344,14 +345,28 @@ def test_run_forecast_fallback_without_pi(saved_dir):
 
 
 def test_load_model_errors(saved_dir):
-    with pytest.raises(FileNotFoundError):
-        forecast_engine._load_model("demand", "lstm")  # .pt 없음
-    (saved_dir / "demand_lstm.pt").write_bytes(b"x")
-    with pytest.raises(NotImplementedError):
-        forecast_engine._load_model("demand", "lstm")
     (saved_dir / "wind_lgbm.txt").unlink()
     with pytest.raises(FileNotFoundError):
-        forecast_engine._load_model("wind", "auto")
+        forecast_engine._load_model("wind")
+
+
+def test_load_lstm_errors(saved_dir):
+    with pytest.raises(FileNotFoundError):
+        forecast_engine._load_lstm("demand")  # .pt / eval.json 없음
+    (saved_dir / "demand_lstm.pt").write_bytes(b"broken")
+    (saved_dir / "demand_lstm_eval.json").write_text("{}")
+    # torch가 없으면 NotImplementedError, 있으면 손상된 파일이라 ModelLoadError
+    with pytest.raises((NotImplementedError, forecast_engine.ModelLoadError)):
+        forecast_engine._load_lstm("demand")
+
+
+def test_auto_falls_back_to_lightgbm_without_lstm(saved_dir):
+    end = str(pd.Timestamp(START) + pd.Timedelta(days=N_DAYS - 1))
+    assert forecast_engine.SERVING_MODEL["demand"] == "lstm"
+    res = forecast_engine.run_forecast("demand", START, end, 24)  # LSTM 파일 없음 → 대체
+    assert res["model_used"] == "lightgbm" and len(res["points"]) == 24
+    with pytest.raises(FileNotFoundError):  # 직접 lstm을 지정하면 대체하지 않고 에러
+        forecast_engine.run_forecast("demand", START, end, 24, model_name="lstm")
 
 
 # --- router (HTTP) -------------------------------------------------------------
@@ -381,9 +396,10 @@ def test_api_forecast_all(client):
 
 def test_api_errors(client, saved_dir):
     assert client.post("/api/v1/forecast", json=_body(horizon_hours=10)).status_code == 422
-    (saved_dir / "demand_lstm.pt").write_bytes(b"x")
+    (saved_dir / "demand_lstm.pt").write_bytes(b"broken")
+    (saved_dir / "demand_lstm_eval.json").write_text("{}")
     r = client.post("/api/v1/forecast", json=_body(target="demand", model="lstm"))
-    assert r.status_code == 501
+    assert r.status_code in (500, 501)  # torch 없음 501 / 손상된 모델 500
     (saved_dir / "solar_lgbm.txt").unlink()
     r = client.post("/api/v1/forecast", json=_body(target="solar"))
     assert r.status_code == 500 and r.json()["detail"]["result_msg"] == "MODEL_LOAD_ERROR"
@@ -404,3 +420,22 @@ def test_train_one_end_to_end(target, tmp_path, monkeypatch):
     assert len(saved["margins"]) == (168 if target == "demand" else 24)
     assert (tmp_path / f"{target}_lgbm.txt").exists()
     assert 0 <= result["24h"]["coverage"] <= 100
+
+
+def test_lstm_train_and_serve(tmp_path, monkeypatch):
+    """torch가 있을 때만: LSTM 학습 → 저장 → API 엔진에서 불러와 예측까지."""
+    pytest.importorskip("torch")
+    models_dir = str(FORECAST_DIR / "models")
+    if models_dir not in sys.path:
+        sys.path.insert(0, models_dir)
+    import train_lstm  # `models` 패키지 이름은 dispatch_api/models.py와 겹쳐서 모듈 이름으로 부른다
+
+    monkeypatch.setattr(train_lstm, "SAVED_DIR", tmp_path)
+    monkeypatch.setattr(train_lstm, "TEST_DAYS", 8)
+    monkeypatch.setattr(train_lstm, "CALIB_DAYS", 9)
+    train_lstm.train_one("demand")
+    monkeypatch.setattr(forecast_engine, "SAVED_DIR", tmp_path)
+    end = str(pd.Timestamp(START) + pd.Timedelta(days=N_DAYS - 1))
+    res = forecast_engine.run_forecast("demand", START, end, 48)
+    assert res["model_used"] == "lstm" and len(res["points"]) == 48
+    assert all(p["lower_bound"] <= p["predicted"] <= p["upper_bound"] for p in res["points"])

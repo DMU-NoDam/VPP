@@ -52,13 +52,18 @@ import pandas as pd
 import torch
 from torch import nn
 
+# forecast_api/ 와 models/ 를 import 경로에 추가.
+# models 는 패키지 이름으로 부르지 않는다
+# (dispatch_api 에도 models.py 가 있어서 테스트에서 이름이 겹친다).
 sys.path.append(str(Path(__file__).resolve().parents[1]))
+sys.path.append(str(Path(__file__).resolve().parent))
 
 from data_client import available_range, get_mock_data
 from features import TARGET_COLUMN, build_exog_features, feature_columns
 from forecast_engine import TARGET_MODE
 from metrics import mape, nmae
-from models.train_lgbm import (
+from pi import compute_horizon_margins
+from train_lgbm import (
     CALIB_DAYS,
     CALIB_ORIGIN_STEP_H,
     CONFIDENCE,
@@ -68,7 +73,6 @@ from models.train_lgbm import (
     _passes,
     _report,
 )
-from pi import compute_horizon_margins
 
 SAVED_DIR = Path(__file__).resolve().parent / "saved"
 SAVED_DIR.mkdir(exist_ok=True)
@@ -92,13 +96,20 @@ def lstm_exog_columns(target: str) -> list[str]:
     return base + CYCLIC_COLUMNS
 
 
-def prepare(raw: pd.DataFrame, target: str) -> pd.DataFrame:
-    """raw → 달력·기상 피처 + 주기 인코딩 + 학습 정답 y (MW 또는 이용률)."""
-    df = build_exog_features(raw, target)  # 시간순 정렬 + 달력·기상(수요는 기온·CDD/HDD) 피처
+def add_cyclic_features(df: pd.DataFrame) -> pd.DataFrame:
+    """시각·날짜를 sin/cos로 바꾼 컬럼 추가 (23시와 0시가 가깝다는 걸 모델이 알게)."""
+    df = df.copy()
     df["hour_sin"] = np.sin(2 * np.pi * df["hour"] / 24)
     df["hour_cos"] = np.cos(2 * np.pi * df["hour"] / 24)
     df["doy_sin"] = np.sin(2 * np.pi * df["dayofyear"] / 366)
     df["doy_cos"] = np.cos(2 * np.pi * df["dayofyear"] / 366)
+    return df
+
+
+def prepare(raw: pd.DataFrame, target: str) -> pd.DataFrame:
+    """raw → 달력·기상 피처 + 주기 인코딩 + 학습 정답 y (MW 또는 이용률)."""
+    df = build_exog_features(raw, target)  # 시간순 정렬 + 달력·기상(수요는 기온·CDD/HDD) 피처
+    df = add_cyclic_features(df)
     y = df[TARGET_COLUMN[target]].astype(float)
     if TARGET_MODE[target] == "cf":
         y = y / df["capacity_mw"]

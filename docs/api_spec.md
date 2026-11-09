@@ -41,7 +41,7 @@
 | `end_date` | string (YYYY-MM-DD) | O | 과거 데이터 종료일. 예측은 이 시점(데이터가 끝나는 시점) 다음 시간부터 |
 | `target` | `"demand"` \| `"solar"` \| `"wind"` \| `"all"` | O | `all`이면 세 개를 한 번에 반환 |
 | `horizon_hours` | integer (24~168) | O | 예측 시간 범위 |
-| `model` | `"auto"` \| `"lightgbm"` \| `"lstm"` | X (기본 `auto`) | `auto`는 lightgbm. `lstm`은 서빙 미구현(501) |
+| `model` | `"auto"` \| `"lightgbm"` \| `"lstm"` | X (기본 `auto`) | `auto`는 대상별로 더 정확한 모델 (수요·풍력 LSTM, 태양광 LightGBM). LSTM을 쓸 수 없으면 LightGBM으로 대체 |
 | `pi_method` | `"conformal"` \| `"quantile"` | X (기본 `conformal`) | 현재 conformal만 구현 |
 
 ```json
@@ -56,8 +56,8 @@
   "generated_at": "2026-10-15T10:00:00", "horizon_hours": 24,
   "forecasts": {
     "demand": {
-      "model_used": "lightgbm", "pi_method": "conformal",
-      "metrics": { "mape": 3.22, "nmae": 3.3, "nmae_mean": 3.3, "coverage": 86.2, "interval_width_mean": 8445.0, "n_origins": 13.0, "primary_value": 3.22 },
+      "model_used": "lstm", "pi_method": "conformal",
+      "metrics": { "mape": 2.91, "nmae": 2.9, "nmae_mean": 2.9, "coverage": 90.1, "interval_width_mean": 8751.0, "n_origins": 13.0, "primary_value": 2.91 },
       "points": [
         { "datetime": "2026-10-12T01:00:00", "predicted": 51686.4,
           "lower_bound": 50436.5, "upper_bound": 52936.3 }
@@ -75,13 +75,19 @@
   `nmae_mean`은 참고용(실제값 평균 기준) nMAE.
 - **nMAE 정의**: `nMAE = 평균 절대오차 ÷ 설비용량 × 100`. 과제 문서에 정의가 없어 재생에너지 예측에서 일반적인
   설비용량 기준을 쓴다 (대시보드 `dashboard/logic.py`와 동일). 설비용량은 `trading_by_fuel.capacity_mw`.
+- 서빙 모델 (`model: "auto"`): LightGBM과 LSTM을 같은 시험 구간·같은 입력 정보로 비교해서
+  대상별로 더 정확한 쪽을 쓴다 → 수요 LSTM, 태양광 LightGBM, 풍력 LSTM
+  (`services/forecast_api/models/saved/model_comparison.md`). `model_used`에 실제로 쓴 모델이 나온다.
 - 예측 방식:
-  - `demand`: LightGBM recursive. 피처 = 과거 수요(1h/24h/168h 전, 24h 평균) + 전국 평균 기온·냉방도일(CDD, 24℃)·
+  - `demand`(LSTM): 최근 24시간 시퀀스(1시간 전 수요 + 기온·냉난방도일·달력)로 1시간씩 이어서 예측.
+    LightGBM일 때는 recursive. 피처 = 과거 수요(1h/24h/168h 전, 24h 평균) + 전국 평균 기온·냉방도일(CDD, 24℃)·
     난방도일(HDD, 18℃) + 시각·요일·공휴일(대체공휴일 포함).
   - `solar`: LightGBM direct. 7개 지점 일사량(+이동평균) + 달력으로 이용률(발전량/설비용량)을 예측하고 최신 설비용량을 곱한다.
-  - `wind`: LightGBM direct. 6개 지점 풍속(+이동평균) + 달력으로 발전량(MW)을 예측한다.
+  - `wind`(LSTM): 최근 24시간 시퀀스(1시간 전 발전량 + 6개 지점 풍속·이동평균 + 달력)로 이어서 예측.
+    LightGBM일 때는 direct (풍속 + 달력으로 각 시각의 발전량을 바로 예측).
 - 예측구간(90%, conformal): 시험 구간 직전 4주(calibration) 오차로 margin을 정한다 (`saved/{target}_pi.json`).
-  수요는 "몇 시간 뒤"별 margin(먼 미래일수록 넓음), 태양광/풍력은 "몇 시"별 margin(태양광은 밤에 거의 0).
+  LSTM과 LightGBM recursive(수요)는 "몇 시간 뒤"별 margin(먼 미래일수록 넓음),
+  LightGBM direct(태양광)는 "몇 시"별 margin(밤에 거의 0). LSTM은 `saved/{target}_lstm_eval.json`.
 - 단위: `demand`·`solar`·`wind` 모두 MW (발전량은 `trading_by_fuel.trade_mwh` 1시간 거래량 = 평균 MW).
 - 태양광/풍력 예측은 `trading_by_fuel`의 마지막 시각 다음 시간부터 시작한다 (수요보다 데이터가 짧을 수 있음).
 - 미래 기상(기온·일사량·풍속)은 예보 API가 없어서 해당 시각의 관측값을 예보 대용으로 쓰고(완벽한 예보 가정),
@@ -91,8 +97,8 @@
 
 | HTTP | result_code | result_msg | 상황 |
 |---|---|---|---|
-| 500 | `21` | `MODEL_LOAD_ERROR` | 모델 파일 없음 (`models/train_lgbm.py` 미실행) |
-| 501 | `21` | `MODEL_NOT_IMPLEMENTED` | `model: "lstm"` 요청 (서빙 미구현) |
+| 500 | `21` | `MODEL_LOAD_ERROR` | 모델 파일이 없거나 읽을 수 없음 (`models/train_lgbm.py` / `train_lstm.py` 미실행) |
+| 501 | `21` | `MODEL_NOT_IMPLEMENTED` | `model: "lstm"`을 직접 지정했는데 torch가 설치되지 않음 |
 | 422 | - | - | 요청 검증 실패 (FastAPI 기본 형식) |
 
 ```json
