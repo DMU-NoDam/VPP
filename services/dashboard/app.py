@@ -1359,11 +1359,17 @@ def render_optimization_detail(ctx: Context) -> None:
         + kpi_badge(s, "milp_latency_s", "응답", milp["latency_s"])
         + kpi_badge(s, "vss_pct", "VSS", vss["vss_pct"])
     )
+    limit_s = vss.get("time_limit_s")
+    limit = "제한 없음" if limit_s is None else f"문제당 제한 {limit_s:.0f}초"
+    base = {"forecast_api": "forecast_api 예측", "config": "기본 예측(base_profile)"}.get(
+        vss.get("base_source"), "알 수 없음"
+    )
+    window = f'{vss["start"]:%Y-%m-%d %H시}부터 24시간, ' if vss.get("start") is not None else ""
     cond = (
-        f' 계산 조건: 시나리오 {vss["n_scenarios"]}개 (seed {vss["seed"]}), '
+        f" 계산 조건: {window}기준 {base}, "
+        f'시나리오 {vss["n_scenarios"]}개 (seed {vss["seed"]}), '
         f'예비율 {vss["reserve_ratio"]:.0%}, 풀이 {vss["status"]} {vss["solve_time_s"]:.0f}초 '
-        f'(문제당 제한 {vss["time_limit_s"]:.0f}초). 예비율 10% 에서는 시나리오 폭보다 '
-        "예비율이 커서 VSS 가 0 에 가깝다 (formulation.md 3장 측정표)."
+        f"({limit})."
         if "seed" in vss else ""
     )
     st.caption(

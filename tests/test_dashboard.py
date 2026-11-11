@@ -845,8 +845,9 @@ def test_stochastic_page_waits_then_runs(monkeypatch) -> None:
     assert not at.exception
     url, body, timeout = calls[-1]
     assert url.endswith("/dispatch/stochastic")
-    assert len(body["scenarios"]) == 10 and body["solver"]["time_limit_s"] == 60
-    assert timeout == 60 * 3 + 60
+    # 기본값은 제한 없음: solver 에 null 을 보내고 HTTP 응답도 끝까지 기다린다
+    assert len(body["scenarios"]) == 10 and body["solver"]["time_limit_s"] is None
+    assert timeout is None
     assert any("VSS 목표 달성" in m.value for m in at.markdown)
     assert len(at.session_state.sto_history) == 1
 
@@ -1058,6 +1059,12 @@ def test_parse_stochastic_latest() -> None:
     assert data["seed"] == 1 and data["reserve_ratio"] == 0.1 and data["state"] == "running"
     assert data["computed_at"].hour == 15
     assert logic.parse_stochastic_latest({**latest, "result": None}) is None
+    # 제한 없음(null)과 예측 출처
+    result = {**logic.sample_stochastic(), "start": "2026-09-27T01:00:00+09:00",
+              "base_source": "forecast_api"}
+    data = logic.parse_stochastic_latest({**latest, "time_limit_s": None, "result": result})
+    assert data["time_limit_s"] is None and data["base_source"] == "forecast_api"
+    assert data["start"].hour == 1
 
 
 # ── config/dashboard.yaml ({value, unit, source}) ───────────────────────────
@@ -1086,9 +1093,10 @@ def test_load_settings_rejects_wrong_unit(tmp_path) -> None:
 def test_page_defaults_keep_types(settings) -> None:
     scn = settings.page_defaults["scenarios"]
     assert isinstance(scn["seed"], int) and isinstance(scn["n_samples"], int)
-    assert isinstance(scn["demand_sigma_pct"], float)
+    assert isinstance(scn["sigma_scale"], float)
     sto = settings.page_defaults["stochastic_test"]
-    assert isinstance(sto["time_limit_s"], int) and sto["compute_ws"] is False
+    # null(제한 없음)은 None 으로 그대로 둔다
+    assert sto["time_limit_s"] is None and sto["compute_ws"] is False
 
 
 def test_crisis_ok_column_follows_target(settings) -> None:

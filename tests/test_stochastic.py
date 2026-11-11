@@ -73,6 +73,12 @@ SCENARIOS = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def _no_forecast_api(monkeypatch):
+    """forecast_api 가 없는 환경: 닫힌 포트로 바로 실패시켜 base_profile 폴백을 쓴다."""
+    monkeypatch.setenv("FORECAST_URL", "http://127.0.0.1:9")
+
+
 @pytest.fixture(scope="module")
 def params():
     return PARAMS
@@ -408,3 +414,42 @@ def test_api_fills_empty_fields_from_config(result, monkeypatch) -> None:
     assert seen["reserve_ratio"] == d.reserve_ratio
     assert seen["shed_penalty"] == d.shed_penalty_won_per_mwh
     assert (seen["opts"].time_limit_s, seen["opts"].mip_gap) == (d.time_limit_s, d.mip_gap)
+
+
+def test_repo_config_has_no_time_limit() -> None:
+    assert stochastic.load_request_defaults().time_limit_s is None
+    assert _load("precompute").load_config().time_limit_s is None
+
+
+def test_solve_without_time_limit(params) -> None:
+    res = stochastic.run(FLEET, SCENARIOS, params, START, compute_ws=False,
+                         opts=SolverOptions(time_limit_s=None, mip_gap=1e-6), **RUN_KW)
+    assert res.status == "optimal" and res.vss.vss_won >= -1e-6 * res.vss.eev_won
+
+
+def test_api_uses_forecast_window_when_base_empty(result, monkeypatch) -> None:
+    from shared.schemas import ScenarioProfile
+
+    main = _load("main")
+    start = datetime.fromisoformat("2026-09-27T01:00:00+09:00")
+    base = ScenarioProfile(demand_mw=[800.0] * 6, solar_mw=[0.0] * 6, wind_mw=[50.0] * 6,
+                           start=start, source="forecast_api")
+    seen = {}
+
+    def run(*a, **k):
+        seen.update(k)
+        return result
+
+    monkeypatch.setattr(main, "resolve_base", lambda: base)
+    monkeypatch.setattr(main, "load_units", lambda ids=None: FLEET)
+    monkeypatch.setattr(main.stochastic, "run", run)
+    client = TestClient(main.app)
+    r = client.post("/api/v1/dispatch/stochastic", json={"start": "2026-11-02T00:00:00+09:00"})
+    assert r.status_code == 200, r.text
+    assert seen["start"] == start  # 예측 구간이 계획 시작 시각이 된다
+    assert r.json()["base_source"] == "forecast_api"
+
+    body = {"scenarios": [s.model_dump() for s in SCENARIOS]}
+    r = client.post("/api/v1/dispatch/stochastic", json=body)
+    assert r.status_code == 200 and r.json()["base_source"] == "request"
+    assert seen["start"].hour == 0 and seen["start"].utcoffset().total_seconds() == 9 * 3600

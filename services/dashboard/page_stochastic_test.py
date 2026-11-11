@@ -63,12 +63,15 @@ COST_PARTS = {
 
 
 def request_timeout(
-    time_limit_s: float, n_scenarios: int, compute_ws: bool, margin_s: float | None = None
-) -> float:
+    time_limit_s: float | None, n_scenarios: int, compute_ws: bool, margin_s: float | None = None
+) -> float | None:
     """HTTP 타임아웃. RP·EV·EEV 3번 + (WS 면 시나리오 수만큼) 풀고, 모델 생성 여유를 더한다.
 
-    margin_s 를 안 주면 config 의 api.stochastic_timeout_margin.
+    margin_s 를 안 주면 config 의 api.stochastic_timeout_margin. 제한 없음(None)이면
+    응답을 끝까지 기다린다 (None).
     """
+    if time_limit_s is None:
+        return None
     margin_s = CFG.api.stochastic_timeout_margin_s if margin_s is None else margin_s
     solves = SOLVES_PER_CALL + (n_scenarios if compute_ws else 0)
     return time_limit_s * solves + margin_s
@@ -164,7 +167,7 @@ def history_row(params: dict, summary: dict) -> dict:
     return {
         "seed": params["seed"],
         "시나리오": params["n_scenarios"],
-        "제한(초)": params["time_limit_s"],
+        "제한(초)": "없음" if params["time_limit_s"] is None else params["time_limit_s"],
         "gap(%)": params["mip_gap_pct"],
         "상태": summary["status"],
         "RP(억원)": summary["rp_won"] / logic.WON_PER_EOK,
@@ -181,7 +184,7 @@ def history_row(params: dict, summary: dict) -> dict:
     ttl=CFG.api.ttl_stochastic_s,
     show_spinner="Two-Stage 최적화 실행 중… (제한 시간만큼 걸릴 수 있다)",
 )
-def fetch_stochastic(base_url: str, payload_json: str, timeout: float) -> ApiResult:
+def fetch_stochastic(base_url: str, payload_json: str, timeout: float | None) -> ApiResult:
     """POST /dispatch/stochastic. 같은 조건이면 캐시를 쓴다."""
     return logic.call_api(
         "POST", f"{base_url}{API_PREFIX}/dispatch/stochastic",
@@ -190,14 +193,18 @@ def fetch_stochastic(base_url: str, payload_json: str, timeout: float) -> ApiRes
 
 
 def stochastic_payload(params: dict, scenario_set: dict) -> dict:
-    """생성한 시나리오 묶음을 그대로 넘기는 StochasticRequest."""
+    """생성한 시나리오 묶음을 그대로 넘기는 StochasticRequest.
+
+    시작 시각은 시나리오 기준 예측의 시작 시각 (forecast_api 예측이면 그 구간), 없으면 오늘 0시.
+    """
+    limit = params["time_limit_s"]
     return {
-        "start": f"{date.today().isoformat()}T00:00:00+09:00",
+        "start": scenario_set["base"].get("start") or f"{date.today().isoformat()}T00:00:00+09:00",
         "horizon_h": scenario_set["horizon_h"],
         "scenarios": [{k: sc[k] for k in SCENARIO_KEYS} for sc in scenario_set["scenarios"]],
         "compute_ws": bool(params["compute_ws"]),
         "solver": {
-            "time_limit_s": float(params["time_limit_s"]),
+            "time_limit_s": None if limit is None else float(limit),
             "mip_gap": float(params["mip_gap_pct"]) / 100,
         },
     }
@@ -215,8 +222,9 @@ def render_controls() -> dict | None:
             seed = st.number_input("시나리오 seed", 0, 9999, int(current["seed"]))
             n_scenarios = st.slider("시나리오 수", 10, 20, int(current["n_scenarios"]))
             time_limit = st.select_slider(
-                "문제당 제한 시간 (초)", [10, 30, 60, 120], value=int(current["time_limit_s"]),
-                help="RP·EV·EEV 각각에 적용된다. API 기본값은 10초",
+                "문제당 제한 시간 (초)", [10, 30, 60, 120, None], value=current["time_limit_s"],
+                format_func=lambda v: "없음" if v is None else str(v),
+                help="RP·EV·EEV 각각에 적용된다. API 기본값은 제한 없음 (풀이 1분 안팎)",
             )
             gap = st.select_slider(
                 "MIP gap (%)", [0.1, 0.5, 1.0], value=float(current["mip_gap_pct"]),

@@ -65,19 +65,17 @@ page_defaults:
     n_scenarios: {value: 10, unit: count, source: stochastic.yaml scenario_generator.n_scenarios 와 같게}
     n_samples: {value: 300, unit: count, source: stochastic.yaml scenario_generator.n_samples 와 같게}
     seed: {value: 42, unit: "-", source: stochastic.yaml scenario_generator.seed 와 같게}
-    demand_sigma_pct: {value: 2.5, unit: "%", source: stochastic.yaml scenario_generator.demand_sigma 와 같게}
+    sigma_scale: {value: 1.0, unit: "-", source: stochastic.yaml scenario_generator.sigma_scale 와 같게}
     demand_ar: {value: 0.9, unit: "-", source: stochastic.yaml scenario_generator.demand_ar 와 같게}
-    solar_cloud_pct: {value: 10.0, unit: "%", source: stochastic.yaml scenario_generator.solar_cloud 와 같게}
-    wind_sigma_pct: {value: 25.0, unit: "%", source: stochastic.yaml scenario_generator.wind_sigma 와 같게}
   stochastic_test:
     seed: {value: 42, unit: "-", source: stochastic.yaml scenario_generator.seed 와 같게}
     n_scenarios: {value: 10, unit: count, source: 과제 원문 L87 "시나리오 최소 10개"}
     time_limit_s:
-      value: 60
+      value: null
       unit: s
       source: >-
-        [가정] API 기본(10초)보다 길게. 25기 x 24h x 10 시나리오의 RP 는 PC 에 따라 10초를 넘기고,
-        덜 풀리면 VSS 가 음수로 나온다 (docs/api_spec.md 경고)
+        제한 없음 (null). stochastic.yaml request_defaults.time_limit 과 같게.
+        시간 제한에 걸려 덜 풀리면 VSS 가 음수로 나온다 (docs/api_spec.md 경고)
     mip_gap_pct: {value: 0.5, unit: "%", source: "[가정] team_plan.md \"MIP gap 0.5% 정도\""}
     compute_ws: false
 

@@ -91,7 +91,7 @@ class RequestDefaults:
 
     reserve_ratio: float
     shed_penalty_won_per_mwh: float
-    time_limit_s: float
+    time_limit_s: float | None  # None 이면 제한 없음
     mip_gap: float
 
 
@@ -108,10 +108,11 @@ def load_params(path: Path | None = None) -> StochasticParams:
 
 def load_request_defaults(path: Path | None = None) -> RequestDefaults:
     raw = read_stochastic_yaml(path)["request_defaults"]
+    time_limit = cfg_value(raw["time_limit"], "s")
     return RequestDefaults(
         reserve_ratio=float(cfg_value(raw["reserve_ratio"], "ratio")),
         shed_penalty_won_per_mwh=float(cfg_value(raw["shed_penalty"], "KRW/MWh")),
-        time_limit_s=float(cfg_value(raw["time_limit"], "s")),
+        time_limit_s=None if time_limit is None else float(time_limit),
         mip_gap=float(cfg_value(raw["mip_gap"], "ratio")),
     )
 
@@ -283,12 +284,14 @@ def solve(m: pyo.ConcreteModel, opts: SolverOptions) -> Solved:
     """HiGHS 로 풀고 변수 값을 배열로 꺼낸다."""
     with _SOLVE_LOCK:
         t0 = time.perf_counter()
+        # time_limit_s 가 None 이면 시간 제한 없이 gap 까지 푼다
+        limit = {} if opts.time_limit_s is None else {"time_limit": opts.time_limit_s}
         res = SolverFactory("highs").solve(
             m,
-            time_limit=opts.time_limit_s,
             rel_gap=opts.mip_gap,
             load_solutions=False,
             raise_exception_on_nonoptimal_result=False,
+            **limit,
         )
         elapsed = time.perf_counter() - t0
 

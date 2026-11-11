@@ -1,6 +1,7 @@
 """시나리오 생성기 페이지 — dispatch_api POST /api/v1/scenarios 결과를 확인한다.
 
-생성 조건을 바꿔 다시 뽑아 보고, 시나리오별 경로·확률·라벨과 검증 결과를 본다.
+기준 예측과 오차 크기는 forecast_api 의 예측·90% 구간에서 온다 (dispatch_api 가 받는다).
+여기서는 σ 배율·시간 상관만 바꿔 다시 뽑아 보고, 시나리오별 경로·확률·라벨과 검증 결과를 본다.
 여기서 만든 시나리오 묶음이 Two-Stage 최적화의 입력이 된다 (formulation.md 7~8절).
 """
 
@@ -36,7 +37,7 @@ DEFAULTS: dict[str, float] = dict(CFG.page_defaults["scenarios"])
 VARIABLES = {
     "순부하": ("net", "수요 − 태양광 − 풍력. 발전기가 실제로 메워야 하는 양"),
     "수요": ("demand_mw", "전력 수요"),
-    "태양광": ("solar_mw", "태양광 출력. 흐린 날 하방으로 크게 빠진다"),
+    "태양광": ("solar_mw", "태양광 출력"),
     "풍력": ("wind_mw", "풍력 출력"),
 }
 
@@ -64,6 +65,18 @@ def scenario_frame(data: dict) -> pd.DataFrame:
         }
         for sc in data["scenarios"]
     ])
+
+
+def base_caption(base: dict) -> str:
+    """기준 예측이 어디서 왔고 오차 크기를 무엇으로 정했는지."""
+    if base.get("source") == "forecast_api":
+        start = pd.Timestamp(base["start"])
+        issued = pd.Timestamp(base["issued_at"]) if base.get("issued_at") else None
+        when = f" · {issued:%m-%d %H시} 데이터로 예측" if issued is not None else ""
+        return (f"기준 예측: forecast_api, {start:%Y-%m-%d} 계획일{when}. "
+                "오차 σ = 90% 예측구간 반폭 / 1.645 (시간별)")
+    return ("기준 예측: 기본값 (config 의 base_profile, forecast_api 를 쓸 수 없음). "
+            "오차 σ = config 의 fallback_sigma")
 
 
 def series(sc: dict, key: str) -> list[float]:
@@ -98,35 +111,27 @@ def render_controls() -> dict:
         with st.form("scenario_form", border=False):
             n_scenarios = st.slider(
                 "시나리오 수", 10, 30, int(current["n_scenarios"]),
-                help="요구사항: 10개 이상. 상·하방 꼬리 1개씩 + 나머지 군집 대표",
+                help="요구사항: 10개 이상. 표본에서 forward selection 으로 고른다",
             )
             n_samples = st.select_slider(
                 "축약 전 표본 수", [100, 200, 300, 500, 1000], value=int(current["n_samples"])
             )
             seed = st.number_input("seed (같으면 같은 결과)", 0, 9999, int(current["seed"]))
             st.markdown("**오차 크기**")
-            demand_sigma = st.slider(
-                "수요 오차 σ (%)", 0.5, 6.0, float(current["demand_sigma_pct"]), 0.5,
-                help="24h ahead MAPE 4% 기준이면 σ 2~3%가 적당",
+            sigma_scale = st.slider(
+                "σ 배율", 0.5, 2.0, float(current["sigma_scale"]), 0.1,
+                help="1 = forecast_api 90% 예측구간 그대로 (σ = 구간 반폭 / 1.645). 민감도 분석용",
             )
             demand_ar = st.slider(
                 "수요 오차 시간상관", 0.0, 0.99, float(current["demand_ar"]), 0.01,
                 help="클수록 하루 내내 같은 방향으로 빗나간다",
-            )
-            solar_cloud = st.slider(
-                "태양광 흐림 강도 (%)", 0.0, 40.0, float(current["solar_cloud_pct"]), 2.5,
-                help="하루 공통 흐림 계수의 평균 감소폭. 클수록 흐린 날이 자주·깊게",
-            )
-            wind_sigma = st.slider(
-                "풍력 오차 σ (%)", 0.0, 60.0, float(current["wind_sigma_pct"]), 5.0
             )
             submitted = st.form_submit_button("시나리오 생성", type="primary", width="stretch")
 
         if submitted:
             st.session_state.scn_params = {
                 "n_scenarios": n_scenarios, "n_samples": n_samples, "seed": int(seed),
-                "demand_sigma_pct": demand_sigma, "demand_ar": demand_ar,
-                "solar_cloud_pct": solar_cloud, "wind_sigma_pct": wind_sigma,
+                "sigma_scale": sigma_scale, "demand_ar": demand_ar,
             }
         if st.session_state.scn_params != DEFAULTS and st.button("기본 조건으로", width="stretch"):
             st.session_state.scn_params = dict(DEFAULTS)
@@ -141,6 +146,7 @@ def render_summary(data: dict, res: ApiResult) -> None:
     expected_peak = float((frame["확률"] * frame["피크 순부하(MW)"]).sum())
 
     panel_title("생성 결과", source_tag(True, res.latency_s))
+    st.caption(base_caption(data["base"]))
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("시나리오", f"{len(frame)}개", f"표본 {data['n_samples']}개에서 축약",
               delta_color="off")
@@ -228,6 +234,13 @@ def render_fan_chart(data: dict, selected: str) -> None:
         )
     fig.add_scatter(x=hours, y=series(data["base"], key), mode="lines", name="기준 예측",
                     line=dict(color=C_BRIGHT, width=2, dash="dash"))
+    margin = data["base"].get(key.replace("_mw", "_margin_mw")) if key != "net" else None
+    if margin:
+        pred = data["base"][key]
+        for sign, name in ((1, "예측 90% 구간"), (-1, None)):
+            fig.add_scatter(x=hours, y=[p + sign * m for p, m in zip(pred, margin)],
+                            mode="lines", name=name, showlegend=name is not None,
+                            line=dict(color=C_BRIGHT, width=1, dash="dot"), hoverinfo="skip")
     fig.update_layout(legend=dict(orientation="h", y=-0.18), xaxis_title="시간", yaxis_title="MW")
     st.plotly_chart(style_dark(fig, height=380), width="stretch", key="c_fan")
     shown = f"{len(visible)}/{len(data['scenarios'])}개 표시"
@@ -254,7 +267,7 @@ def render_table(data: dict) -> str:
     )
     rows = event.selection.rows if event and event.selection else []
     st.caption("편차 = 기준 예측 대비 일간 에너지 차이. 라벨 기준: 수요 ±1.5%, "
-               "태양광 −15% 흐림 / +5% 맑음, 풍력 ±20%.")
+               "태양광 ±15% (흐림 / 맑음), 풍력 ±20%.")
     return frame.iloc[rows[0]]["ID"] if rows else frame.iloc[0]["ID"]
 
 
@@ -324,8 +337,8 @@ def render() -> None:
     st.markdown(
         '<div class="vpp-topbar">'
         '<div class="vpp-title"><span class="vpp-logo">⚡</span>불확실성 시나리오 생성기</div>'
-        '<div class="vpp-subtitle">예측 오차 표본 → 꼬리 보존 축약 → 확률 시나리오 '
-        "(Two-Stage 최적화 입력)</div></div>",
+        '<div class="vpp-subtitle">forecast_api 90% 예측구간 → 오차 표본 → forward selection 축약 '
+        "→ 확률 시나리오 (Two-Stage 최적화 입력)</div></div>",
         unsafe_allow_html=True,
     )
 

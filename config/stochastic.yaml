@@ -51,11 +51,12 @@ request_defaults:
       [미정] 부하차단 페널티 K (VoLL 대용, formulation.md 3장).
       에너지경제연구원 기본연구 24-21 범위로 민감도 분석 예정
   time_limit:
-    value: 10
+    value: null
     unit: s
     source: >-
-      [가정] 문제(RP·EV·EEV)당 시간 제한. 과제 원문의 10초 기준(L281)은 MILP API 에만 해당하고
-      Stochastic 응답시간 기준은 원문에 없다. VSS 판정에는 부족하다 (docs/api_spec.md 경고 참고)
+      제한 없음 (null). 과제 원문의 10초 기준(L281)은 MILP API 에만 해당하고
+      Stochastic 응답시간 기준은 원문에 없다. 시간 제한에 걸리면 해가 나빠져 VSS 를 믿을 수 없다
+      (2026-11-02 측정: 25기 x 시나리오 10개, RP·EV·EEV 합계 55~64초)
   mip_gap:
     value: 0.005
     unit: ratio
@@ -88,9 +89,9 @@ precompute:
     unit: KRW/MWh
     source: "[미정] 부하차단 페널티 K (formulation.md 3장)"
   time_limit:
-    value: 60
+    value: null
     unit: s
-    source: formulation.md 3장 측정표와 같은 풀이 조건
+    source: 제한 없음 (null). request_defaults.time_limit 과 같은 이유
   mip_gap:
     value: 0.001
     unit: ratio
@@ -101,7 +102,10 @@ precompute:
     source: "[가정] 하루 한 번 갱신"
 
 # ── 시나리오 생성기 (scenarios.py, POST /scenarios) ───────────────────────────
-# 오차 모델은 파라메트릭이다. 1년치 예측 잔차가 쌓이면 잔차 부트스트랩으로 교체한다.
+# forecast_api 의 예측과 90% 예측구간에서 출발한다 (formulation.md 7절).
+#   σ_t = (구간 반폭 m_t / z) x sigma_scale,  z = 정규분포 양측 pi_confidence 분위 (90% → 1.645)
+#   표본 = 예측 + σ_t x (단위분산 AR(1)),  축약 = fast forward selection
+# 기준 예측에 구간이 없으면 (base_profile 폴백) fallback_sigma (%) x 예측값을 σ 로 쓴다.
 
 scenario_generator:
   # POST /scenarios, /dispatch/stochastic 요청에서 값을 비우면 쓰는 값
@@ -117,22 +121,24 @@ scenario_generator:
     value: 42
     unit: "-"
     source: "[가정] 재현용 고정 seed (미리 계산의 seed 1 과 다르다)"
-  demand_sigma:
-    value: 2.5
-    unit: "%"
-    source: "[미정] 수요 예측 오차 표준편차. 예측 잔차가 쌓이면 잔차로 교체"
+  sigma_scale:
+    value: 1.0
+    unit: "-"
+    source: "[가정] σ 배율. 1 = forecast_api 90% 구간 그대로. 민감도 분석용"
   demand_ar:
     value: 0.9
     unit: "-"
-    source: "[미정] 수요 오차의 시간 상관 AR(1) 계수"
-  solar_cloud:
-    value: 10.0
-    unit: "%"
-    source: "[미정] 하루 흐림 계수의 평균 감소폭 (클수록 하방 꼬리가 두꺼움)"
-  wind_sigma:
-    value: 25.0
-    unit: "%"
-    source: "[미정] 풍력 로그정규 오차"
+    source: >-
+      [미정] 수요 오차의 시간 상관 AR(1) 계수 (이전 생성기 값 승계). forecast_api 응답에는 시점 간
+      상관이 없다. B 의 백테스트 잔차 시계열로 추정해 교체한다
+  solar_ar:
+    value: 0.7
+    unit: "-"
+    source: "[미정] 태양광 오차의 시간 상관 AR(1) 계수 (이전 생성기 solar_hourly_ar 승계). 교체 방법은 demand_ar 와 같다"
+  wind_ar:
+    value: 0.85
+    unit: "-"
+    source: "[미정] 풍력 오차의 시간 상관 AR(1) 계수 (이전 생성기 값 승계). 교체 방법은 demand_ar 와 같다"
   solar_capacity:
     value: 12000.0
     unit: MW
@@ -141,38 +147,28 @@ scenario_generator:
     value: 8000.0
     unit: MW
     source: >-
-      [미정] 풍력+기타 재생 출력 상한(클립). 원문 L223 예시표의 풍력 3,500 MW 는 풍력 단독인데,
-      base_profile.wind_mw 는 KPX renewable(풍력+기타 재생, 실측 최대 5.1GW)이라 3,500 으로 자르면
-      기준 예측이 24시간 중 18시간 잘리고 기대 일간 풍력이 18% 줄어든다 (2026-10-27 측정).
-      EPSIS 의 풍력+기타 재생 설비용량으로 교체 필요 (A 에게 자료 요청)
+      [미정] 풍력 출력 상한(클립). base_profile.wind_mw 가 KPX renewable(풍력+기타 재생, 실측 최대 5.1GW)
+      이라 그에 맞춘 값이다. forecast_api 의 wind 는 풍력 단독(설비 약 2.8GW)이라 이 상한에 닿지 않는다.
+      EPSIS 설비용량으로 교체 필요 (A 에게 자료 요청)
 
-  # 오차 모델 내부 계수
-  solar_hourly_ar:
-    value: 0.7
-    unit: "-"
-    source: "[미정] 태양광 시간 노이즈 AR(1) 계수"
-  solar_hourly_sigma:
-    value: 0.08
+  # σ 환산
+  pi_confidence:
+    value: 0.90
     unit: ratio
-    source: "[미정] 태양광 시간 노이즈 표준편차"
-  wind_ar:
-    value: 0.85
-    unit: "-"
-    source: "[미정] 풍력 오차 AR(1) 계수"
-  cloud_shape:
-    value: 0.8
-    unit: "-"
-    source: "[미정] 흐림 계수 감마분포 형상. 작을수록 가끔 크게 흐린 날이 나온다"
-
-  # 축약 (k-medoids + 꼬리 보존)
-  kmedoids_max_iter:
-    value: 50
-    unit: count
-    source: "[가정] k-medoids 반복 상한"
-  tail:
-    value: 10
+    source: >-
+      forecast_api 예측구간의 신뢰수준 (services/forecast_api/models/saved/*_pi.json "confidence": 0.9, B).
+      conformal 구간 반폭 = |오차| 의 90% 분위라, 오차가 평균 0 정규분포면 반폭 = 1.645σ
+  fallback_sigma:
+    value:
+      demand: 2.5
+      solar: 10.0
+      wind: 25.0
     unit: "%"
-    source: "[가정] 상방(피크 상위)·하방(최저 순부하 하위) 꼬리 군집 크기. 표본 대비 비율"
+    source: >-
+      [미정] 기준 예측에 구간이 없을 때(base_profile 폴백)만 쓰는 σ (예측값 대비).
+      이전 생성기의 수요 σ·태양광 흐림·풍력 σ 값을 그대로 옮겼다
+
+  # 축약 (fast forward selection)
   band_percentiles:
     value: [5, 50, 95]
     unit: percentile
@@ -183,20 +179,16 @@ scenario_generator:
     value: 1.5
     unit: "%"
     source: "[가정] |수요 편차| 이상이면 고수요/저수요"
-  label_solar_cloudy:
-    value: -15
+  label_solar:
+    value: 15
     unit: "%"
-    source: "[가정] 태양광 편차 이하이면 흐림"
-  label_solar_sunny:
-    value: 5
-    unit: "%"
-    source: "[가정] 태양광 편차 이상이면 맑음"
+    source: "[가정] 태양광 편차가 -이 값 이하면 흐림, +이 값 이상이면 맑음 (오차가 대칭이라 대칭 기준)"
   label_wind:
     value: 20
     unit: "%"
     source: "[가정] |풍력 편차| 이상이면 강풍/약풍"
 
-  # 생성 결과 검사 (formulation.md 7절 검증 기준)
+  # 생성 결과 검사 (formulation.md 7.6)
   check_min_scenarios:
     value: 10
     unit: count
@@ -209,6 +201,14 @@ scenario_generator:
     value: 1.0
     unit: "%"
     source: "[가정] 표본 평균 수요 vs 기준 예측 허용 편향"
+  check_pi_coverage_tol:
+    value: 3.0
+    unit: "%p"
+    source: >-
+      [가정] 표본 수요가 forecast_api 90% 구간 안에 드는 비율의 허용 오차.
+      목표 비율은 sigma_scale 에 맞춰 2Φ(z/scale) - 1 (scale 1 이면 90%).
+      시간 상관(AR 0.9) 때문에 표본 300개의 적중률도 1%p 안팎 흔들린다 — 2%p 로는 seed 60개 중 2개가
+      실패했다 (2026-11-03 측정)
   check_net_energy_keep:
     value: 1.0
     unit: "%"
@@ -216,13 +216,15 @@ scenario_generator:
   check_tail_upper:
     value: 90
     unit: percentile
-    source: "[가정] 상방 꼬리 보존: 최대 피크 ≥ 표본 피크의 이 분위"
+    source: >-
+      [가정] 상방 꼬리 보존: 최대 피크 ≥ 표본 피크의 이 분위. forward selection 은 꼬리를 일부러
+      남기지 않으므로 실패할 수 있다 — 결과를 그대로 보고한다
   check_tail_lower:
     value: 10
     unit: percentile
-    source: "[가정] 하방 꼬리 보존: 최저 순부하 ≤ 표본 최저의 이 분위"
+    source: "[가정] 하방 꼬리 보존: 최저 순부하 ≤ 표본 최저의 이 분위. check_tail_upper 와 같은 주의"
 
-  # forecast_api 연동 전 기본 예측. 요청의 base 가 null 이면 쓴다.
+  # 폴백 기준 예측. 요청의 base 가 null 이고 forecast_api 도 실패하면 쓴다 (아래 forecast 블록).
   base_profile:
     value:
       demand_mw: [
@@ -242,7 +244,37 @@ scenario_generator:
       2026-09-21(월) 실측의 시간 평균. 수요 = data/csv/power_demand.csv,
       태양광·풍력 = generation_by_fuel 의 solar·renewable (KPX 분류상 풍력+기타 재생).
       generation_by_fuel.csv 는 A 가 삭제했고(커밋 6263828) trading_by_fuel 은 2026-09-18 까지라
-      다시 만들 수 없다. 기준일·출처 교체는 forecast_api 연동 때 정한다.
+      다시 만들 수 없다. forecast_api 를 쓸 수 없을 때만 쓴다.
+
+# ── 기준 예측 조회 (forecast_client.py) ──────────────────────────────────────
+# 시나리오 생성의 기준 예측(base)을 forecast_api POST /forecast 로 받는다.
+# 실패하면 위 scenario_generator.base_profile 로 폴백한다.
+# Day-ahead 조건: 계획일 D 의 전날 (24 - lead)시까지의 데이터로 D 0시~23시를 예측한다
+# (lead ~ lead + horizon - 1 시간 뒤 예측). 세 target 이 모두 그 시각까지 데이터가 있는
+# 가장 최근 D 를 고른다.
+
+forecast:
+  history:
+    value: 365
+    unit: day
+    source: 과제 원문 L63 "최소 1년 이상" 데이터로 예측 (dashboard.yaml forecast_request.history 와 같다)
+  horizon:
+    value: 24
+    unit: h
+    source: >-
+      계획 길이. 과제 원문 "향후 24~168시간" 의 하한이자 settings.yaml horizon 과 같은 하루.
+      forecast_api 가 받는 최솟값이 24 다
+  lead:
+    value: 13
+    unit: h
+    source: >-
+      [가정] 예측 시점(데이터 마지막 시각)부터 계획일 0시까지의 시간. 전날 11시에 Day-ahead 계획을
+      정한다고 보고 13~36시간 뒤 예측을 쓴다. 과제 원문 "1단계(Day-ahead)". 한국 하루전 발전계획의
+      실제 확정 시각은 확인 필요 (전력시장운영규칙)
+  timeout:
+    value: 30
+    unit: s
+    source: "[가정] forecast_api 응답 대기 (2026-11-02 로컬 측정 0.4~1.8초). 넘으면 base_profile 로 폴백"
 
 # ── 연료비 조회 (units.py) ───────────────────────────────────────────────────
 # collector REST 로 받고, 실패하면 data/csv/fuel_cost.csv 스냅샷으로 폴백한다.

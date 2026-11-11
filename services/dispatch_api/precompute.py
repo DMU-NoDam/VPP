@@ -1,11 +1,12 @@
 """대시보드 VSS 타일용 Two-Stage 미리 계산.
 
-대시보드는 응답을 12초만 기다리는데, RP·EV·EEV 를 시간 제한에 걸리지 않게 풀면 1분 넘게
+대시보드는 응답을 12초만 기다리는데, RP·EV·EEV 를 시간 제한 없이 풀면 1분 넘게
 걸린다. 그래서 서버가 켜질 때와 refresh_hours 마다 백그라운드 스레드가 한 번 풀어 두고,
 GET /api/v1/dispatch/stochastic/latest 가 마지막 결과를 돌려준다.
 
-조건은 config/stochastic.yaml 의 precompute 블록이다. 환경변수 PRECOMPUTE_ENABLED=false 면
-스레드를 띄우지 않는다 (테스트·로컬 디버깅용).
+조건은 config/stochastic.yaml 의 precompute 블록이다. 기준 예측은 forecast_api 에서 받고
+(실패하면 base_profile), 계획 시작 시각은 예측 구간의 시작 시각이다.
+환경변수 PRECOMPUTE_ENABLED=false 면 스레드를 띄우지 않는다 (테스트·로컬 디버깅용).
 """
 
 from __future__ import annotations
@@ -14,8 +15,10 @@ import logging
 import os
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
+
+from forecast_client import KST, resolve_base
 
 import stochastic
 from scenarios import generate
@@ -23,9 +26,13 @@ from shared.schemas import ScenarioRequest, SolverOptions, StochasticLatest, Sto
 from units import cfg_value, load_units, read_stochastic_yaml
 
 logger = logging.getLogger(__name__)
-# 한국 표준시. 서머타임이 없어 고정 오프셋으로 충분하다 (컨테이너에 tzdata 가 없어도 동작)
-KST = timezone(timedelta(hours=9))
 SECONDS_PER_HOUR = 3600
+
+
+def today_start(now: datetime | None = None) -> datetime:
+    """오늘 0시 (KST)."""
+    now = now or datetime.now(KST)
+    return now.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
 @dataclass(frozen=True)
@@ -37,7 +44,7 @@ class PrecomputeConfig:
     n_scenarios: int
     reserve_ratio: float
     shed_penalty_won_per_mwh: float
-    time_limit_s: float
+    time_limit_s: float | None  # None 이면 제한 없음
     mip_gap: float
     refresh_hours: float
 
@@ -46,13 +53,14 @@ def load_config(path: Path | None = None) -> PrecomputeConfig:
     """precompute 블록을 읽는다. 환경변수 PRECOMPUTE_ENABLED=false 면 꺼 둔다."""
     raw = read_stochastic_yaml(path)["precompute"]
     enabled = bool(raw["enabled"]) and os.getenv("PRECOMPUTE_ENABLED", "").lower() != "false"
+    time_limit = cfg_value(raw["time_limit"], "s")
     return PrecomputeConfig(
         enabled=enabled,
         seed=int(cfg_value(raw["seed"], "-")),
         n_scenarios=int(cfg_value(raw["n_scenarios"], "count")),
         reserve_ratio=float(cfg_value(raw["reserve_ratio"], "ratio")),
         shed_penalty_won_per_mwh=float(cfg_value(raw["shed_penalty"], "KRW/MWh")),
-        time_limit_s=float(cfg_value(raw["time_limit"], "s")),
+        time_limit_s=None if time_limit is None else float(time_limit),
         mip_gap=float(cfg_value(raw["mip_gap"], "ratio")),
         refresh_hours=float(cfg_value(raw["refresh_interval"], "h")),
     )
@@ -98,16 +106,19 @@ def compute_once(store: LatestStore, now: datetime | None = None) -> None:
     """설정대로 시나리오를 만들고 RP·EV·EEV 를 풀어 store 에 넣는다. 실패는 store 에 기록."""
     cfg = store.cfg
     now = now or datetime.now(KST)
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     store.set_running()
     try:
-        scenarios = generate(ScenarioRequest(n_scenarios=cfg.n_scenarios, seed=cfg.seed)).scenarios
+        base = resolve_base(now)
+        start = base.start or today_start(now)
+        scenarios = generate(
+            ScenarioRequest(n_scenarios=cfg.n_scenarios, seed=cfg.seed, base=base)
+        ).scenarios
         result = stochastic.run(
             load_units(), scenarios, stochastic.load_params(), start=start,
             reserve_ratio=cfg.reserve_ratio, shed_penalty=cfg.shed_penalty_won_per_mwh,
             opts=SolverOptions(time_limit_s=cfg.time_limit_s, mip_gap=cfg.mip_gap),
             compute_ws=False,
-        )
+        ).model_copy(update={"base_source": base.source})
     except Exception as e:  # 스레드가 죽지 않게 모든 실패를 상태로 남긴다
         logger.exception("VSS 미리 계산 실패")
         store.set_error(f"{type(e).__name__}: {e}")

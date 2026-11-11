@@ -259,28 +259,68 @@ forecast_api 연동 전까지는 `net_demand_mw` 를 직접 주는 경로를 쓴
 
 ```json
 { "n_scenarios": 10, "n_samples": 300, "seed": 42,
-  "demand_sigma_pct": 2.5, "demand_ar": 0.9, "solar_cloud_pct": 10.0, "wind_sigma_pct": 25.0,
+  "sigma_scale": 1.0, "demand_ar": 0.9, "solar_ar": 0.7, "wind_ar": 0.85,
+  "solar_capacity_mw": 12000.0, "wind_capacity_mw": 8000.0,
   "base": null }
 ```
 
-`base` 를 비우면 기본 하루 예측을 쓴다 (forecast_api 연동 전). `n_scenarios` 1~50, `n_samples` 50~2000, 범위 밖이면 422.
+| 필드 | 설명 |
+|---|---|
+| `sigma_scale` | σ 배율 (> 0). 1 이면 σ = forecast_api 90% 구간 반폭 / 1.645 그대로. 민감도 분석용 |
+| `demand_ar`·`solar_ar`·`wind_ar` | 오차의 시간 상관 AR(1) 계수 (0 이상 1 미만, 범위 밖이면 422) |
+| `base` | 기준 예측 (`ScenarioProfile`). 비우면 아래 "기준 예측" |
+
+`n_scenarios` 1~50, `n_samples` 50~2000, 범위 밖이면 422.
+
+**기준 예측 (forecast_api 연동).** `base` 를 비우면 dispatch_api 가 forecast_api `POST /forecast` 로
+수요·태양광·풍력의 예측과 90% 구간을 받는다 (`config/stochastic.yaml` 의 `forecast` 블록).
+
+- Day-ahead 조건: 계획일 D 의 0~23시를 전날 11시까지의 데이터로 예측한다 (`lead` 13h → 13~36시간 뒤).
+  forecast_api 에 `end_date` = 결정 시각, `horizon_hours` = 36 으로 요청하고 뒤의 24시간을 쓴다.
+- 세 target 의 데이터 끝 시각이 다르면 (2026-11-03 기준 수요 10/26, 태양광·풍력 9/27) 세 target 이 모두
+  결정 시각까지 데이터가 있는 가장 최근 D 를 쓴다 (지금은 9/27 11시 데이터로 9/28).
+- 구간 반폭은 `upper_bound − predicted` 다 (`lower_bound` 는 0 에서 잘려 있어 쓰지 않는다). 시나리오 오차
+  σ = 반폭 / 1.645 x `sigma_scale` (formulation.md 7.3).
+- 태양광·풍력의 음수 예측은 0 으로 둔다. forecast_api 의 `wind` 는 풍력 단독이다.
+- forecast_api 를 쓸 수 없으면 `scenario_generator.base_profile` (구간 없음) 로 폴백하고, σ 는
+  `fallback_sigma` (예측값 대비 %) 다.
+- 🟨 `end_date` 에 시각(`"2026-09-27 11:00:00"`)을 넣는 것은 forecast_api 스키마 설명(YYYY-MM-DD)에 없는
+  사용법이다. 동작은 확인했고 B 와 계약으로 맞춰야 한다.
+
+응답의 `base` 에 쓴 기준 예측이 그대로 실린다: `source` (`forecast_api` / `config`), `start` (계획 첫 시각),
+`issued_at` (예측에 쓴 데이터의 마지막 시각), `*_margin_mw` (90% 구간 반폭, config 면 `null`).
 
 응답 (배열은 24개 중 앞부분만):
 
 ```json
 {
   "horizon_h": 24, "n_samples": 300, "seed": 42,
-  "base": { "demand_mw": [52000, 50000], "solar_mw": [0, 0], "wind_mw": [800.0, 982.2] },
+  "base": { "demand_mw": [51901.5, 49795.8], "solar_mw": [3.8, 3.8], "wind_mw": [179.0, 209.0],
+            "demand_margin_mw": [4396.3, 4396.3], "solar_margin_mw": [15.1, 13.7],
+            "wind_margin_mw": [194.0, 214.7],
+            "start": "2026-09-28T00:00:00+09:00", "issued_at": "2026-09-27T11:00:00+09:00",
+            "source": "forecast_api" },
   "scenarios": [
-    { "scenario_id": "S01", "probability": 0.1, "label": "고수요·맑음·강풍",
-      "peak_net_load_mw": 89150.2, "demand_dev_pct": 1.9, "solar_dev_pct": 6.3, "wind_dev_pct": 21.4,
-      "demand_mw": [53110.4, 51290.8], "solar_mw": [0.0, 0.0], "wind_mw": [912.5, 1104.0] }
+    { "scenario_id": "S01", "probability": 0.06, "label": "고수요",
+      "peak_net_load_mw": 75921.5, "demand_dev_pct": 4.67, "solar_dev_pct": -10.48, "wind_dev_pct": -10.57,
+      "demand_mw": [51112.5, 49630.4], "solar_mw": [0.0, 3.1], "wind_mw": [264.5, 245.5] }
   ],
-  "net_load_band": { "p5": [49870.1, 47950.3], "p50": [51150.6, 49020.0], "p95": [52430.9, 50120.7] },
-  "demand_band":   { "p5": [50010.2, 48060.5], "p50": [51990.4, 49980.1], "p95": [54050.8, 51900.3] },
-  "checks": [ { "name": "확률 합 = 1", "ok": true, "detail": "1.000000" } ]
+  "net_load_band": { "p5": [47719.8, 45733.8], "p50": [51597.6, 49508.3], "p95": [55322.6, 53710.9] },
+  "demand_band":   { "p5": [47887.2, 45959.0], "p50": [51769.5, 49730.3], "p95": [55477.0, 53911.3] },
+  "checks": [
+    { "name": "확률 합 = 1", "ok": true, "detail": "1.000000" },
+    { "name": "수요 표본의 예측구간 적중률 ≈ 90%", "ok": true,
+      "detail": "표본 x 시간 중 forecast_api 90% 구간 안 90.3% (허용 ±3%p)" }
+  ]
 }
 ```
+
+(2026-11-03 로컬 실행값, `{}` 요청. 숫자는 소수 일부를 줄였다.)
+
+`checks` 항목: 시나리오 수 ≥ 10 · 확률 합 = 1 · 수요 표본 편향 ≤ 1% · 수요 표본의 예측구간 적중률 (구간이
+있을 때만, 목표 = 2Φ(1.645 / `sigma_scale`) − 1) · 축약 후 기대 순부하 보존 ≤ 1% · 상방/하방 꼬리 보존 ·
+물리 범위. **꼬리 보존 두 항목은 forward selection 이 꼬리를 일부러 남기지 않아 실패할 수 있다**
+(seed 30개 x K 10·15 에서 상방 23/60, 하방 17/60 실패, 2026-11-03). 실패도 그대로 보고한다.
 
 `scenarios` 는 피크 순부하 내림차순이다 (S01 이 가장 빡빡한 날). 각 시나리오의 `scenario_id`·`probability`·`demand_mw`·`solar_mw`·`wind_mw` 를 그대로 `/dispatch/stochastic` 의 `scenarios` 로 넘기면 된다.
 
@@ -291,36 +331,39 @@ Two-Stage Stochastic 급전 계획과 VSS. 스키마: `shared/schemas.py` 의 `S
 
 한 번 호출하면 RP(전 시나리오) → EV(평균 시나리오 1개) → EEV(EV 의 1단계 해 고정) 순으로 풀고,
 `compute_ws` 가 켜져 있으면 WS(시나리오마다 1개씩) 를 더 푼다. `solver` 의 시간 제한·gap 은 **문제마다**
-적용되므로 응답 시간은 최대 `time_limit_s` 의 3배 (WS 를 켜면 3 + `n_scenarios` 배) 다.
+적용된다.
 
-> **VSS 를 판정할 때는 `solver` 를 `{ "time_limit_s": 60, "mip_gap": 0.001 }` 로 준다.**
-> 기본값(`config/stochastic.yaml` 의 `request_defaults`: 10초, 0.5%)에서는 25기 x 시나리오 10개 RP 가 시간 제한에 걸려 해가 나빠지고, VSS 가 음수로 나올 수 있다
-> (측정 예: `status: time_limit`, `vss_pct` −36.8%). 대시보드는 이 조건으로 미리 계산해 둔
+> **기본값은 시간 제한 없음이다** (`config/stochastic.yaml` 의 `request_defaults.time_limit: null`).
+> 25기 x 시나리오 10개에서 RP·EV·EEV 를 모두 푸는 데 30초~2분 40초 걸린다 (2026-11-02·03 로컬 측정,
+> gap 0.1%. forecast_api 구간 기반 시나리오(formulation.md 7장 v2)는 폭이 넓어 117~159초).
+> WS 를 켜면 시나리오 수만큼 더 걸린다. 시간 제한을 주면 RP 가 덜 풀려 VSS 가 음수로 나올 수 있다
+> (예전 측정: 10초 제한에서 `status: time_limit`, `vss_pct` −36.8%). 대시보드 VSS 타일은 미리 계산해 둔
 > `GET /dispatch/stochastic/latest` 를 쓴다.
+> 기본 gap 0.5% 는 지금 측정되는 VSS(0.1% 안팎)보다 크다. VSS 를 판정할 때는 `mip_gap` 을 0.001 이하로 준다.
 
-요청 — `start` 만 필수다.
+요청 — 모든 필드를 비울 수 있다 (`{}`).
 
 기본값 열의 숫자는 현재 `config/stochastic.yaml` 값이다. 필드를 비우면(`null`) 서버가 config 에서 채운다.
 
 | 필드 | 기본값 | 설명 |
 |---|---|---|
-| `start` | (필수) | 계획 시작 시각. 응답 timestamp 의 기준 |
+| `start` | `null` | 계획 시작 시각 (응답 timestamp 의 기준). `scenarios`·`base` 를 모두 비워 forecast_api 예측을 쓰면 **예측 구간의 시작 시각을 쓰고 이 값은 무시한다**. 그 밖에 `null` 이면 오늘 0시 (KST) |
 | `horizon_h` | `null` | 아직 쓰지 않는다. 계획 길이는 시나리오 배열 길이다 |
 | `scenarios` | `null` | 시나리오 직접 입력. `null` 이면 `/scenarios` 와 같은 생성기로 `n_scenarios` 개를 만든다 (7절 파라메트릭 오차 모델) |
 | `n_scenarios` | `null` → 10 (`scenario_generator.n_scenarios`) | 생성 개수 (`scenarios` 가 `null` 일 때만) |
 | `seed` | `null` → 42 (`scenario_generator.seed`) | 생성 seed. 0 도 그대로 쓴다 |
-| `base` | `null` | 생성용 기준 예측 (`ScenarioProfile`). `null` 이면 생성기 기본 예측 (forecast_api 연동 전) |
+| `base` | `null` | 생성용 기준 예측 (`ScenarioProfile`). `null` 이면 forecast_api 예측, 실패하면 `base_profile` (`/scenarios` 의 "기준 예측") |
 | `compute_ws` | `false` | `true` 면 WS·EVPI 도 계산. 시나리오 수만큼 더 풀어 느려진다 |
 | `generator_ids` | `null` | 사용할 유닛 id. `null` 이면 `generators.yaml` 전체 |
 | `use_ess` | `true` | **현재 무시된다.** 2단계에 ESS 를 넣지 않았다 (8절 끝, 🟨 C 와 상의) |
 | `reserve_ratio` | `null` → 0.10 (`request_defaults.reserve_ratio`) | 1단계 예비율. 부족분은 슬랙으로 허용하고 `config/stochastic.yaml` 의 페널티를 붙인다 (가정, 8.1 S5 미확정) |
 | `shed_penalty_won_per_mwh` | `null` → 10,000,000 (`request_defaults.shed_penalty`) | 부하차단 페널티 $K$. 🟨 VOLL 근거 미확정 |
 | `include_scenario_hours` | `false` | `true` 면 `scenarios[].hours` 에 시나리오별 시간 요약을 넣는다 |
-| `solver` | `null` → `{10, 0.005}` (`request_defaults.time_limit`·`mip_gap`) | 문제당 시간 제한(초)·상대 gap. 위 경고 참고. 일부만 주면 빠진 값은 `SolverOptions` 스키마 기본값(10, 0.005)이다 |
+| `solver` | `null` → `{null, 0.005}` (`request_defaults.time_limit`·`mip_gap`) | 문제당 시간 제한(초, `null` = 제한 없음)·상대 gap. 위 경고 참고. `solver` 를 주면서 일부만 채우면 빠진 값은 `SolverOptions` 스키마 기본값(10초, 0.005)이다 — 제한 없이 풀려면 `"time_limit_s": null` 을 적는다 |
 
 ```json
 {
-  "start": "2026-09-22T00:00:00+09:00",
+  "start": null,
   "horizon_h": 24,
   "scenarios": null,
   "n_scenarios": 10,
@@ -331,7 +374,7 @@ Two-Stage Stochastic 급전 계획과 VSS. 스키마: `shared/schemas.py` 의 `S
   "reserve_ratio": 0.10,
   "shed_penalty_won_per_mwh": 10000000,
   "include_scenario_hours": false,
-  "solver": { "time_limit_s": 60, "mip_gap": 0.001 }
+  "solver": { "time_limit_s": null, "mip_gap": 0.001 }
 }
 ```
 
@@ -357,6 +400,8 @@ Two-Stage Stochastic 급전 계획과 VSS. 스키마: `shared/schemas.py` 의 `S
 | `expected_hours` | 시간별 수급의 확률 가중 평균. `reserve_pct` 의 공급능력은 가동 유닛 상한 합 + 태양광 + 풍력. `ess_mw` 는 항상 0 |
 | `scenarios[]` | 시나리오별 `cost`, `shed_mwh`, `rt_adjust_mwh` (기대 출력 대비 그 시나리오 출력의 편차 $\sum\lvert P_s - E[P]\rvert$), `hours` |
 | `vss` | `rp_won`·`ev_won`·`eev_won` 은 각 문제의 목적값. `vss_won` = EEV − RP, `vss_pct` = `vss_won` / `eev_won` x 100 (분모는 가정, 9절), `target_met` = `vss_pct` ≥ 3. `ws_won`·`evpi_won` 은 `compute_ws` 일 때만 |
+| `start` | 실제로 쓴 계획 시작 시각 (forecast_api 예측을 쓰면 예측 구간의 시작) |
+| `base_source` | 시나리오의 기준 예측 출처. `forecast_api` / `config` (`base_profile` 폴백) / `request` (요청이 `scenarios` 나 `base` 를 줌) |
 
 오류:
 
@@ -395,7 +440,8 @@ Two-Stage Stochastic 급전 계획과 VSS. 스키마: `shared/schemas.py` 의 `S
     "rp_won": 1.593e10, "ev_won": 1.548e10, "eev_won": 1.651e10,
     "vss_won": 5.8e8, "vss_pct": 3.5,
     "ws_won": null, "evpi_won": null, "target_met": true
-  }
+  },
+  "base_source": "forecast_api"
 }
 ```
 
@@ -403,8 +449,9 @@ Two-Stage Stochastic 급전 계획과 VSS. 스키마: `shared/schemas.py` 의 `S
 
 대시보드 VSS 타일용. dispatch_api 가 켜질 때와 `refresh_hours` 마다 백그라운드로 Two-Stage 를 한 번 풀어 두고,
 이 엔드포인트는 마지막 결과를 바로 돌려준다 (풀이 자체는 1분 안팎). 계산 조건은 `config/stochastic.yaml` 의
-`precompute` 블록이고, 현재 값은 formulation.md 8.1 측정표의 seed 1 행과 같다 (시나리오 10개, 예비율 10%,
-문제당 60초, gap 0.1%). 환경변수 `PRECOMPUTE_ENABLED=false` 면 계산하지 않는다.
+`precompute` 블록이다 (seed 1, 시나리오 10개, 예비율 10%, 시간 제한 없음, gap 0.1%). 기준 예측은
+`/scenarios` 와 같이 forecast_api 에서 받고 (실패하면 `base_profile`), 계획 구간은 그 예측 구간이다
+(`result.start`, `result.base_source`). 환경변수 `PRECOMPUTE_ENABLED=false` 면 계산하지 않는다.
 
 스키마: `shared/schemas.py` 의 `StochasticLatest`.
 
@@ -412,16 +459,17 @@ Two-Stage Stochastic 급전 계획과 VSS. 스키마: `shared/schemas.py` 의 `S
 |---|---|
 | `state` | `pending` 시작 전 · `running` 계산 중 · `done` · `error` · `disabled` |
 | `computed_at` | 마지막으로 성공한 계산 시각 (KST) |
-| `seed`, `n_scenarios`, `reserve_ratio`, `shed_penalty_won_per_mwh`, `time_limit_s`, `mip_gap` | 계산 조건 |
+| `seed`, `n_scenarios`, `reserve_ratio`, `shed_penalty_won_per_mwh`, `time_limit_s`, `mip_gap` | 계산 조건. `time_limit_s` 가 `null` 이면 제한 없음 |
 | `result` | `StochasticResponse`. 아직 없으면 `null`. 계산 중이거나 실패해도 이전 결과는 남는다 |
 | `error` | 마지막 실패 메시지 |
 
 ```json
 {
-  "state": "done", "computed_at": "2026-10-23T15:40:26+09:00",
+  "state": "done", "computed_at": "2026-11-02T21:10:00+09:00",
   "seed": 1, "n_scenarios": 10, "reserve_ratio": 0.1, "shed_penalty_won_per_mwh": 10000000.0,
-  "time_limit_s": 60.0, "mip_gap": 0.001,
-  "result": { "status": "optimal", "solve_time_s": 58.1, "vss": { "vss_pct": 0.002, "...": "..." }, "...": "..." },
+  "time_limit_s": null, "mip_gap": 0.001,
+  "result": { "status": "optimal", "solve_time_s": 34.5, "start": "2026-09-27T01:00:00+09:00",
+              "base_source": "forecast_api", "vss": { "vss_pct": 0.0, "...": "..." }, "...": "..." },
   "error": null
 }
 ```

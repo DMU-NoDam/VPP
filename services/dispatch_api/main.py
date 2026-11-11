@@ -2,7 +2,7 @@
 
 라우트
     GET  /health
-    POST /api/v1/scenarios      불확실성 시나리오 생성 (formulation.md 7절)
+    POST /api/v1/scenarios      불확실성 시나리오 생성 (formulation.md 7절, 기준 = forecast_api)
     POST /api/v1/dispatch/milp  UC + 경제급전 MILP (formulation.md 4장)
     POST /api/v1/dispatch/stochastic         Two-Stage + VSS (formulation.md 8~9절)
     GET  /api/v1/dispatch/stochastic/latest  대시보드용 미리 계산 결과 (precompute.py)
@@ -17,6 +17,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
+from forecast_client import resolve_base
 
 import precompute
 import service
@@ -24,6 +25,7 @@ import stochastic
 from loaders.config_loader import ConfigError
 from loaders.data_loader import DataError
 from milp import SolverUnavailableError
+from precompute import today_start
 from scenarios import generate, with_defaults
 from shared.constants import API_PREFIX
 from shared.schemas import (
@@ -64,7 +66,12 @@ def health() -> dict[str, str]:
 
 @app.post(f"{API_PREFIX}/scenarios", response_model=ScenarioSetResponse)
 def create_scenarios(req: ScenarioRequest) -> ScenarioSetResponse:
-    """수요·태양광·풍력 불확실성 시나리오를 만들어 확률과 함께 돌려준다."""
+    """수요·태양광·풍력 불확실성 시나리오를 만들어 확률과 함께 돌려준다.
+
+    base 를 비우면 forecast_api 예측을 기준으로 쓴다 (실패하면 config 의 base_profile).
+    """
+    if req.base is None:
+        req = req.model_copy(update={"base": resolve_base()})
     return generate(req)
 
 
@@ -88,24 +95,34 @@ def dispatch_milp(req: MilpRequest) -> MilpResponse:
 
 @app.post(f"{API_PREFIX}/dispatch/stochastic", response_model=StochasticResponse)
 def dispatch_stochastic(req: StochasticRequest) -> StochasticResponse:
-    """Two-Stage Stochastic 급전 계획과 VSS(= EEV - RP)를 돌려준다."""
+    """Two-Stage Stochastic 급전 계획과 VSS(= EEV - RP)를 돌려준다.
+
+    scenarios·base 를 모두 비우면 forecast_api 예측으로 시나리오를 만들고, 계획 시작 시각은
+    예측 구간의 시작 시각이 된다 (req.start 무시). forecast_api 를 쓸 수 없으면 config 의
+    base_profile 로 만들고 시작 시각은 req.start, 그것도 없으면 오늘 0시 (KST).
+    """
+    start = req.start or today_start()
     scenarios = req.scenarios
+    base_source = "request"
     if scenarios is None:
+        base = req.base or resolve_base()
+        if req.base is None:
+            base_source = base.source or "config"
+            if base.start is not None:
+                start = base.start
         # 비운 seed·n_scenarios 는 config 의 scenario_generator 값 (seed=0 도 그대로 쓴다)
-        gen = with_defaults(
-            ScenarioRequest(n_scenarios=req.n_scenarios, seed=req.seed, base=req.base)
-        )
+        gen = with_defaults(ScenarioRequest(n_scenarios=req.n_scenarios, seed=req.seed, base=base))
         scenarios = generate(gen).scenarios
     if len({len(s.demand_mw) for s in scenarios}) != 1:
         raise HTTPException(422, "시나리오 길이가 서로 다르다")
     d = stochastic.load_request_defaults()
     try:
         units = load_units(ids=req.generator_ids)
-        return stochastic.run(
+        result = stochastic.run(
             units,
             scenarios,
             stochastic.load_params(),
-            start=req.start,
+            start=start,
             reserve_ratio=d.reserve_ratio if req.reserve_ratio is None else req.reserve_ratio,
             shed_penalty=(
                 d.shed_penalty_won_per_mwh
@@ -120,6 +137,7 @@ def dispatch_stochastic(req: StochasticRequest) -> StochasticResponse:
         raise HTTPException(422, str(e)) from e
     except RuntimeError as e:
         raise HTTPException(500, str(e)) from e
+    return result.model_copy(update={"base_source": base_source})
 
 
 @app.get(f"{API_PREFIX}/dispatch/stochastic/latest", response_model=StochasticLatest)

@@ -30,7 +30,7 @@ SolveStatus = Literal["optimal", "feasible", "infeasible", "time_limit", "error"
 
 
 class SolverOptions(BaseModel):
-    time_limit_s: float = 10.0
+    time_limit_s: float | None = 10.0  # None 이면 제한 없음
     mip_gap: float = 0.005
 
 
@@ -93,6 +93,16 @@ class ScenarioProfile(BaseModel):
     demand_mw: list[float]
     solar_mw: list[float]
     wind_mw: list[float]
+    # 90% 예측구간 반폭 (upper - 예측, MW). forecast_api 예측이면 채워지고
+    # 시나리오 오차 σ 를 정한다.
+    # None 이면 config 의 fallback_sigma (%) 를 쓴다
+    demand_margin_mw: list[float] | None = None
+    solar_margin_mw: list[float] | None = None
+    wind_margin_mw: list[float] | None = None
+    start: datetime | None = None      # 첫 값의 시각. forecast_api 예측이면 채워진다
+    issued_at: datetime | None = None  # 예측에 쓴 데이터의 마지막 시각 (Day-ahead 결정 시점)
+    # "forecast_api" / "config" (base_profile) / None (요청이 준 값)
+    source: str | None = None
 
 
 class ScenarioRequest(BaseModel):
@@ -101,13 +111,14 @@ class ScenarioRequest(BaseModel):
     n_scenarios: int | None = Field(None, ge=1, le=50)   # 축약 후 개수 (요구사항: 10개 이상)
     n_samples: int | None = Field(None, ge=50, le=2000)  # 축약 전 표본 수 (거리 행렬 n² 상한)
     seed: int | None = None
-    demand_sigma_pct: float | None = None   # 수요 오차 표준편차
-    demand_ar: float | None = None          # 수요 오차 시간 상관 (AR(1) 계수)
-    solar_cloud_pct: float | None = None    # 하루 흐림 계수의 평균 감소폭 (클수록 하방 꼬리↑)
-    wind_sigma_pct: float | None = None     # 풍력 로그정규 오차
+    sigma_scale: float | None = Field(None, gt=0)  # σ 배율. 1 = 예측구간 그대로 (민감도 분석용)
+    demand_ar: float | None = Field(None, ge=0, lt=1)  # 오차 시간 상관 (AR(1) 계수)
+    solar_ar: float | None = Field(None, ge=0, lt=1)
+    wind_ar: float | None = Field(None, ge=0, lt=1)
     solar_capacity_mw: float | None = None
     wind_capacity_mw: float | None = None
-    base: ScenarioProfile | None = None  # None 이면 기본 예측 (forecast_api 연동 전)
+    # None 이면 forecast_api 예측, 실패하면 config 의 base_profile
+    base: ScenarioProfile | None = None
 
 
 class ScenarioDetail(Scenario):
@@ -145,13 +156,16 @@ class StochasticRequest(BaseModel):
     """None 인 숫자 필드는 dispatch_api 가 config/stochastic.yaml 값으로 채운다
     (seed·n_scenarios 는 scenario_generator, 나머지는 request_defaults)."""
 
-    start: datetime
+    # 계획 시작 시각. dispatch_api 가 forecast_api 예측으로 시나리오를 만들면 예측 구간의
+    # 시작 시각을 쓰고 이 값은 무시한다. 그 밖에 None 이면 오늘 0시 (KST).
+    start: datetime | None = None
     horizon_h: int | None = None  # 아직 쓰지 않는다. 시나리오 배열 길이가 계획 길이다
     # scenarios 를 직접 주거나, 비우면 dispatch_api 가 예측+잔차로 n_scenarios 개 만든다.
     scenarios: list[Scenario] | None = None
     n_scenarios: int | None = None
     seed: int | None = None
-    base: ScenarioProfile | None = None  # 시나리오 생성용 기준 예측. None 이면 생성기 기본값
+    # 시나리오 생성용 기준 예측. None 이면 forecast_api, 실패하면 config 의 base_profile
+    base: ScenarioProfile | None = None
     compute_ws: bool = False  # True 면 WS·EVPI 도 계산 (시나리오 수만큼 더 풀어 느려짐)
     generator_ids: list[str] | None = None  # None 이면 generators.yaml 전체
     use_ess: bool = True
@@ -196,6 +210,9 @@ class StochasticResponse(BaseModel):
     expected_hours: list[HourSummary]     # 확률 가중 평균 수급
     scenarios: list[ScenarioResult]
     vss: VssReport
+    # 시나리오의 기준 예측 출처: "forecast_api" / "config" (base_profile) /
+    # "request" (요청이 scenarios 나 base 를 줌)
+    base_source: str | None = None
 
 
 class StochasticLatest(BaseModel):
@@ -211,7 +228,7 @@ class StochasticLatest(BaseModel):
     n_scenarios: int
     reserve_ratio: float
     shed_penalty_won_per_mwh: float
-    time_limit_s: float
+    time_limit_s: float | None  # None 이면 제한 없음
     mip_gap: float
     result: StochasticResponse | None = None
     error: str | None = None

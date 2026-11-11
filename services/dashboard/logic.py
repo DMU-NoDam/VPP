@@ -179,8 +179,7 @@ _CRISIS_UNITS = {"demand_mult": "ratio", "capacity_delta_mw": "MW", "solar_mult"
 # 페이지 초기값 필드 → (unit, 형). compute_ws 같은 bool 은 숫자가 아니라 그대로 둔다
 _PAGE_FIELDS: dict[str, tuple[str, type]] = {
     "n_scenarios": ("count", int), "n_samples": ("count", int), "seed": ("-", int),
-    "demand_sigma_pct": ("%", float), "demand_ar": ("-", float),
-    "solar_cloud_pct": ("%", float), "wind_sigma_pct": ("%", float),
+    "sigma_scale": ("-", float), "demand_ar": ("-", float),
     "time_limit_s": ("s", int), "mip_gap_pct": ("%", float),
 }
 
@@ -192,7 +191,8 @@ def _page_defaults(raw: dict) -> dict[str, float | bool]:
             out[key] = node
         else:
             unit, cast = _PAGE_FIELDS[key]
-            out[key] = cast(cfg_value(node, unit))
+            value = cfg_value(node, unit)
+            out[key] = None if value is None else cast(value)  # null = 제한 없음 등
     return out
 
 
@@ -426,7 +426,10 @@ def parse_stochastic_latest(data: dict) -> dict | None:
         "computed_at": pd.Timestamp(data["computed_at"]) if data.get("computed_at") else None,
         "seed": int(data["seed"]),
         "reserve_ratio": float(data["reserve_ratio"]),
-        "time_limit_s": float(data["time_limit_s"]),
+        # None 이면 제한 없음
+        "time_limit_s": None if data.get("time_limit_s") is None else float(data["time_limit_s"]),
+        "base_source": data["result"].get("base_source"),
+        "start": pd.Timestamp(data["result"]["start"]) if data["result"].get("start") else None,
     })
     return out
 
