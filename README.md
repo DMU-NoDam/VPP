@@ -59,17 +59,6 @@ docker-compose up --build
 | dispatch_api | 8002 | http://localhost:8002/health |
 | dashboard | 8501 | http://localhost:8501 |
 
-### 환경변수 (`.env`)
-
-| 변수 | 기본값 | 설명 |
-| --- | --- | --- |
-| `DATA_GO_KR_SERVICE_KEY` | - | 공공데이터포털 인증키 (수집 시 필요) |
-| `KMA_AUTH_KEY` | - | 기상청 API허브 인증키 (수집 시 필요) |
-| `COLLECT_ENABLED` | `false` | `true`면 collector가 API로 백필·주기 수집 |
-| `INTERVAL_SEC` | `300` | 수집 주기(초) |
-| `DAM_CODES` | `1012110` | 수집할 댐 코드 (소양강) |
-| `PRECOMPUTE_ENABLED` | - | `false`면 dispatch_api의 VSS 미리 계산을 끈다 |
-
 ## API
 
 요청/응답 JSON 샘플은 [docs/api_spec.md](docs/api_spec.md)에 있다.
