@@ -18,38 +18,24 @@
 | 통합 관제 대시보드 (Streamlit) | 구현 | `services/dashboard` |
 
 ## 시스템 아키텍처
-
-```mermaid
-flowchart LR
-    subgraph EXT[공공 API]
-        KPX[KPX 전력수급현황<br/>sukub.do]
-        DGK[data.go.kr<br/>연료원별 거래실적 · SMP]
-        KMA[기상청 API허브<br/>kma_sfctm3]
-        KW[K-water<br/>댐 수문 운영정보]
-    end
-
-    subgraph DOCKER[docker-compose]
-        COL[collector :8000<br/>수집 + data_api]
-        FC[forecast_api :8001<br/>FastAPI · LightGBM]
-        DP[dispatch_api :8002<br/>FastAPI · PuLP/Pyomo + HiGHS]
-        DB[dashboard :8501<br/>Streamlit]
-    end
-
-    CSV[(data/csv<br/>CSV 스냅샷)]
-    CFG[(config/*.yaml)]
-
-    EXT -->|COLLECT_ENABLED=true 일 때| COL
-    COL -->|append| CSV
-    CSV -.->|볼륨| FC
-    CSV -.->|볼륨| DP
-    CFG -.->|볼륨| DP
-    CFG -.->|볼륨 ro| DB
-
-    DP -->|POST /api/v1/forecast| FC
-    DP -->|GET /data/fuel_cost| COL
-    DB -->|GET /data/name| COL
-    DB -->|POST /api/v1/forecast| FC
-    DB -->|POST /api/v1/dispatch/milp<br/>POST /api/v1/scenarios<br/>POST /api/v1/dispatch/stochastic<br/>GET /api/v1/dispatch/stochastic/latest| DP
+```
+                Public API (KPX / data.go.kr / KMA / K-water)
+                                      │
+                                      ▼
+                              collector (8000) ◀──────────── REST ──────────────┐
+                                      │                                         │
+                                      │ write                                   │
+                                      ▼                                         │
+                                   data/csv                                     │
+                                      │ read                                    │
+                      ┌───────────────┴───────────────┐                         │
+                      ▼                               ▼                         │
+              forecast_api (8001) ◀── REST ── dispatch_api (8002) ── REST ──────┤
+                      ▲                               ▲                         │
+                      │ REST                          │ REST                    │
+                      └───────────────┬───────────────┘                         │
+                                      │                                         │
+                              dashboard (8501) ───────────────────────── REST ──┘
 ```
 
 - **collector**: 기동 시 `data/csv`를 메모리에 올리고 `GET /data/{name}`으로 내보낸다. `COLLECT_ENABLED=true`면 마지막 시각 이후 결측 구간을 API로 백필하고 `INTERVAL_SEC`(기본 300초)마다 반복한다. 기본값은 `false`라 API 키 없이도 CSV 스냅샷만으로 전체 시스템이 뜬다.
