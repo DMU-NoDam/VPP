@@ -334,12 +334,12 @@ Two-Stage Stochastic 급전 계획과 VSS. 스키마: `shared/schemas.py` 의 `S
 적용된다.
 
 > **기본값은 시간 제한 없음이다** (`config/stochastic.yaml` 의 `request_defaults.time_limit: null`).
-> 25기 x 시나리오 10개에서 RP·EV·EEV 를 모두 푸는 데 30초~2분 40초 걸린다 (2026-11-02·03 로컬 측정,
-> gap 0.1%. forecast_api 구간 기반 시나리오(formulation.md 7장 v2)는 폭이 넓어 117~159초).
+> 21기 x 시나리오 10개에서 RP·EV·EEV 를 모두 푸는 데 1~2분 걸린다 (2026-11-12 로컬 측정, forecast_api
+> 기준 예측: 빈 요청(gap 0.5%) 77초, `precompute` 조건(gap 0.1%) 113초 — 113초는 다른 계산과 CPU 를 나눠 쓴 값).
 > WS 를 켜면 시나리오 수만큼 더 걸린다. 시간 제한을 주면 RP 가 덜 풀려 VSS 가 음수로 나올 수 있다
 > (예전 측정: 10초 제한에서 `status: time_limit`, `vss_pct` −36.8%). 대시보드 VSS 타일은 미리 계산해 둔
 > `GET /dispatch/stochastic/latest` 를 쓴다.
-> 기본 gap 0.5% 는 지금 측정되는 VSS(0.1% 안팎)보다 크다. VSS 를 판정할 때는 `mip_gap` 을 0.001 이하로 준다.
+> 기본 gap 0.5% 는 VSS(3% 안팎)에 비해 작지 않다. VSS 를 판정할 때는 `mip_gap` 을 0.001 이하로 준다.
 
 요청 — 모든 필드를 비울 수 있다 (`{}`).
 
@@ -356,8 +356,9 @@ Two-Stage Stochastic 급전 계획과 VSS. 스키마: `shared/schemas.py` 의 `S
 | `compute_ws` | `false` | `true` 면 WS·EVPI 도 계산. 시나리오 수만큼 더 풀어 느려진다 |
 | `generator_ids` | `null` | 사용할 유닛 id. `null` 이면 `generators.yaml` 전체 |
 | `use_ess` | `true` | **현재 무시된다.** 2단계에 ESS 를 넣지 않았다 (8절 끝, 🟨 C 와 상의) |
-| `reserve_ratio` | `null` → 0.10 (`request_defaults.reserve_ratio`) | 1단계 예비율. 부족분은 슬랙으로 허용하고 `config/stochastic.yaml` 의 페널티를 붙인다 (가정, 8.1 S5 미확정) |
-| `shed_penalty_won_per_mwh` | `null` → 10,000,000 (`request_defaults.shed_penalty`) | 부하차단 페널티 $K$. 🟨 VOLL 근거 미확정 |
+| `reserve_ratio` | `null` → 0.0 (`request_defaults.reserve_ratio`) | 1단계 예비율 $r$. 요건은 $(1 + r) \times$ 기대 순수요 $+$ `reserve_mw` 다. 부족분은 슬랙으로 허용하고 `config/stochastic.yaml` 의 페널티를 붙인다 (가정, 8.4 S5) |
+| `reserve_mw` | `null` → 700 (`request_defaults.reserve_mw`) | 1단계 고정 예비력 $R$ (MW). 값은 가정이다 (8.2) |
+| `shed_penalty_won_per_mwh` | `null` → 3,093,000 (`request_defaults.shed_penalty`) | 부하차단 페널티 $K$. VoLL 3,093원/kWh (KEEI 기본연구보고서 24-21) |
 | `include_scenario_hours` | `false` | `true` 면 `scenarios[].hours` 에 시나리오별 시간 요약을 넣는다 |
 | `solver` | `null` → `{null, 0.005}` (`request_defaults.time_limit`·`mip_gap`) | 문제당 시간 제한(초, `null` = 제한 없음)·상대 gap. 위 경고 참고. `solver` 를 주면서 일부만 채우면 빠진 값은 `SolverOptions` 스키마 기본값(10초, 0.005)이다 — 제한 없이 풀려면 `"time_limit_s": null` 을 적는다 |
 
@@ -371,8 +372,9 @@ Two-Stage Stochastic 급전 계획과 VSS. 스키마: `shared/schemas.py` 의 `S
   "base": null,
   "compute_ws": false,
   "generator_ids": null,
-  "reserve_ratio": 0.10,
-  "shed_penalty_won_per_mwh": 10000000,
+  "reserve_ratio": 0.0,
+  "reserve_mw": 700,
+  "shed_penalty_won_per_mwh": 3093000,
   "include_scenario_hours": false,
   "solver": { "time_limit_s": null, "mip_gap": 0.001 }
 }
@@ -396,7 +398,7 @@ Two-Stage Stochastic 급전 계획과 VSS. 스키마: `shared/schemas.py` 의 `S
 | `status` | RP·EV·EEV 가 모두 `optimal` 이면 `optimal`, 아니면 RP → EV → EEV 순으로 처음 `optimal` 이 아닌 상태 (`feasible` · `time_limit` 등). `optimal` 이 아니면 VSS 를 믿지 않는다 |
 | `solve_time_s` | RP·EV·EEV(·WS) 전체 풀이 시간 |
 | `first_stage` | 유닛 x 시간 (25기 x 24h = 600행). `on` 은 1단계 기동계획 $u$. 1단계에는 출력 변수가 없어서 `p_mw` 는 시나리오 기대 출력 $\sum_s p_s P_{i,t,s}$ 다 |
-| `expected_cost` | 시나리오 비용의 확률 가중 평균 (= RP 기대비용). `startup_won` = 1단계 기동비 + 당일 추가 기동비, `recourse_won` = 예비력 부족 페널티 (가정 항, 모든 시나리오에 같다), `shed_won` = 부하차단 페널티 |
+| `expected_cost` | 시나리오 비용의 확률 가중 평균 (= RP 기대비용). `fuel_won` = 증분 연료비 + 무부하비 (8.3), `startup_won` = 1단계 기동비 + 당일 추가 기동비, `recourse_won` = 예비력 부족 페널티 (가정 항, 모든 시나리오에 같다), `shed_won` = 부하차단 페널티 |
 | `expected_hours` | 시간별 수급의 확률 가중 평균. `reserve_pct` 의 공급능력은 가동 유닛 상한 합 + 태양광 + 풍력. `ess_mw` 는 항상 0 |
 | `scenarios[]` | 시나리오별 `cost`, `shed_mwh`, `rt_adjust_mwh` (기대 출력 대비 그 시나리오 출력의 편차 $\sum\lvert P_s - E[P]\rvert$), `hours` |
 | `vss` | `rp_won`·`ev_won`·`eev_won` 은 각 문제의 목적값. `vss_won` = EEV − RP, `vss_pct` = `vss_won` / `eev_won` x 100 (분모는 가정, 9절), `target_met` = `vss_pct` ≥ 3. `ws_won`·`evpi_won` 은 `compute_ws` 일 때만 |
@@ -408,7 +410,7 @@ Two-Stage Stochastic 급전 계획과 VSS. 스키마: `shared/schemas.py` 의 `S
 | 코드 | 경우 |
 |---|---|
 | 422 | `start` 누락, 시나리오 길이 불일치, 선택된 발전기 없음 (`generator_ids` 가 모두 없는 id), 입력값 오류 |
-| 500 | RP 의 해를 찾지 못함 (infeasible 또는 시간 안에 해 없음) |
+| 500 | RP·EV·EEV 중 하나의 해를 찾지 못함 (infeasible 또는 시간 안에 해 없음). EEV 는 평균 계획의 최소출력 합이 낮은 시나리오의 수요를 넘으면 infeasible 이다 (과잉 발전, 8.4 S1) |
 
 응답 (숫자는 형태 예시):
 
@@ -449,9 +451,10 @@ Two-Stage Stochastic 급전 계획과 VSS. 스키마: `shared/schemas.py` 의 `S
 
 대시보드 VSS 타일용. dispatch_api 가 켜질 때와 `refresh_hours` 마다 백그라운드로 Two-Stage 를 한 번 풀어 두고,
 이 엔드포인트는 마지막 결과를 바로 돌려준다 (풀이 자체는 1분 안팎). 계산 조건은 `config/stochastic.yaml` 의
-`precompute` 블록이다 (seed 1, 시나리오 10개, 예비율 10%, 시간 제한 없음, gap 0.1%). 기준 예측은
+`precompute` 블록이다 (seed 1, 시나리오 10개, 예비력 700MW, 시간 제한 없음, gap 0.1%). 기준 예측은
 `/scenarios` 와 같이 forecast_api 에서 받고 (실패하면 `base_profile`), 계획 구간은 그 예측 구간이다
-(`result.start`, `result.base_source`). 환경변수 `PRECOMPUTE_ENABLED=false` 면 계산하지 않는다.
+(`result.start`, `result.base_source`). `base_profile` 로 폴백한 결과면 (`base_source: "config"`)
+`retry_interval`(5분)마다 forecast_api 를 다시 불러 보고, 응답이 오면 그때 다시 푼다. 환경변수 `PRECOMPUTE_ENABLED=false` 면 계산하지 않는다.
 
 스키마: `shared/schemas.py` 의 `StochasticLatest`.
 
@@ -459,14 +462,15 @@ Two-Stage Stochastic 급전 계획과 VSS. 스키마: `shared/schemas.py` 의 `S
 |---|---|
 | `state` | `pending` 시작 전 · `running` 계산 중 · `done` · `error` · `disabled` |
 | `computed_at` | 마지막으로 성공한 계산 시각 (KST) |
-| `seed`, `n_scenarios`, `reserve_ratio`, `shed_penalty_won_per_mwh`, `time_limit_s`, `mip_gap` | 계산 조건. `time_limit_s` 가 `null` 이면 제한 없음 |
+| `seed`, `n_scenarios`, `reserve_ratio`, `reserve_mw`, `shed_penalty_won_per_mwh`, `time_limit_s`, `mip_gap` | 계산 조건. `time_limit_s` 가 `null` 이면 제한 없음 |
 | `result` | `StochasticResponse`. 아직 없으면 `null`. 계산 중이거나 실패해도 이전 결과는 남는다 |
 | `error` | 마지막 실패 메시지 |
 
 ```json
 {
   "state": "done", "computed_at": "2026-11-02T21:10:00+09:00",
-  "seed": 1, "n_scenarios": 10, "reserve_ratio": 0.1, "shed_penalty_won_per_mwh": 10000000.0,
+  "seed": 1, "n_scenarios": 10, "reserve_ratio": 0.0, "reserve_mw": 700.0,
+  "shed_penalty_won_per_mwh": 3093000.0,
   "time_limit_s": null, "mip_gap": 0.001,
   "result": { "status": "optimal", "solve_time_s": 34.5, "start": "2026-09-27T01:00:00+09:00",
               "base_source": "forecast_api", "vss": { "vss_pct": 0.0, "...": "..." }, "...": "..." },

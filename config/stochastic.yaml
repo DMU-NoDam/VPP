@@ -15,6 +15,28 @@ reserve_short_penalty:
     [가정] 1단계 예비력 부족분 q[t] 에 붙이는 페널티. 3장 S5(예비율)는 문서에서 미확정이라
     코드가 1단계에 두었고, 용량 자체가 모자란 날에도 해가 나오게 슬랙을 붙였다.
 
+# 당일 추가 기동(3장 R1~R4)을 쓸지. false 면 기동·정지는 전부 1단계(전날)에서 정하고,
+# 아래 startup_time 표는 쓰이지 않는다.
+intraday_startup:
+  value: false
+  unit: "-"
+  source: >-
+    [가정] 기동·정지를 전부 1단계에 두는 구조 (이종헌·이경식 2023 식 (10)~(18), formulation.md 8.3).
+    한국 제도는 당일 추가 기동을 허용하므로 (전력시장운영규칙 신뢰도발전계획·급전지시) 실제보다
+    유연성을 작게 본 가정이다. true 로 두면 VSS 는 0.1% 안팎이다 (formulation.md 8.2 측정표)
+
+# 연료별 무부하비 비중 k. 가동 중인 유닛은 출력과 무관하게 시간당 k x 연료비 x Pmax 가 들고,
+# 출력에는 (1 - k) x 연료비가 붙는다 (정격 출력에서는 연료비 x Pmax 그대로).
+# 항목이 없는 연료는 0.
+no_load_share:
+  value:
+    lng: 0.04446
+  unit: ratio
+  source: >-
+    [가정] LNG 무부하비 6,895원/MW·h ÷ 정격 연료비 155,090원/MWh. 비용함수 H = a·P² + b·P + c 의
+    c (전력시장운영규칙 비용평가). 수치는 신인천복합 1호기 계수를 인용한 2차 자료라 근거가 약하다.
+    석탄은 근거를 찾지 못해 넣지 않았다
+
 # 3장 R1 기동시간 T^SU. 당일 추가 기동은 t >= ceil(T^SU) 부터 가능하다.
 # 항목이 없는 연료(원자력, 유류)는 당일 기동 불가.
 startup_time:
@@ -39,17 +61,28 @@ vss_target:
 
 request_defaults:
   reserve_ratio:
-    value: 0.10
+    value: 0.0
     unit: ratio
     source: >-
-      [가정] 과제 원문 L81 MILP 제약 2 "예비율 ≥ 수요의 10%"를 Stochastic 1단계에 준용 (D 의 해석).
-      formulation.md 3장 S5(1단계 예비율)는 미확정
+      [가정] 수요 비례 예비율은 쓰지 않는다 (아래 reserve_mw 로 대신한다). 과제 원문 L81
+      "예비율 ≥ 수요의 10%" 는 MILP(5번)의 제약이고 Stochastic(6번)에는 제약 목록이 없다.
+      10% 를 두면 VSS 는 0.1% 미만이다 (formulation.md 8.2 측정표)
+  reserve_mw:
+    value: 700
+    unit: MW
+    source: >-
+      [가정] 1단계 고정 예비력. 전력시장운영규칙 별표3 의 운영예비력(주파수제어 700 + 1차 1,000
+      + 2차 1,400 + 3차 1,400 = 4,500MW) 중 주파수제어 예비력 700MW 만 건다. 불확실성은 시나리오로
+      직접 다루므로 나머지 단계는 걸지 않았다. 규칙의 누적 단계 가운데 평균 VSS 가 과제 기준 3% 를
+      넘는 것은 이 단계뿐이다 (formulation.md 8.2 스윕: 0MW 8.18%, 700MW 4.83%, 1,700MW 2.56%,
+      3,100MW 1.18%, 4,500MW 0.16%. 저장소 코드로 다시 잰 700MW 평균은 4.51%)
   shed_penalty:
-    value: 10000000
+    value: 3093000
     unit: KRW/MWh
     source: >-
-      [미정] 부하차단 페널티 K (VoLL 대용, formulation.md 3장).
-      에너지경제연구원 기본연구 24-21 범위로 민감도 분석 예정
+      부하차단 페널티 K = VoLL 3,093원/kWh. 에너지경제연구원 기본연구보고서 24-21 (2024) 의
+      용도별 VoLL 을 2023년 용도별 판매전력량으로 가중평균한 값. 보고서는 시범 추정이라 직접
+      활용에 주의하라고 적었다
   time_limit:
     value: null
     unit: s
@@ -66,28 +99,31 @@ request_defaults:
 # 대시보드는 응답을 12초만 기다리는데, RP·EV·EEV 를 시간 제한에 걸리지 않게 풀면 1분 넘게 걸린다.
 # 그래서 서버가 켜질 때와 refresh_interval 마다 백그라운드로 한 번 풀어 두고
 # GET /api/v1/dispatch/stochastic/latest 로 마지막 결과를 내준다.
-# 조건은 formulation.md 3장 측정표의 seed 1 행과 같다 (R1~R4, 예비율 10% → VSS 0.00%).
+# forecast_api 가 응답하지 않아 base_profile 로 계산한 결과면 retry_interval 마다 다시 시도한다.
+# 조건은 formulation.md 8.2 측정표의 seed 1 과 같다 (당일 기동 없음, 예비력 700MW, K 3,093원/kWh).
 
 precompute:
   enabled: true
   seed:
     value: 1
     unit: "-"
-    source: formulation.md 3장 측정표의 seed 1 행과 같은 조건
+    source: formulation.md 8.2 측정표의 seed 1 과 같은 조건
   n_scenarios:
     value: 10
     unit: count
     source: 과제 원문 "시나리오 최소 10개"
   reserve_ratio:
-    value: 0.10
+    value: 0.0
     unit: ratio
-    source: >-
-      [가정] 과제 원문 L81 MILP 제약 2 "예비율 ≥ 수요의 10%"를 Stochastic 1단계에 준용 (D 의 해석).
-      formulation.md 3장 S5(1단계 예비율)는 미확정
+    source: "[가정] request_defaults.reserve_ratio 와 같은 값·같은 이유"
+  reserve_mw:
+    value: 700
+    unit: MW
+    source: "[가정] request_defaults.reserve_mw 와 같은 값·같은 이유"
   shed_penalty:
-    value: 10000000
+    value: 3093000
     unit: KRW/MWh
-    source: "[미정] 부하차단 페널티 K (formulation.md 3장)"
+    source: request_defaults.shed_penalty 와 같은 값 (KEEI 기본연구보고서 24-21 의 VoLL 3,093원/kWh)
   time_limit:
     value: null
     unit: s
@@ -100,6 +136,13 @@ precompute:
     value: 24
     unit: h
     source: "[가정] 하루 한 번 갱신"
+  retry_interval:
+    value: 5
+    unit: min
+    source: >-
+      [가정] 기준 예측이 base_profile 로 폴백한 결과면 이 간격으로 forecast_api 를 다시 불러 보고,
+      응답이 오면 그때 다시 푼다. forecast_api 를 막 띄운 직후 첫 호출이 forecast.timeout(30초)에
+      걸려 폴백한 적이 있다 (2026-11-12, 그때 VSS 2.21%)
 
 # ── 시나리오 생성기 (scenarios.py, POST /scenarios) ───────────────────────────
 # forecast_api 의 예측과 90% 예측구간에서 출발한다 (formulation.md 7절).

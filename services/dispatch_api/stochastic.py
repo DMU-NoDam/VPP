@@ -3,13 +3,16 @@
 1단계(Day-ahead, 시나리오 공통): 가동 u · 기동 y · 정지 z.
 2단계(Real-time, 시나리오별):   출력 P[i,t,s], 당일 추가 가동 u^RT · 기동 y^RT, 부하차단 L[t,s].
 
-목적함수 (3장 v0.10):
-    min Σ SU_i·y[i,t] + Σ_s p_s Σ_t ( Σ_i c_i·P[i,t,s] + Σ_i SU_i·y^RT[i,t,s] + K·L[t,s] )
+목적함수 (3장 v0.12):
+    min Σ SU_i·y[i,t] + Σ_s p_s Σ_t ( Σ_i [ (1-k_i)·c_i·P[i,t,s] + k_i·c_i·Pmax_i·o[i,t,s] ]
+                                       + Σ_i SU_i·y^RT[i,t,s] + K·L[t,s] )
+    k_i 는 무부하비 비중 (config 의 no_load_share, 없는 연료는 0). 정격에서는 c_i·Pmax_i 그대로다.
 
 제약 (3장 S1~S6, R1~R4, 2장 제약 3·4·5·기동 논리):
-    S1  Σ_i P[i,t,s] + L[t,s] >= d[s,t]
+    S1  d[s,t] <= Σ_i P[i,t,s] + L[t,s] <= D[s,t]   (수급 등호: 남는 발전은 재생 출력만큼만 버린다)
     S2  Pmin_i·o[i,t,s] <= P[i,t,s] <= Pmax_i·o[i,t,s],  o = u + u^RT
-    R1  u^RT[i,t,s] 는 t >= ceil(T^SU_i) 일 때만 존재 (config/stochastic.yaml 의 기동시간)
+    R1  u^RT[i,t,s] 는 t >= ceil(T^SU_i) 일 때만 존재 (config/stochastic.yaml 의 기동시간).
+        config 의 intraday_startup 이 꺼져 있으면 u^RT 를 만들지 않는다 (기동·정지는 전부 1단계)
     R2  u[i,t] + u^RT[i,t,s] <= 1
     R3  y^RT[i,t,s] >= u^RT[i,t,s] - u^RT[i,t-1,s]
     R4  당일 기동 후 최소 가동 TU_i
@@ -18,8 +21,9 @@
     S6  d[s,t] = D[s,t] - 태양광[s,t] - 풍력[s,t]
 
 문서에 없거나 미확정이라 코드가 정한 것 (가정):
-    S5 예비율   1단계에 둔다. Σ Pmax_i·u[i,t] + q[t] >= (1 + r)·(기대 순수요). 부족분 q 에
-                페널티를 붙여 설비가 모자란 날에도 해가 나오게 한다.
+    S5 예비력   1단계에 둔다. Σ Pmax_i·u[i,t] + q[t] >= (1 + r)·(기대 순수요) + R.
+                r 은 예비율, R 은 고정 예비력(MW). 부족분 q 에 페널티를 붙여 설비가 모자란 날에도
+                해가 나오게 한다.
     초기 상태   u[i,-1] = generators.yaml 의 초기 가동상태. 최소 가동/정지 시간을 아직 못 채웠으면
                 남은 시간만큼 그 상태를 유지한다.
     램프        출력 증가에는 ramp_up, 감소에는 ramp_down 을 쓴다. 0시의 직전 출력은 모르므로
@@ -78,11 +82,24 @@ class StochasticParams:
     vss_target_pct: float
     # 연료별 기동시간 T^SU (h). 없는 연료는 당일 기동 불가 (가정 — 유류는 3장에서 미확정)
     startup_time_h: dict[str, float] = field(default_factory=dict)
+    # False 면 어떤 연료도 당일 추가 기동을 하지 못한다 (기동·정지는 전부 1단계)
+    intraday_startup: bool = True
+    # 연료별 무부하비 비중 k (정격 출력 연료비 중 출력과 무관한 몫). 없는 연료는 0
+    no_load_share: dict[str, float] = field(default_factory=dict)
 
     def rt_start_hour(self, unit: Unit) -> int | None:
         """R1: 당일 추가 기동이 가능한 첫 시각 ceil(T^SU). 불가면 None."""
-        t_su = self.startup_time_h.get(unit.fuel)
+        t_su = self.startup_time_h.get(unit.fuel) if self.intraday_startup else None
         return None if t_su is None else math.ceil(t_su)
+
+    def no_load_krw_per_h(self, unit: Unit) -> float:
+        """가동 중 시간당 무부하비 k·c·Pmax (원/h)."""
+        share = self.no_load_share.get(unit.fuel, 0.0)
+        return share * unit.fuel_cost_krw_per_mwh * unit.p_max_mw
+
+    def incremental_cost(self, unit: Unit) -> float:
+        """무부하분을 뺀 증분 연료비 (1-k)·c (원/MWh)."""
+        return (1 - self.no_load_share.get(unit.fuel, 0.0)) * unit.fuel_cost_krw_per_mwh
 
 
 @dataclass(frozen=True)
@@ -90,6 +107,7 @@ class RequestDefaults:
     """POST /dispatch/stochastic 에서 값을 비웠을 때 쓰는 값 (config 의 request_defaults)."""
 
     reserve_ratio: float
+    reserve_mw: float
     shed_penalty_won_per_mwh: float
     time_limit_s: float | None  # None 이면 제한 없음
     mip_gap: float
@@ -103,6 +121,8 @@ def load_params(path: Path | None = None) -> StochasticParams:
         ),
         vss_target_pct=float(cfg_value(raw["vss_target"], "%")),
         startup_time_h=dict(cfg_value(raw["startup_time"], "h")),
+        intraday_startup=bool(cfg_value(raw["intraday_startup"], "-")),
+        no_load_share=dict(cfg_value(raw["no_load_share"], "ratio")),
     )
 
 
@@ -111,6 +131,7 @@ def load_request_defaults(path: Path | None = None) -> RequestDefaults:
     time_limit = cfg_value(raw["time_limit"], "s")
     return RequestDefaults(
         reserve_ratio=float(cfg_value(raw["reserve_ratio"], "ratio")),
+        reserve_mw=float(cfg_value(raw["reserve_mw"], "MW")),
         shed_penalty_won_per_mwh=float(cfg_value(raw["shed_penalty"], "KRW/MWh")),
         time_limit_s=None if time_limit is None else float(time_limit),
         mip_gap=float(cfg_value(raw["mip_gap"], "ratio")),
@@ -158,12 +179,13 @@ def build_model(
     shed_penalty: float,
     fixed: dict[str, np.ndarray] | None = None,
     plan_net: np.ndarray | None = None,
+    reserve_mw: float = 0.0,
 ) -> pyo.ConcreteModel:
     """확장형 모델 (formulation.md 3장). fixed 를 주면 1단계 변수를 그 값으로 고정한다 (EEV).
 
-    plan_net 은 예비율 제약(가정 — S5 는 문서에서 미확정)의 기준 순수요다. RP·EV·EEV·WS 가 같은
+    plan_net 은 예비력 제약(가정 — S5 는 문서에서 미확정)의 기준 순수요다. RP·EV·EEV·WS 가 같은
     값을 써야 1단계 실현가능영역이 같아져 WS <= RP <= EEV 가 성립한다. None 이면 입력
-    시나리오의 기대 순수요.
+    시나리오의 기대 순수요. reserve_mw 는 그 위에 더 확보할 고정 예비력이다.
     """
     horizon = len(scenarios[0].demand_mw)
     last = horizon - 1  # N_T
@@ -172,6 +194,7 @@ def build_model(
     prob = np.array([s.probability for s in scenarios])
     prob = prob / prob.sum()
     net = np.array([net_load(s) for s in scenarios])  # d[s,t]
+    gross = np.array([s.demand_mw for s in scenarios])  # D[s,t]
     net_expected = prob @ net if plan_net is None else np.asarray(plan_net, dtype=float)
 
     m = pyo.ConcreteModel()
@@ -225,10 +248,10 @@ def build_model(
                 c.add(1 - m.u[g, k] >= prev_u - m.u[g, t])
 
     for t in hour_ix:
-        # 가정 (S5 미확정): 예비율을 1단계에 둔다
+        # 가정 (S5 미확정): 예비력을 1단계에 둔다
         c.add(
             sum(units[g].p_max_mw * m.u[g, t] for g in gen_ix) + m.res_short[t]
-            >= (1 + reserve_ratio) * float(net_expected[t])
+            >= (1 + reserve_ratio) * float(net_expected[t]) + reserve_mw
         )
 
     for s in scen_ix:
@@ -252,8 +275,10 @@ def build_model(
                     c.add(m.p[g, t, s] - m.p[g, t - 1, s] <= unit.ramp_up_mw_per_h)
                     c.add(m.p[g, t - 1, s] - m.p[g, t, s] <= unit.ramp_down_mw_per_h)
         for t in hour_ix:
-            # S1
-            c.add(sum(m.p[g, t, s] for g in gen_ix) + m.shed[t, s] >= float(net[s, t]))
+            # S1. 상한은 수급 등호 (2장 제약 1): 버릴 수 있는 것은 재생 출력뿐이다
+            supply = sum(m.p[g, t, s] for g in gen_ix) + m.shed[t, s]
+            c.add(supply >= float(net[s, t]))
+            c.add(supply <= float(gross[s, t]))
 
     if fixed is not None:
         for name in FIRST_STAGE_VARS:
@@ -266,8 +291,14 @@ def build_model(
     # 가정: 예비력 부족 페널티. 문서 3장 목적함수에는 없는 항이다
     reserve_pen = sum(params.reserve_short_penalty_krw_per_mw * m.res_short[t] for t in hour_ix)
 
+    no_load = {g: params.no_load_krw_per_h(units[g]) for g in gen_ix}
+
     def second_cost(s: int) -> pyo.Expression:
-        fuel = sum(units[g].fuel_cost_krw_per_mwh * m.p[g, t, s] for g in gen_ix for t in hour_ix)
+        fuel = sum(
+            params.incremental_cost(units[g]) * m.p[g, t, s] for g in gen_ix for t in hour_ix
+        )
+        # 무부하비는 출력과 무관하게 가동 시간마다 든다 (비중이 0 인 유닛은 항을 만들지 않는다)
+        fuel += sum(no_load[g] * on(g, t, s) for g in gen_ix if no_load[g] for t in hour_ix)
         rt_start = sum(units[g].startup_cost_krw * m.yrt[g, t, s] for g, t in m.RT)
         return fuel + rt_start + sum(shed_penalty * m.shed[t, s] for t in hour_ix)
 
@@ -338,15 +369,18 @@ def scenario_costs(
     """시나리오별 비용. 1단계 기동비와 예비력 부족 페널티는 모든 시나리오에 똑같이 붙인다.
 
     startup_won = 1단계 기동비 + 그 시나리오의 당일 추가 기동비.
+    fuel_won = 증분 연료비 + 무부하비 (가동 시간 x k·c·Pmax).
     """
-    fuel = np.array([u.fuel_cost_krw_per_mwh for u in units])
+    fuel = np.array([params.incremental_cost(u) for u in units])
+    no_load = np.array([params.no_load_krw_per_h(u) for u in units])
     su = np.array([u.startup_cost_krw for u in units])
     first_startup = float(su @ sol.first["y"].sum(axis=1))
     # 가정 항(예비력 부족 페널티)은 recourse_won 자리에 보고한다. 3장 모델에는 다른 조정 비용이 없다
     reserve_pen = params.reserve_short_penalty_krw_per_mw * float(sol.first["res_short"].sum())
     out = []
     for s in range(sol.second["p"].shape[2]):
-        fuel_won = float(fuel @ sol.second["p"][:, :, s].sum(axis=1))
+        on_hours = (sol.first["u"] + sol.second["urt"][:, :, s]).sum(axis=1)
+        fuel_won = float(fuel @ sol.second["p"][:, :, s].sum(axis=1) + no_load @ on_hours)
         startup = first_startup + float(su @ sol.second["yrt"][:, :, s].sum(axis=1))
         shed_won = shed_penalty * float(sol.second["shed"][:, s].sum())
         out.append(
@@ -375,7 +409,7 @@ def hour_summaries(
     for t, d in enumerate(scenario.demand_mw):
         thermal = float(sol.second["p"][:, t, s].sum())
         shed = float(sol.second["shed"][t, s])
-        # S1 이 부등호라 최소출력 때문에 남는 전력이 생길 수 있다. 그만큼은 재생 출력 제한으로 본다
+        # 최소출력 때문에 남는 전력은 재생 출력 제한으로 본다 (S1 상한이라 재생 출력을 넘지 않는다)
         surplus = max(thermal + shed - float(net[t]), 0.0)
         on = sol.first["u"][:, t] + sol.second["urt"][:, t, s]
         capacity = float(p_max @ on) + scenario.solar_mw[t] + scenario.wind_mw[t]
@@ -416,19 +450,22 @@ def run(
     reserve_ratio: float,
     shed_penalty: float,
     opts: SolverOptions,
+    reserve_mw: float = 0.0,
     compute_ws: bool = True,
     include_scenario_hours: bool = False,
 ) -> StochasticResponse:
     """RP · EV · EEV (· WS) 를 차례로 풀어 급전 계획과 VSS 를 돌려준다.
 
-    reserve_ratio·shed_penalty·opts 는 호출하는 쪽이 config(또는 요청)에서 채워 넘긴다.
+    reserve_ratio·reserve_mw·shed_penalty·opts 는 호출하는 쪽이 config(또는 요청)에서 채워 넘긴다.
     """
     t0 = time.perf_counter()
 
     plan_net = net_load(mean_scenario(scenarios))
 
     def solve_on(scs: list[Scenario], fixed: dict | None = None) -> Solved:
-        model = build_model(units, scs, params, reserve_ratio, shed_penalty, fixed, plan_net)
+        model = build_model(
+            units, scs, params, reserve_ratio, shed_penalty, fixed, plan_net, reserve_mw
+        )
         return solve(model, opts)
 
     rp = solve_on(scenarios)
@@ -443,8 +480,11 @@ def run(
 
     prob = np.array([s.probability for s in scenarios])
     prob = prob / prob.sum()
-    if not rp.first:
-        raise RuntimeError(f"RP 를 풀지 못했다: {rp.status}")
+    # 수급 상한 때문에 EV 계획이 낮은 시나리오에서 실현 불가능할 수 있다 (과잉 발전).
+    # 그때는 EEV 가 없어 VSS 를 계산할 수 없다
+    for name, sol in (("RP", rp), ("EV", ev), ("EEV", eev)):
+        if not sol.first:
+            raise RuntimeError(f"{name} 를 풀지 못했다: {sol.status}")
 
     costs = scenario_costs(units, params, shed_penalty, rp)
     hours = [hour_summaries(units, sc, rp, s, start) for s, sc in enumerate(scenarios)]

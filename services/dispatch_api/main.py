@@ -124,6 +124,7 @@ def dispatch_stochastic(req: StochasticRequest) -> StochasticResponse:
             stochastic.load_params(),
             start=start,
             reserve_ratio=d.reserve_ratio if req.reserve_ratio is None else req.reserve_ratio,
+            reserve_mw=d.reserve_mw if req.reserve_mw is None else req.reserve_mw,
             shed_penalty=(
                 d.shed_penalty_won_per_mwh
                 if req.shed_penalty_won_per_mwh is None

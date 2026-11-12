@@ -146,7 +146,62 @@ def test_balance_holds_in_every_scenario(params) -> None:
     for s, sc in enumerate(SCENARIOS):
         supply = sol.second["p"][:, :, s].sum(axis=0) + sol.second["shed"][:, s]
         net = np.array(sc.demand_mw) - np.array(sc.wind_mw)
-        assert (supply >= net - 1e-4).all()  # S1 은 부등호
+        assert (supply >= net - 1e-4).all()
+        # S1 등호: 남는 발전은 재생 출력(풍력 50)만큼만 버릴 수 있다
+        assert (supply <= np.array(sc.demand_mw) + 1e-4).all()
+
+
+def test_surplus_is_limited_to_renewable_output(params) -> None:
+    # 최소출력 300 인 기저가 초기 가동 6h 를 못 채워 꺼지지 못한다. 순수요 250 (수요 300, 풍력 50)
+    # 이면 남는 50 은 풍력 출력 제한으로 흡수되지만, 수요 280 이면 버릴 곳이 없어 해가 없다
+    must_run = [dataclasses.replace(FLEET[0], init_state_h=0)]
+    ok = stochastic.solve(
+        stochastic.build_model(must_run, [scen("x", 1.0, [300.0] * 6)], params, 0.0, 1e7), TIGHT
+    )
+    assert ok.status == "optimal"
+    bad = stochastic.solve(
+        stochastic.build_model(must_run, [scen("x", 1.0, [280.0] * 6)], params, 0.0, 1e7), TIGHT
+    )
+    assert bad.status == "infeasible"
+
+
+def test_run_raises_when_ev_plan_is_infeasible_in_a_scenario(params) -> None:
+    # EV(평균 순수요 335)는 최소출력 300 인 mid 를 켠다. 낮은 시나리오(수요 280)에서는
+    # 그 출력을 버릴 곳이 없어 EEV 를 평가할 수 없다 → VSS 를 NaN 으로 내지 않고 멈춘다
+    fleet = [dataclasses.replace(FLEET[1], p_min_mw=300, init_state_h=6), FLEET[2]]
+    scs = [scen("low", 0.5, [280.0] * 6), scen("high", 0.5, [490.0] * 6)]
+    with pytest.raises(RuntimeError, match="EEV"):
+        stochastic.run(fleet, scs, params, START, opts=TIGHT, reserve_ratio=0.0,
+                       shed_penalty=10_000_000.0)
+
+
+def test_reserve_mw_is_a_fixed_margin_over_expected_net_load(params) -> None:
+    # S5: Σ Pmax·u + q >= 기대 순수요 + R. 예비력을 올리면 가동 설비가 늘고 비용은 줄지 않는다
+    net = stochastic.net_load(stochastic.mean_scenario(SCENARIOS))
+    p_max = np.array([u.p_max_mw for u in FLEET])
+    costs = []
+    for reserve_mw in (0.0, 300.0):
+        sol = stochastic.solve(
+            stochastic.build_model(FLEET, SCENARIOS, params, 0.0, 1e7, reserve_mw=reserve_mw),
+            TIGHT,
+        )
+        capacity = p_max @ sol.first["u"]
+        assert (capacity + sol.first["res_short"] >= net + reserve_mw - 1e-4).all()
+        costs.append(sol.objective)
+    assert costs[1] >= costs[0] - 1
+
+
+def test_no_load_cost_is_charged_per_committed_hour() -> None:
+    # 무부하비 비중 k = 0.1: 가동 시간마다 k·c·Pmax, 출력에는 (1-k)·c.
+    # 정격(100MW)에서는 c·Pmax 그대로, 절반 출력(50MW)에서는 0.9·c·50 + 0.1·c·100
+    lng = unit("solo", "lng", 100, 0, 100_000, startup_cost_krw=0, u_init=1)
+    p = dataclasses.replace(PARAMS, no_load_share={"lng": 0.1})
+    kw = dict(opts=TIGHT, reserve_ratio=0.0, shed_penalty=10_000_000.0)
+    full = stochastic.run([lng], [scen("x", 1.0, [150.0, 150.0])], p, START, **kw)
+    half = stochastic.run([lng], [scen("x", 1.0, [100.0, 100.0])], p, START, **kw)
+    assert full.vss.rp_won == pytest.approx(2 * 100_000 * 100)
+    assert half.vss.rp_won == pytest.approx(2 * (0.9 * 100_000 * 50 + 0.1 * 100_000 * 100))
+    assert half.expected_cost.fuel_won == pytest.approx(half.vss.rp_won)
 
 
 def test_output_follows_first_stage_commitment(params) -> None:
@@ -233,6 +288,13 @@ def test_intraday_start_lowers_or_keeps_rp() -> None:
     assert rt.objective <= base.objective + 1
 
 
+def test_intraday_startup_off_removes_rt_variables() -> None:
+    # 기동시간 표가 있어도 intraday_startup 을 끄면 당일 추가 기동 변수가 생기지 않는다
+    off = dataclasses.replace(RT_PARAMS, intraday_startup=False)
+    assert len(stochastic.build_model(FLEET, SCENARIOS, RT_PARAMS, 0.0, 1e7).RT) > 0
+    assert len(stochastic.build_model(FLEET, SCENARIOS, off, 0.0, 1e7).RT) == 0
+
+
 def test_mean_scenario_weights() -> None:
     m = stochastic.mean_scenario(SCENARIOS)
     assert m.demand_mw[0] == pytest.approx(0.3 * 700 + 0.4 * 800 + 0.3 * 900)
@@ -242,8 +304,13 @@ def test_load_params_reads_yaml() -> None:
     p = stochastic.load_params()
     assert p.reserve_short_penalty_krw_per_mw > 0
     assert p.startup_time_h["lng"] == 2 and "nuclear" not in p.startup_time_h
-    assert p.rt_start_hour(unit("x", "lng", 1, 0, 0)) == 2
-    assert p.rt_start_hour(unit("y", "hydro", 1, 0, 0)) == 1  # ceil(0.1)
+    # 저장소 config 는 당일 추가 기동을 꺼 둔다 (formulation.md 8.2 가정)
+    assert not p.intraday_startup
+    assert p.rt_start_hour(unit("x", "lng", 1, 0, 0)) is None
+    on = dataclasses.replace(p, intraday_startup=True)
+    assert on.rt_start_hour(unit("x", "lng", 1, 0, 0)) == 2
+    assert on.rt_start_hour(unit("y", "hydro", 1, 0, 0)) == 1  # ceil(0.1)
+    assert 0 < p.no_load_share["lng"] < 1 and "nuclear" not in p.no_load_share
 
 
 def test_status_reports_non_optimal_ev(params, monkeypatch) -> None:
@@ -341,7 +408,9 @@ def test_precompute_config_reads_yaml(tmp_path, monkeypatch) -> None:
 
 def test_precompute_repo_config_matches_measurement_table() -> None:
     cfg = _load("precompute").load_config()
-    assert (cfg.seed, cfg.n_scenarios, cfg.reserve_ratio) == (1, 10, 0.10)
+    assert (cfg.seed, cfg.n_scenarios, cfg.reserve_ratio, cfg.reserve_mw) == (1, 10, 0.0, 700.0)
+    assert cfg.shed_penalty_won_per_mwh == 3_093_000
+    assert (cfg.refresh_hours, cfg.retry_minutes) == (24, 5)
 
 
 def test_precompute_compute_once_done_then_error_keeps_result(result, monkeypatch) -> None:
@@ -365,6 +434,30 @@ def test_precompute_compute_once_done_then_error_keeps_result(result, monkeypatc
     assert snap.result is not None  # 이전 결과는 남는다
 
 
+def test_precompute_retries_fallback_result_once_forecast_is_back(result, monkeypatch) -> None:
+    precompute = _load("precompute")
+    store = precompute.LatestStore(dataclasses.replace(precompute.load_config(), enabled=True))
+    fallback = sys.modules["scenarios"].DEFAULT_BASE
+    solved = []
+    monkeypatch.setattr(precompute, "load_units", lambda: FLEET)
+    monkeypatch.setattr(precompute.stochastic, "run", lambda *a, **k: solved.append(1) or result)
+    monkeypatch.setattr(precompute, "resolve_base", lambda now=None: fallback)
+    precompute.compute_once(store)
+    assert store.snapshot().result.base_source == "config" and store.used_fallback_base()
+    assert precompute.next_wait_s(store) == store.cfg.retry_minutes * 60
+
+    # forecast_api 가 아직 안 되면 다시 풀지 않고 이전 결과를 그대로 둔다
+    precompute.compute_once(store, forecast_only=True)
+    assert len(solved) == 1 and store.snapshot().state == "done"
+
+    forecast = fallback.model_copy(update={"source": "forecast_api"})
+    monkeypatch.setattr(precompute, "resolve_base", lambda now=None: forecast)
+    precompute.compute_once(store, forecast_only=True)
+    assert len(solved) == 2 and store.snapshot().result.base_source == "forecast_api"
+    assert not store.used_fallback_base()
+    assert precompute.next_wait_s(store) == store.cfg.refresh_hours * 3600
+
+
 def test_precompute_disabled_starts_no_thread() -> None:
     import threading
 
@@ -381,7 +474,7 @@ def test_api_stochastic_latest(monkeypatch) -> None:
     assert r.status_code == 200
     data = r.json()
     assert data["state"] == "disabled" and data["result"] is None
-    assert data["seed"] == 1 and data["reserve_ratio"] == 0.10
+    assert data["seed"] == 1 and data["reserve_ratio"] == 0.0 and data["reserve_mw"] == 700.0
 
 
 # ── config/stochastic.yaml ({value, unit, source}) ──────────────────────────
@@ -412,6 +505,7 @@ def test_api_fills_empty_fields_from_config(result, monkeypatch) -> None:
     )
     assert r.status_code == 200, r.text
     assert seen["reserve_ratio"] == d.reserve_ratio
+    assert seen["reserve_mw"] == d.reserve_mw
     assert seen["shed_penalty"] == d.shed_penalty_won_per_mwh
     assert (seen["opts"].time_limit_s, seen["opts"].mip_gap) == (d.time_limit_s, d.mip_gap)
 

@@ -170,7 +170,8 @@ class StochasticRequest(BaseModel):
     generator_ids: list[str] | None = None  # None 이면 generators.yaml 전체
     use_ess: bool = True
     reserve_ratio: float | None = None
-    shed_penalty_won_per_mwh: float | None = None  # K (VOLL 대용). 값은 formulation.md 에서 확정
+    reserve_mw: float | None = None  # 1단계 고정 예비력 (MW). 예비율 요건에 더해진다
+    shed_penalty_won_per_mwh: float | None = None  # K (VoLL). 값과 출처는 config/stochastic.yaml
     include_scenario_hours: bool = False  # True 면 시나리오별 시간 요약까지 반환 (응답 커짐)
     solver: SolverOptions | None = None
 
@@ -227,6 +228,7 @@ class StochasticLatest(BaseModel):
     seed: int
     n_scenarios: int
     reserve_ratio: float
+    reserve_mw: float
     shed_penalty_won_per_mwh: float
     time_limit_s: float | None  # None 이면 제한 없음
     mip_gap: float
