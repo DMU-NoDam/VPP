@@ -42,6 +42,7 @@ known-first-party = [
   "units", "stochastic", "precompute",
   # forecast_api
   "data_client", "features", "metrics", "pi", "forecast_engine", "router", "schemas",
+  "train_lgbm", "train_lstm",
   # dashboard
   "logic", "ui", "page_scenarios", "page_stochastic_test",
 ]

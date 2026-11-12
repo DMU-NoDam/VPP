@@ -35,6 +35,7 @@ _spec = importlib.util.spec_from_file_location(
     "train_lgbm", FORECAST_DIR / "models" / "train_lgbm.py"
 )
 train_lgbm = importlib.util.module_from_spec(_spec)
+sys.modules["train_lgbm"] = train_lgbm  # train_lstm 이 `from train_lgbm import` 로 같은 모듈을 쓰게
 _spec.loader.exec_module(train_lgbm)
 
 N_DAYS = 35
@@ -102,7 +103,7 @@ def boosters(raw):
 
 
 def test_weather_columns():
-    assert data_client.weather_columns("demand") == ["temperature_c"]
+    assert data_client.weather_columns("demand") == ["temperature_c", "irradiance"]
     solar_cols = data_client.weather_columns("solar")
     assert len(solar_cols) == len(data_client.SOLAR_STATIONS) + 1 and solar_cols[-1] == "irradiance"
     assert data_client.weather_columns("wind")[-1] == "wind_speed"
@@ -110,7 +111,7 @@ def test_weather_columns():
 
 def test_get_demand_hourly_with_temperature(raw):
     df = raw["demand"]
-    assert list(df.columns) == ["datetime", "demand_mw", "temperature_c"]
+    assert list(df.columns) == ["datetime", "demand_mw", "temperature_c", "irradiance"]
     assert len(df) == 24 * N_DAYS
     assert df.isna().sum().sum() == 0
 
@@ -238,6 +239,25 @@ def test_check_spec():
 # --- pi ------------------------------------------------------------------------
 
 
+def test_horizon_hour_pi_widens_hard_hours():
+    """낮(10~15시) 오차가 3배인 데이터 → 낮 배율이 크고, 새 데이터에서 커버리지 ≈ 90%."""
+    rng = np.random.default_rng(0)
+    origins = list(pd.date_range("2026-01-01", periods=200, freq="4h"))
+    hours = pi.target_hours(origins, 48)
+    assert hours[0, 0] == origins[0].hour and hours.shape == (200, 48)
+    scale = np.where((hours >= 10) & (hours <= 15), 3.0, 1.0)
+    params = pi.compute_horizon_hour_pi(np.abs(rng.normal(0, 1, (200, 48)) * scale), hours)
+    assert params["hour_scale"][12] > 2 * params["hour_scale"][3]
+    new = np.abs(rng.normal(0, 1, (200, 48)) * scale)
+    zero = np.zeros(48)  # 예측값 0 → 상한 = 폭
+    widths = np.array([
+        pi.apply_horizon_hour_pi(zero, params["horizon_scale"], params["hour_scale"],
+                                 params["q"], hours[i])[1]
+        for i in range(200)
+    ])
+    assert 0.85 < np.mean(new <= widths) < 0.95
+
+
 def test_conformal_quantile_finite_sample():
     r = np.arange(1, 10, dtype=float)  # n=9 → ceil(10*0.9)/9 = 1 → 최댓값
     assert pi.conformal_quantile(r, 0.9) == 9.0
@@ -344,14 +364,28 @@ def test_run_forecast_fallback_without_pi(saved_dir):
 
 
 def test_load_model_errors(saved_dir):
-    with pytest.raises(FileNotFoundError):
-        forecast_engine._load_model("demand", "lstm")  # .pt 없음
-    (saved_dir / "demand_lstm.pt").write_bytes(b"x")
-    with pytest.raises(NotImplementedError):
-        forecast_engine._load_model("demand", "lstm")
     (saved_dir / "wind_lgbm.txt").unlink()
     with pytest.raises(FileNotFoundError):
-        forecast_engine._load_model("wind", "auto")
+        forecast_engine._load_model("wind")
+
+
+def test_load_lstm_errors(saved_dir):
+    with pytest.raises(FileNotFoundError):
+        forecast_engine._load_lstm("demand")  # .pt / eval.json 없음
+    (saved_dir / "demand_lstm.pt").write_bytes(b"broken")
+    (saved_dir / "demand_lstm_eval.json").write_text("{}")
+    # torch가 없으면 NotImplementedError, 있으면 손상된 파일이라 ModelLoadError
+    with pytest.raises((NotImplementedError, forecast_engine.ModelLoadError)):
+        forecast_engine._load_lstm("demand")
+
+
+def test_auto_falls_back_to_lightgbm_without_lstm(saved_dir):
+    end = str(pd.Timestamp(START) + pd.Timedelta(days=N_DAYS - 1))
+    assert forecast_engine.SERVING_MODEL["wind"] == "lstm"
+    res = forecast_engine.run_forecast("wind", START, end, 24)  # LSTM 파일 없음 → 대체
+    assert res["model_used"] == "lightgbm" and len(res["points"]) == 24
+    with pytest.raises(FileNotFoundError):  # 직접 lstm을 지정하면 대체하지 않고 에러
+        forecast_engine.run_forecast("wind", START, end, 24, model_name="lstm")
 
 
 # --- router (HTTP) -------------------------------------------------------------
@@ -381,9 +415,13 @@ def test_api_forecast_all(client):
 
 def test_api_errors(client, saved_dir):
     assert client.post("/api/v1/forecast", json=_body(horizon_hours=10)).status_code == 422
-    (saved_dir / "demand_lstm.pt").write_bytes(b"x")
-    r = client.post("/api/v1/forecast", json=_body(target="demand", model="lstm"))
+    # quantile 구간은 미구현 → conformal로 몰래 바꾸지 않고 501
+    r = client.post("/api/v1/forecast", json=_body(target="demand", pi_method="quantile"))
     assert r.status_code == 501
+    (saved_dir / "demand_lstm.pt").write_bytes(b"broken")
+    (saved_dir / "demand_lstm_eval.json").write_text("{}")
+    r = client.post("/api/v1/forecast", json=_body(target="demand", model="lstm"))
+    assert r.status_code in (500, 501)  # torch 없음 501 / 손상된 모델 500
     (saved_dir / "solar_lgbm.txt").unlink()
     r = client.post("/api/v1/forecast", json=_body(target="solar"))
     assert r.status_code == 500 and r.json()["detail"]["result_msg"] == "MODEL_LOAD_ERROR"
@@ -400,7 +438,29 @@ def test_train_one_end_to_end(target, tmp_path, monkeypatch):
     result = train_lgbm.train_one(target)
     assert set(result) == {"24h", "168h"}
     saved = json.loads((tmp_path / f"{target}_pi.json").read_text(encoding="utf-8"))
-    assert saved["pi_type"] == ("horizon" if target == "demand" else "hourly")
+    assert saved["pi_type"] == ("horizon_hour" if target == "demand" else "hourly")
+    if target == "demand":  # 가변 폭: 시각 배율 24개(평균 1) + 분위수 q
+        assert len(saved["hour_scale"]) == 24 and abs(np.mean(saved["hour_scale"]) - 1) < 1e-3
+        assert saved["q"] > 0
     assert len(saved["margins"]) == (168 if target == "demand" else 24)
     assert (tmp_path / f"{target}_lgbm.txt").exists()
     assert 0 <= result["24h"]["coverage"] <= 100
+
+
+def test_lstm_train_and_serve(tmp_path, monkeypatch):
+    """torch가 있을 때만: LSTM 학습 → 저장 → API 엔진에서 불러와 예측까지."""
+    pytest.importorskip("torch")
+    models_dir = str(FORECAST_DIR / "models")
+    if models_dir not in sys.path:
+        sys.path.insert(0, models_dir)
+    import train_lstm  # `models` 패키지 이름은 dispatch_api/models.py와 겹쳐서 모듈 이름으로 부른다
+
+    monkeypatch.setattr(train_lstm, "SAVED_DIR", tmp_path)
+    monkeypatch.setattr(train_lstm, "TEST_DAYS", 8)
+    monkeypatch.setattr(train_lstm, "CALIB_DAYS", 9)
+    train_lstm.train_one("demand")
+    monkeypatch.setattr(forecast_engine, "SAVED_DIR", tmp_path)
+    end = str(pd.Timestamp(START) + pd.Timedelta(days=N_DAYS - 1))
+    res = forecast_engine.run_forecast("demand", START, end, 48, model_name="lstm")
+    assert res["model_used"] == "lstm" and len(res["points"]) == 48
+    assert all(p["lower_bound"] <= p["predicted"] <= p["upper_bound"] for p in res["points"])
