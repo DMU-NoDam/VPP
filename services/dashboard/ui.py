@@ -164,14 +164,17 @@ def inject_custom_css() -> None:
 
         /* 카드 머리글·큰 값 */
         .vpp-kpi-head {
-            display: flex; justify-content: space-between; align-items: center; gap: .5rem;
+            display: flex; justify-content: space-between; align-items: center;
+            flex-wrap: wrap; gap: .15rem .5rem;
             font-size: .95rem; font-weight: 600; color: var(--vpp-text);
             margin-bottom: .65rem;  /* 제목과 내용 사이 */
         }
-        /* 제목과 출처 태그(실측·목업)는 한 줄에 둔다. 줄이 모자라면 오른쪽 보조 글이 접힌다 */
+        /* 제목과 출처 태그(실측·목업)는 한 줄에 둔다. 줄이 모자라면 오른쪽 보조 글이
+           글자 단위로 꺾이지 않고 통째로 다음 줄 오른쪽에 붙는다 */
         .vpp-kpi-head > span:first-child { white-space: nowrap; }
         .vpp-kpi-head small {
             font-size: .75rem; color: var(--vpp-muted); font-weight: 500; text-align: right;
+            white-space: nowrap; margin-left: auto;
         }
         .vpp-kpi-row {
             display: flex; align-items: baseline; gap: .55rem; flex-wrap: wrap; margin-top: .3rem;
@@ -273,10 +276,14 @@ def inject_custom_css() -> None:
         .vpp-tiles { margin-top: .5rem; }
         .vpp-tiles .vpp-tile + .vpp-tile { margin-top: .65rem; }  /* 타일 사이 간격 */
         .vpp-tile.opt { align-items: center; padding: .45rem .75rem; }
+        .vpp-tile.opt { gap: .6rem; }
         .vpp-tile.opt > div { display: flex; flex-direction: column; gap: .05rem; }
-        .vpp-tile.opt > div:last-child { align-items: flex-end; }
-        .vpp-tile.opt small { font-size: .75rem; color: var(--vpp-muted); }
-        .vpp-tile.opt b { font-size: 1.1rem; color: var(--vpp-text); }
+        .vpp-tile.opt > div:first-child { min-width: 0; }  /* 좁으면 설명 쪽이 줄바꿈된다 */
+        .vpp-tile.opt > div:last-child { align-items: flex-end; flex-shrink: 0; }
+        .vpp-tile.opt small {
+            font-size: .75rem; color: var(--vpp-muted); word-break: keep-all;
+        }
+        .vpp-tile.opt b { font-size: 1.1rem; color: var(--vpp-text); white-space: nowrap; }
         .vpp-chk {
             font-style: normal; font-size: .75rem; font-weight: 700; white-space: nowrap;
             padding: .08rem .5rem; border-radius: 999px;
@@ -342,10 +349,12 @@ def inject_custom_css() -> None:
         /* 위기 시나리오 행 */
         .vpp-crisis-cap { font-size: .75rem; color: var(--vpp-muted); margin: .55rem 0 .2rem; }
         .vpp-crisis-row {
-            display: grid; grid-template-columns: 1fr 70px 3.2rem; align-items: center;
+            display: grid; grid-template-columns: minmax(0, 1fr) 56px 3.2rem;
+            align-items: center;
             gap: .5rem; padding: .3rem 0; font-size: .78rem; color: var(--vpp-text);
         }
-        .vpp-crisis-row .n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        /* 이름이 길면 자르지 않고 띄어쓰기에서 줄을 바꾼다 */
+        .vpp-crisis-row .n { word-break: keep-all; line-height: 1.3; }
         .vpp-crisis-row b { text-align: right; font-variant-numeric: tabular-nums; }
 
         /* 가로 진행 막대 (위기 시나리오·발전원 공용) */
@@ -363,7 +372,7 @@ def inject_custom_css() -> None:
 
         /* 발전원 목록 */
         .vpp-gen-row {
-            display: grid; grid-template-columns: 18px 3.4rem 4.2rem 1fr 2.2rem;
+            display: grid; grid-template-columns: 18px 3.4rem 4.2rem minmax(0, 1fr) 2.4rem;
             align-items: center; gap: .5rem; padding: .36rem 0;
             font-size: .78rem;
         }
@@ -461,6 +470,44 @@ def inject_custom_css() -> None:
         /* 아이콘이 없는 발전원: 색 점 */
         .vpp-dot {
             width: 10px; height: 10px; border-radius: 50%; justify-self: center;
+        }
+
+        /* ── 좁은 화면 (노트북·빔프로젝터: 창 폭 1500px 이하) ──
+           열 3·4개를 한 줄에 두면 카드가 200px 안팎이 되어 글자가 꺾이고 값이 잘린다.
+           1행: 예비율 · Merit Order 를 한 줄에, 수요·공급·실측 카드는 그 아래 한 줄로.
+           2행: 카드 4개를 2 x 2 로. (카드 key 는 app.py 의 card(key=...)) */
+        @media (max-width: 1500px) {
+            div[data-testid="stHorizontalBlock"]:has(.st-key-vpp-hero)
+                > div[data-testid="stColumn"],
+            div[data-testid="stHorizontalBlock"]:has(.st-key-vpp-opt)
+                > div[data-testid="stColumn"] { min-width: 0 !important; }
+            div[data-testid="stHorizontalBlock"]:has(.st-key-vpp-hero)
+                > div[data-testid="stColumn"]:nth-child(1) { flex: 1.05 1 30% !important; }
+            div[data-testid="stHorizontalBlock"]:has(.st-key-vpp-hero)
+                > div[data-testid="stColumn"]:nth-child(2) { flex: 2.2 1 60% !important; }
+            div[data-testid="stColumn"]:has(.st-key-vpp-demand) { flex: 1 1 100% !important; }
+            div[data-testid="stColumn"]:has(.st-key-vpp-demand)
+                > div[data-testid="stVerticalBlock"] {
+                flex-direction: row !important; align-items: stretch !important;
+            }
+            div[data-testid="stColumn"]:has(.st-key-vpp-demand)
+                > div[data-testid="stVerticalBlock"] > div {
+                flex: 1 1 0 !important; width: auto !important; min-width: 0 !important;
+            }
+            div[data-testid="stColumn"]:has(.st-key-vpp-demand)
+                > div[data-testid="stVerticalBlock"] > div > div[data-testid="stVerticalBlock"] {
+                height: 100%;
+            }
+            div[data-testid="stHorizontalBlock"]:has(.st-key-vpp-opt)
+                > div[data-testid="stColumn"] { flex: 1 1 calc(50% - 1.1rem) !important; }
+            /* 분석 상세(최적화 상세 · 탄소 분석), Two-Stage 테스트(문제별 비용 · 비용 구성):
+               두 카드를 위아래로 둔다 (값 타일 제목·표의 설명 열이 잘리지 않게) */
+            div[data-testid="stHorizontalBlock"]:has(.st-key-vpp-opt-detail)
+                > div[data-testid="stColumn"],
+            div[data-testid="stHorizontalBlock"]:has(.st-key-vpp-sto-problems)
+                > div[data-testid="stColumn"] {
+                flex: 1 1 100% !important; min-width: 0 !important;
+            }
         }
 
         /* 표·확장 패널 */

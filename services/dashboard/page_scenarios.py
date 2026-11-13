@@ -253,16 +253,21 @@ def render_table(data: dict) -> str:
     """시나리오 요약표. 행을 고르면 그 시나리오를 강조·상세 표시한다. 선택 ID 를 돌려준다."""
     panel_title("시나리오 목록 (행을 클릭해 선택)")
     frame = scenario_frame(data)
+    # MW 는 정수로 보여 준다 (localized 는 소수 셋째 자리까지 찍는다).
+    # 숫자 열을 좁혀 마지막 열(풍력 편차)까지 한 화면에 들어오게 한다
+    shown = frame.assign(**{"피크 순부하(MW)": frame["피크 순부하(MW)"].round()})
     event = st.dataframe(
-        frame, hide_index=True, width="stretch", key="scn_table",
+        shown, hide_index=True, width="stretch", key="scn_table",
         on_select="rerun", selection_mode="single-row",
         column_config={
+            "ID": st.column_config.TextColumn(width=50),
             "확률": st.column_config.ProgressColumn("확률", format="percent", min_value=0,
-                                                   max_value=float(frame["확률"].max())),
-            "피크 순부하(MW)": st.column_config.NumberColumn(format="localized"),
-            "수요 편차(%)": st.column_config.NumberColumn(format="%+.1f"),
-            "태양광 편차(%)": st.column_config.NumberColumn(format="%+.1f"),
-            "풍력 편차(%)": st.column_config.NumberColumn(format="%+.1f"),
+                                                   max_value=float(frame["확률"].max()),
+                                                   width=110),
+            "피크 순부하(MW)": st.column_config.NumberColumn(format="localized", width=105),
+            "수요 편차(%)": st.column_config.NumberColumn(format="%+.1f", width=85),
+            "태양광 편차(%)": st.column_config.NumberColumn(format="%+.1f", width=95),
+            "풍력 편차(%)": st.column_config.NumberColumn(format="%+.1f", width=85),
         },
     )
     rows = event.selection.rows if event and event.selection else []
@@ -298,7 +303,9 @@ def render_probability(data: dict) -> None:
         marker_color=C_BLUE, marker_line_width=0, marker_cornerradius=6,
         text=[f"{p:.1%}" for p in frame["확률"]], textposition="outside",
     ))
-    fig.update_layout(xaxis_tickformat=".0%", margin=dict(l=12, r=40, t=10, b=12))
+    # 막대 끝의 값(15.3% 등)이 잘리지 않게 x 축에 여유를 둔다
+    fig.update_layout(xaxis_tickformat=".0%",
+                      xaxis_range=[0, float(frame["확률"].max()) * 1.18])
     st.plotly_chart(style_dark(fig, height=430), width="stretch", key="c_prob")
 
 

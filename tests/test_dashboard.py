@@ -902,6 +902,12 @@ def test_stochastic_page_helpers() -> None:
     assert list(page.problem_frame(good)["문제"]) == ["WS", "RP", "EEV", "EV"]
     assert page.breakdown_frame(body)["비중(%)"].sum() == pytest.approx(100.0)
     assert page.scenario_frame(body, {"S01": "고수요"}).loc[0, "라벨"] == "고수요"
+    # 표시용 표는 원 → 억원. 원본 표는 그대로 둔다
+    problems = page.problem_frame(good)
+    shown = page.eok_table(problems)
+    assert list(shown.columns) == ["문제", "비용(억원)", "RP 대비(억원)", "의미"]
+    assert shown.loc[1, "비용(억원)"] == pytest.approx(problems.loc[1, "비용(원)"] / 1e8)
+    assert "비용(원)" in problems.columns
     matrix = page.commitment_matrix(body)
     assert list(matrix.index) == ["nuclear_1", "lng_1"]
     assert matrix.loc["nuclear_1", 1] == 100.0 and matrix.loc["lng_1", 0] == 0.0
@@ -1065,6 +1071,17 @@ def test_parse_stochastic_latest() -> None:
     data = logic.parse_stochastic_latest({**latest, "time_limit_s": None, "result": result})
     assert data["time_limit_s"] is None and data["base_source"] == "forecast_api"
     assert data["start"].hour == 1
+    # 고정 예비력 (MW). 필드가 없는 이전 응답은 0 으로 본다
+    assert data["reserve_mw"] == 0.0
+    data = logic.parse_stochastic_latest({**latest, "reserve_mw": 700.0})
+    assert data["reserve_mw"] == 700.0
+
+
+def test_reserve_text() -> None:
+    assert logic.reserve_text(0.0, 700.0) == "예비력 700MW"
+    assert logic.reserve_text(0.1, 0.0) == "예비율 10%"
+    assert logic.reserve_text(0.1, 1000.0) == "예비율 10% + 예비력 1,000MW"
+    assert logic.reserve_text(0.0, 0.0) == "예비력 없음"
 
 
 # ── config/dashboard.yaml ({value, unit, source}) ───────────────────────────

@@ -153,6 +153,14 @@ def scenario_frame(data: dict, labels: dict[str, str]) -> pd.DataFrame:
     ])
 
 
+def eok_table(frame: pd.DataFrame) -> pd.DataFrame:
+    """표시용: '(원)' 열을 억원으로 바꾼다 (원 단위는 11자리라 표에서 읽기 어렵다)."""
+    won_cols = [c for c in frame.columns if c.endswith("(원)")]
+    out = frame.copy()
+    out[won_cols] = out[won_cols] / logic.WON_PER_EOK
+    return out.rename(columns={c: c.replace("(원)", "(억원)") for c in won_cols})
+
+
 def commitment_matrix(data: dict) -> pd.DataFrame:
     """유닛별 기대 출력 (행 = 유닛, 열 = 시간). 꺼진 칸은 0."""
     frame = pd.DataFrame(data["first_stage"])
@@ -289,20 +297,25 @@ def render_problems(summary: dict) -> None:
     panel_title("문제별 비용 (RP 대비 차이)")
     frame = problem_frame(summary)
     colors = [C_ORANGE if name == "RP" else C_BLUE for name in frame["문제"]]
+    diff = frame["RP 대비(원)"] / logic.WON_PER_EOK
     fig = go.Figure(go.Bar(
-        x=frame["RP 대비(원)"] / logic.WON_PER_EOK, y=frame["문제"], orientation="h",
+        x=diff, y=frame["문제"], orientation="h",
         marker_color=colors, marker_line_width=0, marker_cornerradius=6,
         text=[won(v) for v in frame["비용(원)"]], textposition="outside",
         hovertemplate="%{y} · RP 대비 %{x:+,.2f}억원<extra></extra>",
     ))
     fig.add_vline(x=0, line=dict(color=C_TEXT, width=1))
-    fig.update_layout(xaxis_title="RP 대비 차이 (억원)", margin=dict(l=12, r=70, t=10, b=12))
+    # 막대 밖 숫자가 잘리지 않게 x 축 양쪽에 여유를 둔다
+    lo, hi = min(float(diff.min()), 0.0), max(float(diff.max()), 0.0)
+    pad = (hi - lo) * 0.3 or 1.0
+    fig.update_layout(xaxis_title="RP 대비 차이 (억원)", xaxis_range=[lo - pad, hi + pad])
     st.plotly_chart(style_dark(fig, height=260), width="stretch", key="c_sto_problems")
     st.dataframe(
-        frame, hide_index=True, width="stretch",
+        eok_table(frame), hide_index=True, width="stretch",
         column_config={
-            "비용(원)": st.column_config.NumberColumn(format="localized"),
-            "RP 대비(원)": st.column_config.NumberColumn(format="localized"),
+            "문제": st.column_config.TextColumn(width=55),
+            "비용(억원)": st.column_config.NumberColumn(format="%.2f", width=95),
+            "RP 대비(억원)": st.column_config.NumberColumn(format="%+.2f", width=105),
         },
     )
     st.caption("막대 옆 숫자는 비용 자체다. EV 는 불확실성이 없는 계획 비용이라 EEV·RP 와 "
@@ -319,8 +332,10 @@ def render_breakdown(data: dict) -> None:
         text=[f"{p:.1f}%" for p in frame["비중(%)"]], textposition="outside",
         hovertemplate="%{y} %{x:,.2f}억원<extra></extra>",
     ))
+    # 막대 끝의 비중(%)이 잘리지 않게 x 축에 여유를 둔다
+    top = float((frame["비용(원)"] / logic.WON_PER_EOK).max())
     fig.update_layout(xaxis_title="억원", yaxis_autorange="reversed",
-                      margin=dict(l=12, r=50, t=10, b=12))
+                      xaxis_range=[0, top * 1.15 or 1.0])
     st.plotly_chart(style_dark(fig, height=260), width="stretch", key="c_sto_breakdown")
     shed = float(frame.loc[frame["항목"] == "부하차단 페널티", "비용(원)"].iloc[0])
     st.caption(
@@ -336,23 +351,27 @@ def render_scenarios(data: dict, labels: dict[str, str]) -> None:
     fig = go.Figure(go.Bar(
         x=frame["ID"], y=frame["비용(원)"] / logic.WON_PER_EOK,
         marker_color=[C_RED if s > 0 else C_GREEN for s in frame["부하차단(MWh)"]],
+        # 색만으로 구분하지 않게 부하차단 시나리오에는 빗금을 넣는다
+        marker_pattern_shape=["/" if s > 0 else "" for s in frame["부하차단(MWh)"]],
         marker_line_width=0, marker_cornerradius=6, customdata=frame[["라벨", "확률"]],
         hovertemplate="%{x} · %{customdata[0]} · p=%{customdata[1]:.1%}"
                       "<br>비용 %{y:,.2f}억원<extra></extra>",
     ))
     fig.update_layout(xaxis_title="시나리오", yaxis_title="시나리오 비용 (억원)")
     st.plotly_chart(style_dark(fig, height=280), width="stretch", key="c_sto_scenarios")
+    shown = eok_table(frame)
+    shown["기대 출력 대비 편차(MWh)"] = shown["기대 출력 대비 편차(MWh)"].round()
     st.dataframe(
-        frame, hide_index=True, width="stretch",
+        shown, hide_index=True, width="stretch",
         column_config={
             "확률": st.column_config.NumberColumn(format="percent"),
-            "비용(원)": st.column_config.NumberColumn(format="localized"),
-            "연료비(원)": st.column_config.NumberColumn(format="localized"),
+            "비용(억원)": st.column_config.NumberColumn(format="%.2f"),
+            "연료비(억원)": st.column_config.NumberColumn(format="%.2f"),
             "기대 출력 대비 편차(MWh)": st.column_config.NumberColumn(format="localized"),
-            "부하차단(MWh)": st.column_config.NumberColumn(format="localized"),
+            "부하차단(MWh)": st.column_config.NumberColumn(format="%.1f"),
         },
     )
-    st.caption("빨간 막대는 부하차단이 생긴 시나리오다.")
+    st.caption("빨간 빗금 막대는 부하차단이 생긴 시나리오다.")
 
 
 def render_commitment(data: dict) -> None:
@@ -441,7 +460,7 @@ def render() -> None:
     with st.container(border=True):
         render_verdict(summary, res)
     left, right = st.columns(2)
-    with left, st.container(border=True):
+    with left, st.container(border=True, key="vpp-sto-problems"):  # key: 좁은 화면 배치 (ui.py)
         render_problems(summary)
     with right, st.container(border=True):
         render_breakdown(data)

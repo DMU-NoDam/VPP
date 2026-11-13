@@ -44,6 +44,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
+from pandas.io.formats.style import Styler
 from plotly.subplots import make_subplots
 from streamlit.delta_generator import DeltaGenerator
 
@@ -452,6 +453,18 @@ def _melt_by_fuel(settings: Settings, df: pd.DataFrame) -> pd.DataFrame:
     return melted
 
 
+def _comma_table(table: pd.DataFrame) -> Styler:
+    """큰 숫자 열(최댓값 1,000 이상)에 천 단위 쉼표를 붙인 표.
+
+    나머지 숫자 열은 값 그대로 (0.91, 0) 보여 준다 — Styler 기본은 소수 6자리다.
+    """
+    numeric = list(table.select_dtypes("number").columns)
+    big = [c for c in numeric if table[c].abs().max() >= 1000]
+    small = [c for c in numeric if c not in big]
+    return (table.style.format("{:,.0f}", subset=big, na_rep="")
+            .format("{:g}", subset=small, na_rep=""))
+
+
 def _legend_right(fig: go.Figure) -> go.Figure:
     """범례를 차트 오른쪽에 세로로 (항목이 많은 Merit Order 용). 위 → 아래 = 연료비 낮은 순."""
     fig.update_layout(
@@ -462,8 +475,12 @@ def _legend_right(fig: go.Figure) -> go.Figure:
     return fig
 
 
-def _compact_chart(fig: go.Figure, height: int) -> go.Figure:
-    """한 화면용 작은 차트: 범례는 위 오른쪽, 축 제목 없음, 여백 최소."""
+def _compact_chart(fig: go.Figure, height: int, y_unit: str = "", x_unit: str = "") -> go.Figure:
+    """한 화면용 작은 차트: 범례는 위 오른쪽, 축 제목 없음, 여백 최소.
+
+    축 제목 자리가 없어 단위는 눈금에 붙인다. y_unit 은 맨 위 눈금에만 (예: "90k MW"),
+    x_unit 은 모든 눈금에 (예: "5시").
+    """
     fig = style_dark(fig, height=height)
     fig.update_layout(
         margin=dict(l=4, r=4, t=22, b=4),
@@ -471,6 +488,11 @@ def _compact_chart(fig: go.Figure, height: int) -> go.Figure:
     )
     fig.update_xaxes(title=None, tickfont=dict(size=11))
     fig.update_yaxes(title=None, tickfont=dict(size=11))
+    if y_unit:
+        # showexponent 를 같이 적지 않으면 plotly 가 "k" 도 맨 위 눈금에만 붙인다
+        fig.update_yaxes(ticksuffix=f" {y_unit}", showticksuffix="last", showexponent="all")
+    if x_unit:
+        fig.update_xaxes(ticksuffix=x_unit)
     return fig
 
 
@@ -691,12 +713,13 @@ def _bullet(
 def _bullet_card(
     title: str, value: str, unit: str, delta_html: str, bullet: str, sub: str,
     value_color: str = C_BLUE, tag: str | None = None, stretch: bool = True,
+    key: str | None = None,
 ) -> None:
     """수급 게이지 카드: 큰 값·변화 한 줄, 그 아래 카드 폭 전체를 쓰는 불릿 게이지.
 
-    tag 를 주지 않으면 목업 태그를 단다.
+    tag 를 주지 않으면 목업 태그를 단다. key 는 card() 와 같다.
     """
-    with card(stretch):
+    with card(stretch, key=key):
         html(
             f'<div class="vpp-kpi-head"><span>{title}{mock_tag() if tag is None else tag}'
             "</span></div>"
@@ -727,6 +750,7 @@ def render_demand_card(ctx: Context) -> None:
     _bullet_card(
         "전력 수요", value, unit, delta, _bullet(d_now / scale, gmax, C_BLUE, ticks),
         "1시간 전 대비" if real and d_prev else "", tag=tag, stretch=False,
+        key="vpp-demand",
     )
 
 
@@ -882,7 +906,7 @@ def render_merit_order(ctx: Context) -> None:
         fig.add_vline(x=ctx.hour, line=dict(color="rgba(255,255,255,.35)", width=1))
         fig.update_traces(marker_line_width=0, selector=dict(type="bar"))
         fig.update_layout(barmode="stack", bargap=0.22)
-        st.plotly_chart(_legend_right(_compact_chart(fig, H_MERIT)), width="stretch",
+        st.plotly_chart(_legend_right(_compact_chart(fig, H_MERIT, "MW", "시")), width="stretch",
                         key="c_merit", config=NO_BAR)
 
 
@@ -918,7 +942,7 @@ def _render_plan_mix(head: DeltaGenerator, plan: dict, height: int) -> None:
     )
     fig.update_traces(marker_line_width=0, selector=dict(type="bar"))
     fig.update_layout(barmode="relative", bargap=0.22)
-    st.plotly_chart(_legend_right(_compact_chart(fig, height)), width="stretch",
+    st.plotly_chart(_legend_right(_compact_chart(fig, height, "MW", "시")), width="stretch",
                     key="c_merit", config=NO_BAR)
 
 
@@ -944,7 +968,7 @@ def _render_real_mix(head: DeltaGenerator, real: RealMix, height: int) -> None:
         )
     fig.update_traces(marker_line_width=0, selector=dict(type="bar"))
     fig.update_layout(barmode="stack", bargap=0.22)
-    st.plotly_chart(_legend_right(_compact_chart(fig, height)), width="stretch",
+    st.plotly_chart(_legend_right(_compact_chart(fig, height, "MW", "시")), width="stretch",
                     key="c_merit", config=NO_BAR)
 
 
@@ -975,7 +999,7 @@ def render_optimization(ctx: Context) -> None:
         return (f'<div class="vpp-tile opt"><div><span>{label}</span><small>{sub}</small></div>'
                 f"<div><b>{value}</b>{badge_html}</div></div>")
 
-    with card():
+    with card(key="vpp-opt"):
         html(
             '<div class="vpp-kpi-head">'
             f'<span>최적화 결과{tag}</span><small>MILP · Two-Stage</small></div>'
@@ -991,7 +1015,8 @@ def render_optimization(ctx: Context) -> None:
                    "milp_latency_s", milp["latency_s"])
             + tile(f"VSS{vss_tag}", f'{vss["vss_pct"]:.1f}%',
                    f'Two-Stage · 시나리오 {vss["n_scenarios"]}개'
-                   + (f' · 예비율 {vss["reserve_ratio"]:.0%}' if "reserve_ratio" in vss else ""),
+                   + (f' · {logic.reserve_text(vss["reserve_ratio"], vss["reserve_mw"])}'
+                      if "reserve_ratio" in vss else ""),
                    "vss_pct", vss["vss_pct"])
             + "</div>"
         )
@@ -1083,8 +1108,8 @@ def _render_real_carbon(real: RealMix) -> None:
             fillgradient=dict(type="vertical", colorscale=[[0, "rgba(251,146,60,0)"],
                                                            [1, "rgba(251,146,60,.35)"]]),
         )
-        st.plotly_chart(_compact_chart(fig, H_SMALL), width="stretch", key="c_carbon",
-                        config=NO_BAR)
+        st.plotly_chart(_compact_chart(fig, H_SMALL, "tCO2", "시"), width="stretch",
+                        key="c_carbon", config=NO_BAR)
 
 
 def _signed_pct(value: float) -> str:
@@ -1117,8 +1142,8 @@ def _render_milp_carbon(with_ess: dict, no_ess: dict) -> None:
             x=hours, y=no_ess["carbon_hourly_ton"], mode="lines", name="ESS 없음",
             line=dict(color=C_TEXT, width=1.4, dash="dot", shape="spline"),
         )
-        st.plotly_chart(_compact_chart(fig, H_SMALL), width="stretch", key="c_carbon",
-                        config=NO_BAR)
+        st.plotly_chart(_compact_chart(fig, H_SMALL, "tCO2", "시"), width="stretch",
+                        key="c_carbon", config=NO_BAR)
 
 
 def render_carbon(ctx: Context) -> None:
@@ -1157,8 +1182,9 @@ def render_carbon(ctx: Context) -> None:
             x=x, y=df.carbon_no_ess_ton, mode="lines", name="ESS 없음",
             line=dict(color=C_TEXT, width=1.4, dash="dot", shape="spline"),
         )
-        st.plotly_chart(_period_axis(_compact_chart(fig, H_SMALL), ctx), width="stretch",
-                        key="c_carbon", config=NO_BAR)
+        fig = _compact_chart(fig, H_SMALL, "tCO2", "시" if ctx.days == 1 else "")
+        st.plotly_chart(_period_axis(fig, ctx), width="stretch", key="c_carbon",
+                        config=NO_BAR)
 
 
 def render_ess(ctx: Context) -> None:
@@ -1195,16 +1221,21 @@ def render_ess(ctx: Context) -> None:
         fig.add_bar(x=x, y=df["ess_discharge_mw"], name="방전", marker_color=C_BLUE)
         fig.add_bar(x=x, y=-df["ess_charge_mw"], name="충전", marker_color=C_ORANGE)
         fig.add_scatter(
-            x=x, y=df["ess_soc_pct"], name="SoC",
+            x=x, y=df["ess_soc_pct"], name="SoC", showlegend=False,  # 오른쪽 축 제목으로 알린다
             line=dict(color=C_INDIGO, width=2, shape="spline"), secondary_y=True,
         )
         fig.update_traces(marker_line_width=0, marker_cornerradius=3, selector=dict(type="bar"))
         fig.update_layout(barmode="relative", bargap=0.2 if planned or ctx.days == 1 else 0)
-        fig = _compact_chart(fig, H_SMALL)
+        fig = _compact_chart(fig, H_SMALL, "MW", "시" if planned or ctx.days == 1 else "")
         if not planned:
             fig = _period_axis(fig, ctx)
+        # 오른쪽 축 = SoC (%). 선과 같은 색 눈금으로 어느 축인지 알리고, 맨 위 눈금 자리에
+        # 축 이름을 적는다 (주석으로 넣으면 좁은 카드에서 여백 밖으로 잘린다)
         fig.update_yaxes(range=[0, 100], secondary_y=True, gridcolor="rgba(0,0,0,0)",
-                         showticklabels=False)
+                         tickvals=[25, 50, 75, 100], ticktext=["25%", "50%", "75%", "SoC"],
+                         tickfont=dict(size=11, color=C_INDIGO))
+        # 범례(방전·충전)는 왼쪽 위로 옮겨 오른쪽 위의 축 이름 "SoC" 와 붙지 않게 한다
+        fig.update_layout(legend=dict(x=0, xanchor="left"))
         st.plotly_chart(fig, width="stretch", key="c_ess", config=NO_BAR)
 
 
@@ -1269,7 +1300,7 @@ def page_overview() -> None:
         render_realtime_card(ctx)
 
     # 2행: 최적화 · 탄소(넓게) · ESS(넓게) · 발전원
-    c1, c2, c3, c4 = st.columns([1.25, 1.25, 1.25, 1.0])
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
         render_optimization(ctx)
     with c2:
@@ -1368,7 +1399,8 @@ def render_optimization_detail(ctx: Context) -> None:
     cond = (
         f" 계산 조건: {window}기준 {base}, "
         f'시나리오 {vss["n_scenarios"]}개 (seed {vss["seed"]}), '
-        f'예비율 {vss["reserve_ratio"]:.0%}, 풀이 {vss["status"]} {vss["solve_time_s"]:.0f}초 '
+        f'{logic.reserve_text(vss["reserve_ratio"], vss["reserve_mw"])}, '
+        f'풀이 {vss["status"]} {vss["solve_time_s"]:.0f}초 '
         f"({limit})."
         if "seed" in vss else ""
     )
@@ -1416,7 +1448,7 @@ def render_carbon_detail(ctx: Context) -> None:
                 "Rule-based 대비 비용": st.column_config.NumberColumn(format="%+.2f%%"),
             },
         )
-        st.dataframe(logic.milp_carbon_by_fuel(with_ess, no_ess, COLLECTOR_FUEL_KO),
+        st.dataframe(_comma_table(logic.milp_carbon_by_fuel(with_ess, no_ess, COLLECTOR_FUEL_KO)),
                      hide_index=True, width="stretch")
         st.caption(
             "같은 날·같은 수요로 푼 세 계획의 배출과 비용 (/dispatch/milp, cost 모드). "
@@ -1429,7 +1461,7 @@ def render_carbon_detail(ctx: Context) -> None:
         real = ctx.real
         panel_title("탄소 분석 (발전원별 배출)", real.tag)
         table = logic.real_carbon_by_fuel(real.mix, real.co2, COLLECTOR_FUEL_KO, real.order)
-        st.dataframe(table, hide_index=True, width="stretch")
+        st.dataframe(_comma_table(table), hide_index=True, width="stretch")
         st.caption(
             f"{real.day:%m/%d} 하루 실측 발전량 x 배출계수. 합계 "
             f"{ton(table['배출량(tCO2)'].sum())}. 배출계수는 config/generators.yaml (IAEA 2022 "
@@ -1438,7 +1470,7 @@ def render_carbon_detail(ctx: Context) -> None:
         )
         return
     panel_title(f"탄소 · ESS 분석 ({ctx.period_label})", mock_tag())
-    st.dataframe(logic.carbon_by_fuel(ctx.period, ctx.settings), hide_index=True,
+    st.dataframe(_comma_table(logic.carbon_by_fuel(ctx.period, ctx.settings)), hide_index=True,
                  width="stretch")
     if ctx.days > 1:
         st.dataframe(
@@ -1463,7 +1495,7 @@ def page_analysis() -> None:
     with st.container(border=True):
         render_forecast(ctx)
     c1, c2 = st.columns([1, 1])
-    with c1, st.container(border=True):
+    with c1, st.container(border=True, key="vpp-opt-detail"):  # key: 좁은 화면 배치 (ui.py)
         render_optimization_detail(ctx)
     with c2, st.container(border=True):
         render_carbon_detail(ctx)

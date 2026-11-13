@@ -426,12 +426,23 @@ def parse_stochastic_latest(data: dict) -> dict | None:
         "computed_at": pd.Timestamp(data["computed_at"]) if data.get("computed_at") else None,
         "seed": int(data["seed"]),
         "reserve_ratio": float(data["reserve_ratio"]),
+        "reserve_mw": float(data.get("reserve_mw") or 0.0),
         # None 이면 제한 없음
         "time_limit_s": None if data.get("time_limit_s") is None else float(data["time_limit_s"]),
         "base_source": data["result"].get("base_source"),
         "start": pd.Timestamp(data["result"]["start"]) if data["result"].get("start") else None,
     })
     return out
+
+
+def reserve_text(reserve_ratio: float, reserve_mw: float = 0.0) -> str:
+    """Two-Stage 1단계 예비력 조건 문구. 예비율(%)과 고정 예비력(MW) 중 0 이 아닌 것을 적는다."""
+    parts = []
+    if reserve_ratio > 0:
+        parts.append(f"예비율 {reserve_ratio:.0%}")
+    if reserve_mw > 0:
+        parts.append(f"예비력 {reserve_mw:,.0f}MW")
+    return " + ".join(parts) or "예비력 없음"
 
 
 # 해가 있는 MILP 상태 (shared/schemas.py SolveStatus). infeasible·error 면 화면은 목업으로 둔다.
