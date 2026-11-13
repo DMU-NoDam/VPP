@@ -31,6 +31,8 @@ from shared.constants import API_PREFIX
 from shared.schemas import (
     MilpRequest,
     MilpResponse,
+    ParetoRequest,
+    ParetoResponse,
     ScenarioRequest,
     ScenarioSetResponse,
     SolverOptions,
@@ -145,3 +147,16 @@ def dispatch_stochastic(req: StochasticRequest) -> StochasticResponse:
 def dispatch_stochastic_latest() -> StochasticLatest:
     """서버가 미리 계산해 둔 마지막 Two-Stage 결과 (대시보드 VSS 타일용). 계산 조건 포함."""
     return _PRECOMPUTE.snapshot()
+
+
+@app.post(f"{API_PREFIX}/dispatch/pareto", response_model=ParetoResponse)
+def dispatch_pareto(req: ParetoRequest) -> ParetoResponse:
+    """같은 입력에서 비용 최소 기준과 탄소 감축 계획을 비교한다."""
+    try:
+        return service.run_pareto(req)
+    except DataError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ConfigError as exc:
+        raise HTTPException(status_code=500, detail=f"config 오류: {exc}") from exc
+    except SolverUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc

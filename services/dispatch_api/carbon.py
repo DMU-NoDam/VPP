@@ -12,8 +12,10 @@ time step 이 1시간이므로 출력(MW) 합이 곧 발전량(MWh)이다. step 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
+from typing import Any
 
-from models import DispatchResult, UnitSchedule
+from models import DispatchResult, Generator, UnitSchedule
 
 
 def hourly_ton(units: Sequence[UnitSchedule], step_h: float = 1.0) -> list[float]:
@@ -74,3 +76,42 @@ def compare(before: DispatchResult, after: DispatchResult, step_h: float = 1.0) 
         "delta_ton": a - b,
         "reduction_pct": (b - a) / b * 100.0 if b > 0 else 0.0,
     }
+
+
+def load_analysis_config(path: str | Path) -> dict[str, Any]:
+    """분석 계수와 수치 허용오차. 기본 급전의 계수는 변경하지 않는다."""
+    import math
+
+    import yaml
+
+    from loaders.config_loader import ConfigError
+
+    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    try:
+        factors = raw["factors"]
+        options = raw["pareto"]
+        numbers = list(factors.values()) + [
+            options["total_time_limit_s"], options["emission_tolerance_ton"],
+            options["cost_tolerance_krw"],
+        ]
+        if not factors or any(not math.isfinite(float(x)) or float(x) < 0 for x in numbers):
+            raise ValueError("계수·허용오차는 유한한 비음수여야 한다")
+        if not 2 <= options["points"] <= 20 or options["total_time_limit_s"] <= 0:
+            raise ValueError("점 개수 또는 시간 제한 오류")
+        if raw["unit"] != "tCO2eq/MWh" or not raw["basis"] or not raw["source"]:
+            raise ValueError("배출 단위·출처·범위 필요")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ConfigError(f"carbon.yaml: {exc}") from exc
+    return raw
+
+
+def analysis_fleet(fleet: Sequence[Generator], config: dict[str, Any]) -> list[Generator]:
+    """모든 유닛에 같은 산정 범위의 계수를 적용한다. 누락 시 0으로 대체하지 않는다."""
+    from dataclasses import replace
+
+    from loaders.config_loader import ConfigError
+
+    missing = {g.fuel for g in fleet} - config["factors"].keys()
+    if missing:
+        raise ConfigError(f"탄소 분석 계수가 없는 발전원: {sorted(missing)}")
+    return [replace(g, co2_ton_per_mwh=float(config["factors"][g.fuel])) for g in fleet]

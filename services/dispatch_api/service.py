@@ -11,6 +11,7 @@ config/데이터 로딩 -> 최적화 -> 제약 재검증 -> 응답 조립을 순
 from __future__ import annotations
 
 import logging
+import math
 import os
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -21,6 +22,7 @@ from zoneinfo import ZoneInfo
 import baseline
 import carbon
 import milp
+import pareto
 import validation
 from loaders.config_loader import (
     ConfigError,
@@ -35,6 +37,7 @@ from schedule import cost_reduction_pct, merit_order
 from shared.schemas import (
     BaselineComparison,
     CarbonSummary,
+    CarbonUnitOperation,
     CheckItem,
     CostBreakdown,
     EssSummary,
@@ -43,6 +46,9 @@ from shared.schemas import (
     MilpRequest,
     MilpResponse,
     ModelSizeOut,
+    ParetoPoint,
+    ParetoRequest,
+    ParetoResponse,
     UnitHour,
 )
 
@@ -279,7 +285,7 @@ def _checks(
     infeasible 해는 급전값이 전부 0 이라 "수급 균형 위반"이 뜨는데, 그건 제약을
     어긴 계획이 아니라 계획이 없는 것이다. 그대로 내보내면 원인을 오해한다.
     """
-    if result.status not in SOLVED_STATUSES:
+    if not result.has_solution or result.status not in SOLVED_STATUSES:
         return [CheckItem(
             name="제약 검증",
             ok=False,
@@ -297,8 +303,13 @@ def run_milp(req: MilpRequest) -> MilpResponse:
     status 가 optimal 이 아니면 급전값 대신 진단용 notes 를 채워 돌려준다.
     성공 응답을 억지로 만들지 않는다 (CLAUDE.local.md infeasible 처리).
     """
+    if req.carbon_cap_ton is not None and req.allow_load_shedding:
+        raise DataError("탄소 상한과 부하차단을 함께 사용할 수 없습니다")
     cfg = settings()
     fleet = generators(cfg)
+    if req.carbon_accounting == "lifecycle":
+        analysis_config = carbon.load_analysis_config(CONFIG_DIR / "carbon.yaml")
+        fleet = carbon.analysis_fleet(fleet, analysis_config)
     inp = build_input(req, cfg, fleet)
 
     penalty = (
@@ -313,6 +324,7 @@ def run_milp(req: MilpRequest) -> MilpResponse:
         allow_load_shedding=req.allow_load_shedding,
         shed_penalty_krw_per_mwh=penalty,
         ess=ess,
+        carbon_cap_ton=req.carbon_cap_ton,
     )
 
     comparison: BaselineComparison | None = None
@@ -356,11 +368,157 @@ def run_milp(req: MilpRequest) -> MilpResponse:
         hours=_hours(result),
         units=_units(result) if req.include_units else None,
         merit_order=[MeritOrderEntry(**row) for row in merit_order(result)],
-        carbon=CarbonSummary(**carbon.summary(result)),
+        carbon=_carbon_summary(result, req),
         ess=_ess(result),
-        constraints=_checks(result, list(inp.generators), inp),
+        constraints=_checks(result, list(inp.generators), inp) + _cap_checks(result, req),
         baseline=comparison,
         reserve_ratio=inp.reserve_margin_ratio,
         hydro_factor=result.hydro_factor,
         notes=result.notes,
+    )
+
+
+def _cap_checks(result: DispatchResult, req: MilpRequest) -> list[CheckItem]:
+    if req.carbon_cap_ton is None or not result.has_solution:
+        return []
+    total = carbon.total_ton(result.units)
+    tolerance = carbon.load_analysis_config(CONFIG_DIR / "carbon.yaml")["pareto"][
+        "emission_tolerance_ton"
+    ]
+    return [CheckItem(name="탄소 상한", ok=total <= req.carbon_cap_ton + tolerance,
+                      detail=f"{total:.6f} <= {req.carbon_cap_ton:.6f} t")]
+
+
+def _carbon_summary(result: DispatchResult, req: MilpRequest) -> CarbonSummary:
+    values = carbon.summary(result)
+    slack = None
+    binding = None
+    if req.carbon_cap_ton is not None and result.has_solution:
+        tolerance = carbon.load_analysis_config(CONFIG_DIR / "carbon.yaml")["pareto"][
+            "emission_tolerance_ton"
+        ]
+        slack = req.carbon_cap_ton - values["total_ton"]
+        binding = abs(slack) <= tolerance
+    lifecycle = req.carbon_accounting == "lifecycle"
+    return CarbonSummary(
+        **values, cap_ton=req.carbon_cap_ton, cap_slack_ton=slack, cap_binding=binding,
+        valid=result.has_solution,
+        accounting_basis="dispatchable_lifecycle_midpoint" if lifecycle
+        else "configured_generator_factors",
+        factor_unit="tCO2eq/MWh" if lifecycle else "tCO2/MWh",
+    )
+
+
+def run_pareto(req: ParetoRequest) -> ParetoResponse:
+    """분석 입력을 한 번만 로딩하고 동일 조건에서 모든 점을 계산한다."""
+    if req.allow_load_shedding or req.carbon_cap_ton is not None:
+        raise DataError("Pareto에서는 부하차단 및 외부 carbon_cap_ton을 허용하지 않습니다")
+    if any(not math.isfinite(x) or not 0 <= x <= 100 for x in req.reduction_targets_pct):
+        raise DataError("감축 목표는 0~100 사이 유한한 백분율이어야 합니다")
+    if req.solver and req.solver.time_limit_s is not None:
+        limit = req.solver.time_limit_s
+        if not math.isfinite(limit) or limit <= 0:
+            raise DataError("solver 시간 제한은 양의 유한 값 또는 null이어야 합니다")
+    cfg = settings()
+    config = carbon.load_analysis_config(CONFIG_DIR / "carbon.yaml")
+    fleet = generators(cfg)
+    if req.carbon_accounting == "lifecycle":
+        fleet = carbon.analysis_fleet(fleet, config)
+    inp = build_input(req, cfg, fleet)
+    ess = ess_spec(req)
+    if ess and ess.mode == "combined":
+        raise DataError("비용·탄소 비교에서는 ESS cost 또는 peak_shaving 모드를 사용하세요")
+    if ess and ess.soc_final_min_mwh < ess.soc_init_mwh:
+        raise DataError("탄소 비교에서는 종료 SOC 하한이 초기 SOC 이상이어야 합니다")
+    options = config["pareto"]
+    sweep = pareto.run(
+        inp, solver_config=_solver_config(req, cfg), hydro_policy=cfg.hydro_policy, ess=ess,
+        points=req.points or options["points"],
+        total_time_limit_s=req.total_time_limit_s or options["total_time_limit_s"],
+        emission_tolerance_ton=options["emission_tolerance_ton"],
+        reduction_targets_pct=req.reduction_targets_pct,
+    )
+    reference = sweep.reference.result if sweep.reference else None
+    ref_carbon = carbon.total_ton(reference.units) if reference and reference.has_solution else None
+    ref_cost = reference.operating_cost_krw if reference and reference.has_solution else None
+
+    def point(attempt: pareto.Attempt) -> ParetoPoint:
+        result = attempt.result
+        checks = _checks(result, list(inp.generators), inp)
+        emissions = carbon.total_ton(result.units) if result.has_solution else None
+        if attempt.cap_ton is not None and emissions is not None:
+            checks.append(CheckItem(
+                name="탄소 상한",
+                ok=emissions <= attempt.cap_ton + options["emission_tolerance_ton"],
+                detail=f"{emissions:.6f} <= {attempt.cap_ton:.6f} t",
+            ))
+        valid = result.has_solution and all(c.ok for c in checks)
+        energy: dict[str, float] = {}
+        if valid:
+            for unit in result.units:
+                energy[unit.fuel] = energy.get(unit.fuel, 0) + unit.energy_mwh
+        return ParetoPoint(
+            label=attempt.label, status=result.status, valid=valid,
+            optimal=valid and result.status == "optimal", cap_ton=attempt.cap_ton,
+            carbon_ton=emissions if valid else None,
+            operating_cost_krw=result.operating_cost_krw if valid else None,
+            reduction_pct=(ref_carbon - emissions) / ref_carbon * 100
+            if valid and ref_carbon else None,
+            cost_increase_pct=(result.operating_cost_krw / ref_cost - 1) * 100
+            if valid and ref_cost else None,
+            fuel_energy_mwh=energy,
+            operations=[CarbonUnitOperation(
+                unit_id=u.unit_id, fuel=u.fuel, energy_mwh=u.energy_mwh,
+                on_hours=sum(u.on), startups=u.n_startups, p_mw=u.p_mw,
+            ) for u in result.units] if valid else [],
+            ess=_ess(result) if valid else None, checks=checks,
+            elapsed_s=attempt.elapsed_s, notes=result.notes,
+        )
+
+    points = [point(a) for a in sweep.attempts]
+    by_label = {p.label: p for p in points}
+    ref = by_label.get("cost_reference")
+    minimum = by_label.get("minimum_carbon_cost_tiebreak")
+    # 최적/근사 여부는 점에 보존한다. 모든 점과 실패 기록은 points에 남긴다.
+    candidates = sorted((p for p in points if p.valid),
+                        key=lambda p: (p.carbon_ton, p.operating_cost_krw))
+    frontier: list[ParetoPoint] = []
+    etol, ctol = options["emission_tolerance_ton"], options["cost_tolerance_krw"]
+    for p in candidates:
+        dominated = any(
+            q is not p and q.carbon_ton <= p.carbon_ton + etol
+            and q.operating_cost_krw <= p.operating_cost_krw + ctol
+            and (q.carbon_ton < p.carbon_ton - etol
+                 or q.operating_cost_krw < p.operating_cost_krw - ctol)
+            for q in candidates
+        )
+        duplicate = any(abs(q.carbon_ton - p.carbon_ton) <= etol
+                        and abs(q.operating_cost_krw - p.operating_cost_krw) <= ctol
+                        for q in frontier)
+        if not dominated and not duplicate:
+            frontier.append(p)
+    state = "complete" if sweep.complete else "partial"
+    if ref and ref.status in ("infeasible", "error"):
+        state = ref.status
+    if any(not p.valid and p.status == "optimal" for p in points):
+        state = "error"
+    return ParetoResponse(
+        state=state, timestamps=inp.timestamps,
+        accounting_basis=config["basis"] if req.carbon_accounting == "lifecycle"
+        else "configured_generator_factors",
+        factor_unit=config["unit"] if req.carbon_accounting == "lifecycle" else "tCO2/MWh",
+        factors={g.fuel: g.co2_ton_per_mwh for g in inp.generators},
+        reference=ref, minimum=minimum,
+        maximum_reduction_pct=(ref_carbon - sweep.minimum_emissions_ton) / ref_carbon * 100
+        if ref and ref.optimal and ref_carbon and sweep.minimum_emissions_ton is not None
+        and by_label["minimum_carbon"].valid else None,
+        points=points, frontier=frontier, elapsed_s=sweep.elapsed_s,
+        notes=sweep.notes + [
+            "동일 수요·예비율·ESS 조건; 부하차단 금지. 기준은 Rule-based가 아닌 비용 최소 MILP.",
+            "급전 가능 발전원만의 모델 배출 추정치. 고정 재생발전·별도 기동 배출 제외.",
+            "전과정 범위 중간값은 시나리오 가정이며 국내 발전소 실측·공식 감축 실적이 아님."
+            if req.carbon_accounting == "lifecycle" else "기존 계수는 산정 범위가 혼합된 가정값.",
+            "무연탄은 전용 계수 자료가 없어 석탄 범위 중간값을 대용한 가정임.",
+            "frontier는 계산한 점 중 비지배 표본이며 전체 Pareto 집합이 아님.",
+        ],
     )

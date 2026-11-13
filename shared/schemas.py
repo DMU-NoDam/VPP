@@ -260,6 +260,8 @@ class MilpRequest(BaseModel):
     use_ess: bool = True                       # false 면 ESS 없이 푼다 (전/후 비교용)
     ess_mode: Literal["cost", "peak_shaving", "combined"] | None = None  # None 이면 ess.yaml
     ess_peak_target_pct: float | None = Field(None, ge=0, lt=100)  # peak_shaving 목표
+    carbon_cap_ton: float | None = Field(None, ge=0, allow_inf_nan=False)
+    carbon_accounting: Literal["configured", "lifecycle"] = "configured"
     include_baseline: bool = True              # Rule-based 비교와 절감률을 같이 계산
     include_units: bool = True                 # 유닛 x 시간 급전값 (응답이 커진다)
     solver: SolverOptions | None = None
@@ -290,6 +292,12 @@ class MeritOrderEntry(BaseModel):
 
 
 class CarbonSummary(BaseModel):
+    accounting_basis: str = "configured_generator_factors"
+    factor_unit: str = "tCO2/MWh"
+    cap_ton: float | None = None
+    cap_slack_ton: float | None = None
+    cap_binding: bool | None = None
+    valid: bool = True
     total_ton: float
     hourly_ton: list[float]
     by_fuel_ton: dict[str, float]
@@ -357,3 +365,55 @@ class MilpResponse(BaseModel):
     reserve_ratio: float
     hydro_factor: float                   # 수력 상한에 곱한 계수 (1.0 = 제한 없음)
     notes: list[str]                      # 모델링 선택·가정·경고
+
+
+class ParetoRequest(MilpRequest):
+    """동일 입력의 비용·탄소 비교. 조건 검증은 service 계층에서 수행한다."""
+
+    carbon_accounting: Literal["configured", "lifecycle"] = "lifecycle"
+    points: int | None = Field(None, ge=2, le=20)
+    total_time_limit_s: float | None = Field(None, gt=0, le=120, allow_inf_nan=False)
+    reduction_targets_pct: list[float] = Field(default_factory=list, max_length=10)
+    include_units: bool = False
+
+
+class CarbonUnitOperation(BaseModel):
+    unit_id: str
+    fuel: str
+    energy_mwh: float
+    on_hours: int
+    startups: int
+    p_mw: list[float]
+
+
+class ParetoPoint(BaseModel):
+    label: str
+    status: SolveStatus
+    valid: bool
+    optimal: bool
+    cap_ton: float | None = None
+    carbon_ton: float | None = None
+    operating_cost_krw: float | None = None
+    reduction_pct: float | None = None
+    cost_increase_pct: float | None = None
+    fuel_energy_mwh: dict[str, float] = Field(default_factory=dict)
+    operations: list[CarbonUnitOperation] = Field(default_factory=list)
+    ess: EssSummary | None = None
+    checks: list[CheckItem] = Field(default_factory=list)
+    elapsed_s: float
+    notes: list[str] = Field(default_factory=list)
+
+
+class ParetoResponse(BaseModel):
+    state: Literal["complete", "partial", "infeasible", "error"]
+    timestamps: list[datetime]
+    accounting_basis: str
+    factor_unit: str
+    factors: dict[str, float]
+    reference: ParetoPoint | None = None
+    minimum: ParetoPoint | None = None
+    maximum_reduction_pct: float | None = None
+    points: list[ParetoPoint] = Field(default_factory=list)
+    frontier: list[ParetoPoint] = Field(default_factory=list)
+    elapsed_s: float
+    notes: list[str] = Field(default_factory=list)

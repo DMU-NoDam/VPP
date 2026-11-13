@@ -301,6 +301,7 @@ class DispatchResult:
     size: ModelSize | None = None
     notes: list[str] = field(default_factory=list)
     ess: EssSchedule | None = None
+    has_solution: bool = True
     surplus_mw: list[float] = field(default_factory=list)
     """시간대별 과잉발전 (MW). 수요보다 많이 낸 양으로, 감발·수출 대상이다.
 

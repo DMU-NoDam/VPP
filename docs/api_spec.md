@@ -477,3 +477,57 @@ Two-Stage Stochastic 급전 계획과 VSS. 스키마: `shared/schemas.py` 의 `S
   "error": null
 }
 ```
+
+## 탄소 상한 및 Pareto 분석
+
+`POST /api/v1/dispatch/milp`의 선택 필드:
+
+```json
+{"carbon_cap_ton": 500000, "carbon_accounting": "lifecycle", "use_ess": true}
+```
+
+`carbon_cap_ton` 기본 null(제약 없음), 0 이상 유한 값. `carbon_accounting` 기본
+`configured`는 기존 generators.yaml 계수, `lifecycle`은 config/carbon.yaml 프로필이다.
+상한과 `allow_load_shedding=true` 조합은 422. 동일 산정 프로필끼리 비교해야 한다.
+응답 carbon에는 `accounting_basis`, `factor_unit`, `cap_ton`, `cap_slack_ton`,
+`cap_binding`, `valid`를 추가했다. 상한 없음/유효해 없음이면 slack/binding은 null이다.
+기존 응답 숫자 필드는 하위 호환을 위해 유지하지만 `valid=false`는 배출 0 실적이 아니다.
+
+`POST /api/v1/dispatch/pareto`는 비용 최소 계획 대비 탄소 감축 비용을 비교한다.
+
+```json
+{
+  "horizon_h": 24,
+  "use_ess": true,
+  "ess_mode": "cost",
+  "carbon_accounting": "lifecycle",
+  "points": 5,
+  "total_time_limit_s": 30,
+  "reduction_targets_pct": [5, 10]
+}
+```
+
+MilpRequest의 수요/시각/유닛/예비율/수력/ESS 입력을 사용한다. 데이터는 한 번 로딩한다.
+기본 accounting은 lifecycle. points는 2~20(끝점 포함 목표 표본 수), 총 시간은 최대 120초,
+감축 목표는 0~100%, 최대 10개. 생략된 표본 수·시간 예산은 config/carbon.yaml을 따른다.
+최소 배출 해 동점 처리와 감축 목표 풀이 때문에 실제 호출 횟수는 points보다 많을 수 있다.
+Pareto는 gap=0으로 계산한다. 요청 solver 시간 제한은 각 풀이에도 적용한다.
+`allow_load_shedding=true`, 외부 carbon_cap_ton, ESS combined, 초기보다 낮은 종료 SOC
+하한은 422이다. Rule-based baseline 및 include_units 플래그는 이 분석에 사용하지 않는다.
+
+응답:
+
+- `state`: complete / partial / infeasible / error. 불가능한 개별 감축 목표는 전체 오류가 아니다.
+- `timestamps`, `accounting_basis`, `factor_unit`, `factors`: 고정된 기간과 배출계수.
+- `reference`: 같은 ESS 조건의 비용 최소 MILP. 기존 화면의 Rule-based와 다른 기준이다.
+- `minimum`: 최소 배출 상한에서 비용 동점 처리한 계획.
+- `maximum_reduction_pct`: 최적 끝점이 확인된 경우의 감축 가능률, 미확인/분모 0이면 null.
+- `points`: 모든 계산 시도. 각 점에 status/valid/optimal, cap_ton, carbon_ton,
+  operating_cost_krw, reduction_pct, cost_increase_pct, fuel_energy_mwh, operations,
+  ess, checks, elapsed_s, notes 포함. operations는 유닛별 발전량·가동시간·기동횟수·출력 배열.
+- `frontier`: 유효 표본 중 중복/지배 점을 제외한 목록. 전체 Pareto 집합이 아니다.
+- `elapsed_s`, `notes`: 풀이 시간과 해석 조건. 시간 예산은 모델 빌드 등으로 소폭 초과 가능.
+
+infeasible/해 없음/검증 실패한 점의 비용·배출·변화율은 null, 발전량과 운전 목록은 비어 있다.
+HTTP 200은 계산 결과의 전달을 뜻하며 최적성은 각 점의 status/optimal로 확인한다.
+잘못된 입력 422, 설정 오류 500, solver 미설치 503이다.

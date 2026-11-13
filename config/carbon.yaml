@@ -1,0 +1,19 @@
+# 탄소 분석 전용. 기존 generators.yaml 계수 및 기본 비용 KPI는 유지한다.
+# [모델링 선택] docs/data_sources.md의 IAEA CCNP 2022 / UNECE 2022 범위 중간값.
+# 국가·발전소 실측 계수가 아니라 전과정 시나리오 계수이다.
+# 범위: 최적화에 포함된 급전 가능 발전원만. 순수요에서 뺀 태양광·풍력 등의
+# 고정 발전량과 그 전과정 배출, 별도 기동 배출은 포함하지 않는다.
+basis: dispatchable_lifecycle_midpoint
+source: docs/data_sources.md#발전원별-탄소-배출량
+unit: tCO2eq/MWh
+factors:
+  nuclear: 0.00575      # (5.1 + 6.4) / 2 / 1000
+  bituminous_coal: 0.923  # (751 + 1095) / 2 / 1000
+  anthracite: 0.923      # [가정] 국내탄 전용 자료 없음; 같은 석탄 범위 대용
+  lng: 0.458            # (403 + 513) / 2 / 1000
+  hydro: 0.0765         # (6 + 147) / 2 / 1000
+pareto:
+  points: 5
+  total_time_limit_s: 30
+  emission_tolerance_ton: 0.0001
+  cost_tolerance_krw: 1.0

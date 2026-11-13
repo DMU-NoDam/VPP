@@ -38,12 +38,12 @@ known-first-party = [
   "collector", "data_api", "domain", "sources", "store",
   # dispatch_api
   "main", "constants", "models", "loaders",
-  "milp", "baseline", "schedule", "validation", "carbon", "scenarios", "service",
+  "milp", "pareto", "baseline", "schedule", "validation", "carbon", "scenarios", "service",
   "units", "stochastic", "precompute",
   # forecast_api
   "data_client", "features", "metrics", "pi", "forecast_engine", "router", "schemas",
   # dashboard
-  "logic", "ui", "page_scenarios", "page_stochastic_test",
+  "logic", "ui", "page_carbon", "page_scenarios", "page_stochastic_test",
 ]
 
 [tool.pytest.ini_options]

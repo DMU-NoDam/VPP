@@ -29,8 +29,10 @@ v, w 를 이진변수로 두지 않는 이유: u 가 이진이고 연결식 u_t 
 from __future__ import annotations
 
 import logging
+import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import Literal
 
 import pulp
 
@@ -95,8 +97,8 @@ def build_solver(config: SolverConfig) -> pulp.LpSolver:
     kwargs: dict[str, object] = {"msg": config.msg}
     if config.time_limit_s:
         kwargs["timeLimit"] = config.time_limit_s
-    if config.mip_gap:
-        kwargs["gapRel"] = config.mip_gap
+    # 0도 전달해야 HiGHS 기본 gap 대신 요청한 정확도를 적용한다.
+    kwargs["gapRel"] = config.mip_gap
 
     name = config.name.strip().upper()
     factory = {
@@ -146,11 +148,21 @@ def build_model(
     allow_load_shedding: bool = False,
     shed_penalty_krw_per_mwh: float = DEFAULT_SHED_PENALTY_KRW_PER_MWH,
     ess: EssSpec | None = None,
+    carbon_cap_ton: float | None = None,
+    objective_mode: Literal["cost", "carbon"] = "cost",
 ) -> _Model:
     """MILP 를 세운다 (풀지는 않는다).
 
     `ess` 를 주면 충·방전을 **제약 있는 결정변수**로 같이 푼다 (후처리가 아니다).
     """
+    if objective_mode not in ("cost", "carbon"):
+        raise ValueError("objective_mode must be cost or carbon")
+    if carbon_cap_ton is not None and (not math.isfinite(carbon_cap_ton) or carbon_cap_ton < 0):
+        raise ValueError("carbon_cap_ton must be finite and nonnegative")
+    if allow_load_shedding and (carbon_cap_ton is not None or objective_mode == "carbon"):
+        raise ValueError("탄소 최적화에서는 부하차단을 허용하지 않는다")
+    if objective_mode == "carbon" and ess is not None and ess.mode == "combined":
+        raise ValueError("탄소 최소화와 ESS combined 목적을 함께 사용할 수 없다")
     started = time.perf_counter()
     policy = hydro_policy or HydroPolicy()
     hydro_factor = policy.factor(inp.storage_rate_pct)
@@ -230,7 +242,12 @@ def build_model(
             f"combined 모드: 목적함수에 피크 가중치 "
             f"{ess.peak_penalty_krw_per_mw:,.0f} 원/MW 가 더해졌다 (모델링 선택)"
         )
-    problem += objective, "total_cost_krw"
+    # 시간 간격은 로더에서 1h로 제한한다. 출력 합 = MWh.
+    emissions = pulp.lpSum(g.co2_ton_per_mwh * p[g.id][t] for g in gens for t in hours)
+    if carbon_cap_ton is not None:
+        problem += emissions <= carbon_cap_ton, "carbon_cap_ton"
+        notes.append(f"탄소 상한 {carbon_cap_ton:.6f} t; 부하차단 금지")
+    problem += (emissions if objective_mode == "carbon" else objective), "objective"
 
     # ── 제약 1: 수급 균형 ───────────────────────────────────────────────────
     # ESS 방전은 공급, 충전은 부하다.
@@ -408,6 +425,8 @@ def solve(
     allow_load_shedding: bool = False,
     shed_penalty_krw_per_mwh: float = DEFAULT_SHED_PENALTY_KRW_PER_MWH,
     ess: EssSpec | None = None,
+    carbon_cap_ton: float | None = None,
+    objective_mode: Literal["cost", "carbon"] = "cost",
 ) -> DispatchResult:
     """UC + ED MILP 를 풀어 급전 계획을 돌려준다.
 
@@ -421,6 +440,8 @@ def solve(
         allow_load_shedding=allow_load_shedding,
         shed_penalty_krw_per_mwh=shed_penalty_krw_per_mwh,
         ess=ess,
+        carbon_cap_ton=carbon_cap_ton,
+        objective_mode=objective_mode,
     )
 
     solver = build_solver(config)
@@ -428,6 +449,15 @@ def solve(
     raw_status = model.problem.solve(solver)
     solve_time_s = time.perf_counter() - started
     status = _status(raw_status, solve_time_s, config)
+    # 시간 제한만으로 incumbent가 있다고 판단하지 않는다.
+    has_solution = model.problem.sol_status in (
+        pulp.LpSolutionOptimal, pulp.LpSolutionIntegerFeasible,
+    )
+    if status == "optimal" and model.problem.sol_status != pulp.LpSolutionOptimal:
+        status = "feasible" if has_solution else "error"
+    if (status == "optimal" and config.mip_gap > 0
+            and (objective_mode == "carbon" or carbon_cap_ton is not None)):
+        status = "feasible"  # 요청한 gap 내 해; 정확 최적이라고 과장하지 않는다.
     size = _model_size(model, solve_time_s)
 
     logger.info(
@@ -441,7 +471,7 @@ def solve(
         raw = var.value()
         return 0.0 if raw is None else float(raw)
 
-    solved = status in ("optimal", "feasible", "time_limit")
+    solved = has_solution and status in ("optimal", "feasible", "time_limit")
     on = {
         g.id: [bool(round(value(model.u[g.id][t]))) if solved else False
                for t in range(inp.horizon_h)]
@@ -472,6 +502,8 @@ def solve(
             "진단 순서: 용량 vs 수요+예비 -> 초기상태+min up/down -> ramp -> "
             "Pmin 과잉발전 -> 수력 제한 -> 단위 오류"
         )
+    if not solved and carbon_cap_ton is not None:
+        notes.append("탄소 상한 또는 기존 운전 제약의 충돌 가능; 상한 없는 동일 입력과 비교 필요")
     objective = model.problem.objective.value() if solved else None
 
     result = assemble(
@@ -483,15 +515,21 @@ def solve(
         notes=notes,
     )
 
+    result = replace(result, has_solution=solved)
+
     # 교차검증: 목적함수 값과 다시 계산한 비용이 어긋나면 계수 누락이다.
     # combined 모드는 목적함수에 비용이 아닌 피크 가중치가 섞여 있어 제외한다.
     if ess is not None and ess.mode == "combined":
         objective = None
-    if objective is not None and abs(objective - result.total_cost_krw) > max(
-        1.0, abs(objective) * 1e-6
+    expected = result.total_cost_krw
+    if objective_mode == "carbon":
+        expected = sum(u.energy_mwh * u.co2_ton_per_mwh for u in result.units)
+    absolute_tolerance = 1e-6 if objective_mode == "carbon" else 1.0
+    if objective is not None and abs(objective - expected) > max(
+        absolute_tolerance, abs(objective) * 1e-6
     ):
         logger.warning(
-            "목적함수 %.1f 와 재계산 비용 %.1f 가 다르다 — 비용 계수를 확인할 것",
-            objective, result.total_cost_krw,
+            "목적함수 %.6f 와 재계산 값 %.6f 가 다르다 — 목적 계수를 확인할 것",
+            objective, expected,
         )
     return result
