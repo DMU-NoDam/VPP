@@ -1102,3 +1102,54 @@ def test_page_defaults_keep_types(settings) -> None:
 def test_crisis_ok_column_follows_target(settings) -> None:
     col = logic.crisis_ok_column(settings)
     assert col == f"{settings.targets['crisis_reserve_pct']:g}% 유지"
+
+
+def _carbon_page_script():
+    import page_carbon
+
+    page_carbon.render()
+
+
+def test_carbon_page_requires_execution_and_never_uses_mock(monkeypatch):
+    from streamlit.testing.v1 import AppTest
+
+    monkeypatch.syspath_prepend(str(DASHBOARD_DIR))
+    calls = []
+
+    def fail(*args, **kwargs):
+        calls.append(kwargs)
+        raise requests.ConnectionError()
+
+    monkeypatch.setattr(logic.requests, "request", fail)
+    at = AppTest.from_function(_carbon_page_script, default_timeout=30).run()
+    assert not at.exception and not calls
+    at.button[0].click().run()
+    assert not at.exception
+    assert calls[0]["json"]["carbon_accounting"] == "lifecycle"
+    assert at.error and "carbon_analysis_result" not in at.session_state
+
+
+def test_carbon_page_renders_real_api_contract(monkeypatch):
+    from streamlit.testing.v1 import AppTest
+
+    import service
+    from shared.schemas import ParetoRequest
+
+    # 실제 서비스 응답을 화면에 연결하되 외부 네트워크는 사용하지 않는다.
+    data = service.run_pareto(ParetoRequest(
+        horizon_h=1, net_demand_mw=[65000], use_ess=False, points=2,
+        reduction_targets_pct=[5], total_time_limit_s=10,
+    )).model_dump(mode="json")
+    monkeypatch.syspath_prepend(str(DASHBOARD_DIR))
+    monkeypatch.setattr(logic.requests, "request", lambda *a, **k: _FakeResponse(200, data))
+    at = AppTest.from_function(_carbon_page_script, default_timeout=30).run()
+    at.button[0].click().run()
+    assert not at.exception and not at.error
+    assert len(at.dataframe) >= 3
+    assert at.metric
+
+
+def test_parse_milp_rejects_timeout_without_incumbent():
+    data = _milp_response(status="time_limit")
+    data["carbon"]["valid"] = False
+    assert logic.parse_milp(data) is None

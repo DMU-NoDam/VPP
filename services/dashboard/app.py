@@ -48,6 +48,7 @@ from plotly.subplots import make_subplots
 from streamlit.delta_generator import DeltaGenerator
 
 import logic
+import page_carbon
 import page_scenarios
 import page_stochastic_test
 from logic import API_PREFIX, ApiResult, Settings
@@ -1606,6 +1607,8 @@ def _run_pages() -> None:
                 url_path="analysis"),
         st.Page(page_data, title="시간대 데이터", icon=":material/table_chart:",
                 url_path="data"),
+        st.Page(page_carbon.render, title="탄소 감축 분석",
+                icon=":material/eco:", url_path="carbon"),
         st.Page(
             page_scenarios.render, title="시나리오 생성기",
             icon=":material/stacked_line_chart:", url_path="scenarios",
@@ -1616,7 +1619,7 @@ def _run_pages() -> None:
         ),
     ])
     # 사이드바 조정은 페이지 밖(여기)에서 그려야 페이지를 옮겨도 값이 유지된다.
-    if nav.url_path not in ("scenarios", "stochastic-test"):
+    if nav.url_path not in ("scenarios", "stochastic-test", "carbon"):
         st.session_state["vpp_ctx"] = build_context()
     nav.run()
 

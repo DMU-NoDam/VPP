@@ -445,7 +445,8 @@ def parse_milp(data: dict, latency_s: float | None = None) -> dict | None:
     latency_s, constraints) 계획 날짜·풀이 시간·ESS 를 덧붙인다. 비용은 연료비 + 기동비
     (+ 부하차단) 총비용이다 — 절감률(baseline.cost_reduction_pct)이 같은 정의를 쓴다.
     """
-    if data["status"] not in MILP_SOLVED or not data.get("baseline"):
+    if (data["status"] not in MILP_SOLVED or not data.get("baseline")
+            or not data.get("carbon", {}).get("valid", True)):
         return None
     base = data["baseline"]
     size = data["model_size"]
