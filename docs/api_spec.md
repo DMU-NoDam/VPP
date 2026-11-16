@@ -355,7 +355,7 @@ Two-Stage Stochastic 급전 계획과 VSS. 스키마: `shared/schemas.py` 의 `S
 | `base` | `null` | 생성용 기준 예측 (`ScenarioProfile`). `null` 이면 forecast_api 예측, 실패하면 `base_profile` (`/scenarios` 의 "기준 예측") |
 | `compute_ws` | `false` | `true` 면 WS·EVPI 도 계산. 시나리오 수만큼 더 풀어 느려진다 |
 | `generator_ids` | `null` | 사용할 유닛 id. `null` 이면 `generators.yaml` 전체 |
-| `use_ess` | `true` | **현재 무시된다.** 2단계에 ESS 를 넣지 않았다 (8절 끝, 🟨 C 와 상의) |
+| `use_ess` | `true` | **현재 무시된다.** 2단계에 ESS 를 넣지 않았다 (`formulation.md` 8.6, 🟨 C 와 상의) |
 | `reserve_ratio` | `null` → 0.0 (`request_defaults.reserve_ratio`) | 1단계 예비율 $r$. 요건은 $(1 + r) \times$ 기대 순수요 $+$ `reserve_mw` 다. 부족분은 슬랙으로 허용하고 `config/stochastic.yaml` 의 페널티를 붙인다 (가정, 8.4 S5) |
 | `reserve_mw` | `null` → 700 (`request_defaults.reserve_mw`) | 1단계 고정 예비력 $R$ (MW). 값은 가정이다 (8.2) |
 | `shed_penalty_won_per_mwh` | `null` → 3,093,000 (`request_defaults.shed_penalty`) | 부하차단 페널티 $K$. VoLL 3,093원/kWh (KEEI 기본연구보고서 24-21) |

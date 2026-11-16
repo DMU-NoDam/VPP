@@ -168,7 +168,7 @@ class StochasticRequest(BaseModel):
     base: ScenarioProfile | None = None
     compute_ws: bool = False  # True 면 WS·EVPI 도 계산 (시나리오 수만큼 더 풀어 느려짐)
     generator_ids: list[str] | None = None  # None 이면 generators.yaml 전체
-    use_ess: bool = True
+    use_ess: bool = True  # 현재 무시한다: Two-Stage 2단계에 ESS 가 없다 (formulation.md 8.6)
     reserve_ratio: float | None = None
     reserve_mw: float | None = None  # 1단계 고정 예비력 (MW). 예비율 요건에 더해진다
     shed_penalty_won_per_mwh: float | None = None  # K (VoLL). 값과 출처는 config/stochastic.yaml
