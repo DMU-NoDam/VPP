@@ -1108,6 +1108,71 @@ def test_load_settings_rejects_wrong_unit(tmp_path) -> None:
         logic.load_settings(bad)
 
 
+def _real_day_frames() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """하루치 실측 모양: power_demand(5분 → 여기서는 시간당 2행)와 real_mix 긴 표."""
+    hours = range(24)
+    power = pd.DataFrame({
+        "ts": [f"2026-10-09 {h:02d}:{m:02d}:00" for h in hours for m in (0, 30)],
+        "demand_mw": [50000.0 + 100 * h for h in hours for _ in (0, 30)],
+        "supply_mw": [60000.0] * 48,
+    })
+    mix = pd.DataFrame([
+        {"hour": h, "fuel": f, "mw": mw, "capacity_mw": 20000.0, "demand_mw": 50000.0 + 100 * h}
+        for h in hours for f, mw in (("nuclear", 20000.0), ("lng", 10000.0), ("solar", 2000.0))
+    ])
+    return power, mix
+
+
+def test_real_balance_matches_mock_columns(settings) -> None:
+    power, mix = _real_day_frames()
+    bal = logic.real_balance(power, mix)
+    assert list(bal.hour) == list(range(24))
+    row = bal.iloc[0]
+    assert row.demand_mw == 50000 and row.available_capacity_mw == 60000 and row.solar_mw == 2000
+    assert row.reserve_pct == pytest.approx(20.0)
+    # 목업과 같은 코드로 시나리오를 적용한다: 수요 +15% → (60000 − 57500) / 57500
+    heat = next(sc for sc in settings.crisis if sc.demand_mult > 1)
+    demand, capacity = logic.apply_scenario(row, heat)
+    assert (capacity - demand) / demand * 100 == pytest.approx(4.35, abs=0.01)
+    assert len(logic.crisis_table(bal, settings)) == len(settings.crisis)
+
+
+def test_real_balance_needs_full_day_and_supply() -> None:
+    power, mix = _real_day_frames()
+    assert logic.real_balance(power.iloc[:40], mix) is None          # 24시간이 안 된다
+    assert logic.real_balance(power.drop(columns="supply_mw"), mix) is None
+    assert logic.real_balance(pd.DataFrame(), mix) is None
+
+
+def test_real_period_carbon_and_daily() -> None:
+    from datetime import date
+
+    trading = pd.DataFrame({
+        "ts": ["2026-10-08 00:00:00", "2026-10-09 00:00:00", "2026-10-09 01:00:00",
+               "2026-10-09 01:00:00", "2026-10-10 00:00:00"],
+        "fuel": ["lng", "lng", "lng", "solar", "lng"],
+        "trade_mwh": [100.0, 200.0, 300.0, 50.0, 400.0],
+    })
+    period = logic.real_period(trading, date(2026, 10, 9), date(2026, 10, 9))
+    assert len(period) == 3 and set(period.date) == {date(2026, 10, 9)}
+    hourly = logic.real_period_carbon(period, {"lng": 0.5})
+    assert list(hourly) == [100.0, 150.0]                              # 태양광은 0
+    daily = logic.real_daily_carbon(period, {"lng": 0.5})
+    assert daily.loc[0, "발전량(MWh)"] == 550 and daily.loc[0, "배출(tCO2)"] == 250
+    assert logic.real_period(pd.DataFrame(), date(2026, 10, 9), date(2026, 10, 9)).empty
+
+
+def test_real_hourly_table() -> None:
+    power, mix = _real_day_frames()
+    bal = logic.real_balance(power, mix)
+    table = logic.real_hourly_table(mix, bal, {"lng": 0.5}, {"lng": "가스"}, ["nuclear", "lng"])
+    assert len(table) == 24
+    assert list(table.columns) == ["시각", "수요(MW)", "nuclear(MW)", "가스(MW)", "공급능력(MW)",
+                                   "예비율(%)", "배출(tCO2)"]
+    assert table.loc[0, "배출(tCO2)"] == 5000 and table.loc[0, "예비율(%)"] == 20.0
+    assert "공급능력(MW)" not in logic.real_hourly_table(mix, None, {}, {}, ["lng"])
+
+
 def test_page_defaults_keep_types(settings) -> None:
     scn = settings.page_defaults["scenarios"]
     assert isinstance(scn["seed"], int) and isinstance(scn["n_samples"], int)

@@ -27,7 +27,8 @@ config/dashboard.yaml 에 있다.
 응답이 없거나 계약이 아직 없는 패널은 목업으로 그린다. 서비스 응답을 쓴 패널에는 LIVE,
 목업으로 그린 패널에는 목업 태그를 단다 (ui.source_tag, ui.mock_tag).
 
-TODO(통합): 위기 시나리오는 아직 목업이다. 수급 게이지의 공급능력·예비율은 collector
+위기 시나리오는 collector 실측 하루(수요·공급능력·태양광)에 시나리오를 적용한 예비율이다
+(시나리오별 재급전은 dispatch_api 에 아직 없다). 수급 게이지의 공급능력·예비율은 collector
 power_demand 의 supply_mw 실측을 쓰고, collector 가 supply_mw 를 주지 않으면 목업으로 돌아간다.
 MILP 계획은 수집 데이터의 최신 연속 24h(관측 시각과 다른 날일 수 있음) 기준이라 실시간 게이지에
 바로 쓰지 않았다.
@@ -266,6 +267,7 @@ class RealMix:
     order: list[str]        # 연료비 순 발전원 코드
     co2: dict[str, float]   # 연료별 배출계수 (generators.yaml)
     latency_s: float | None
+    balance: pd.DataFrame | None = None  # 같은 날 시간별 수급 (logic.real_balance). 없으면 None
 
     @property
     def tag(self) -> str:
@@ -285,14 +287,14 @@ def real_mix(collector_url: str) -> RealMix | None:
         return None
     demand = logic.rows_frame(
         fetch_collector_range(collector_url, "power_demand", f"{day} 00:00:00", f"{day} 23:59:59"),
-        ("demand_mw",),
+        ("demand_mw", "supply_mw"),
     )
     fuel_cost = logic.rows_frame(fetch_collector(collector_url, "fuel_cost", 60),
                                  ("cost_won_per_kwh",))
     mix = logic.real_mix(trading, demand, day)
     order = logic.merit_fuel_order(sorted(mix.fuel.unique()), fuel_cost)
     return RealMix(day=day, mix=mix, order=order, co2=fuel_co2(),
-                   latency_s=trading_res.latency_s)
+                   latency_s=trading_res.latency_s, balance=logic.real_balance(demand, mix))
 
 
 @st.cache_data(show_spinner=False)
@@ -695,11 +697,15 @@ def _adjust_from_state() -> logic.Adjust:
     )
 
 
-def render_period_input() -> tuple[date, date]:
-    """탄소·ESS 분석 기간 (최종 결과물 3: 대시보드에서 분석 기간 선택)."""
+def render_period_input(default: date | None = None) -> tuple[date, date]:
+    """탄소·ESS 분석 기간 (최종 결과물 3: 대시보드에서 분석 기간 선택).
+
+    default 는 처음 보여 줄 날 — 실측이 있는 가장 최근 날을 넘긴다 (없으면 오늘).
+    """
     today = date.today()
+    first = default or today
     picked = st.date_input(
-        "분석 기간 (탄소 · ESS)", value=(today, today), key="period",
+        "분석 기간 (탄소 · ESS)", value=(first, first), key="period",
         min_value=today - timedelta(days=365), max_value=today, format="YYYY-MM-DD",
         help=f"시작·끝 날짜를 차례로 고른다. 최대 {logic.MAX_PERIOD_DAYS}일 "
              "(넘으면 끝 날짜 기준으로 자른다).",
@@ -707,18 +713,18 @@ def render_period_input() -> tuple[date, date]:
     # 범위를 고르는 도중에는 날짜가 하나만 온다
     days = list(picked) if isinstance(picked, (tuple, list)) else [picked]
     if not days:
-        return today, today
+        return first, first
     return logic.clamp_period(days[0], days[-1])
 
 
 def render_sidebar(
-    settings: Settings, health: dict[str, ApiResult]
+    settings: Settings, health: dict[str, ApiResult], default_day: date | None = None,
 ) -> tuple[int, tuple[date, date], logic.Adjust]:
     """관측 시각·분석 기간·보기 설정·조정 위젯·서비스 상태. (시각, 기간, 조정값)을 돌려준다."""
     with st.sidebar:
         panel_title("관측 설정")
         hour = st.slider("관측 시각 (시)", 0, 23, 19)
-        period = render_period_input()
+        period = render_period_input(default_day)
         st.toggle("큰 단위로 보기 (GW · 억원 · 천t)", value=True, key="compact_units")
 
         adjust = render_adjust_controls(settings)
@@ -747,20 +753,25 @@ def _render_service_status(settings: Settings, health: dict[str, ApiResult],
     )
 
 
-def build_context(overview: bool = False) -> Context:
+def build_context(overview: bool | None = None) -> Context:
     """설정·서비스 상태·사이드바 입력을 모아 시계열을 계산한다.
 
     overview 는 통합 관제용이다 — 사이드바에는 분석 기간과 서비스 상태만 두고,
     관측 시각·조정값은 세션 값에서 읽는다 (위젯은 위기 시나리오 카드 안에 있다).
+    None 이면 _run_pages 가 고른 페이지에 맞춰 세션에 둔 값(vpp_overview)을 쓴다.
     """
+    if overview is None:
+        overview = bool(st.session_state.get("vpp_overview", False))
     settings = get_settings()
     urls = logic.service_urls()
     health = {name: fetch_health(url) for name, url in urls.items()}
+    real = real_mix(urls["collector"]) if health["collector"].ok else None
+    default_day = real.day if real else None
     if overview:
-        start, end = render_overview_sidebar(settings, health)
+        start, end = render_overview_sidebar(settings, health, default_day)
         hour, adjust = _overview_assumptions(settings)
     else:
-        hour, (start, end), adjust = render_sidebar(settings, health)
+        hour, (start, end), adjust = render_sidebar(settings, health, default_day)
     today = date.today()
     df = logic.sample_day(settings, today, adjust)
     period = (
@@ -770,7 +781,7 @@ def build_context(overview: bool = False) -> Context:
         settings=settings, urls=urls, health=health, hour=hour, adjust=adjust,
         base=logic.sample_day(settings, today), df=df,
         now=df.loc[df.hour == hour].iloc[0], period=period, start=start, end=end,
-        real=real_mix(urls["collector"]) if health["collector"].ok else None,
+        real=real,
     )
 
 
@@ -1063,22 +1074,33 @@ def _scenario_reserve(row: pd.Series, scenario: logic.CrisisScenario) -> float:
     return (capacity - demand) / demand * 100
 
 
+def _crisis_basis(ctx: Context) -> tuple[pd.DataFrame, pd.Series, str]:
+    """위기 시나리오를 적용할 (하루 시계열, 관측 시각 행, 출처 태그).
+
+    collector 실측 수급(같은 날 수요·공급능력·태양광)이 있으면 그것, 없으면 목업 하루.
+    """
+    real = ctx.real
+    if real is not None and real.balance is not None:
+        day = real.balance
+        return day, day.loc[day.hour == ctx.hour].iloc[0], real.tag
+    return ctx.df, ctx.now, mock_tag()
+
+
 def _render_crisis(ctx: Context) -> None:
     """위기 시나리오 시뮬레이션 — 선택 시나리오 적용 결과 + 3종 하루 최저 예비율.
 
     위기 시나리오 카드 안에서 그린다 (render_crisis_card).
     """
     s = ctx.settings
+    day, now, tag = _crisis_basis(ctx)
     names = [sc.name for sc in s.crisis]
     # 바로 아래가 위젯이라 Streamlit 마크다운의 음수 하단 여백(-1rem)을 메운다
     html('<div class="vpp-kpi-head vpp-divider" style="margin-bottom:1.65rem">'
-         f"<span>위기 시나리오{mock_tag()}</span></div>")
+         f"<span>위기 시나리오{tag}</span></div>")
     choice = st.selectbox("시나리오", ["없음", *names], key="crisis_scenario",
                           label_visibility="collapsed")
-    base = ctx.now.reserve_pct
-    new = base if choice == "없음" else _scenario_reserve(
-        ctx.now, s.crisis[names.index(choice)]
-    )
+    base = now.reserve_pct
+    new = base if choice == "없음" else _scenario_reserve(now, s.crisis[names.index(choice)])
     label, css_class = logic.reserve_status(s, new)
     html(
         '<div class="vpp-kpi-row">'
@@ -1093,7 +1115,7 @@ def _render_crisis(ctx: Context) -> None:
         return min(max((v - lo) / (hi - lo), 0.0), 1.0) * 100
 
     rows = []
-    for _, r in logic.crisis_table(ctx.df, s).iterrows():
+    for _, r in logic.crisis_table(day, s).iterrows():
         v, ok = r["최저 예비율(%)"], bool(r[logic.crisis_ok_column(s)])
         color = C_GREEN if ok else C_RED
         rows.append(
@@ -1309,10 +1331,12 @@ OVERVIEW_CSS = """
 """
 
 
-def render_overview_sidebar(settings: Settings, health: dict[str, ApiResult]) -> tuple[date, date]:
+def render_overview_sidebar(
+    settings: Settings, health: dict[str, ApiResult], default_day: date | None = None,
+) -> tuple[date, date]:
     """통합 관제 사이드바: 분석 기간 · 보기 설정 · 서비스 상태만 둔다. 분석 기간을 돌려준다."""
     with st.sidebar:
-        period = render_period_input()
+        period = render_period_input(default_day)
         st.toggle("큰 단위로 보기 (GW · 억원 · 천t)", value=True, key="compact_units")
         # 알람 기준은 예비율 링 옆 범례에 이미 있다
         _render_service_status(settings, health, alarm_note=False)
@@ -1416,9 +1440,12 @@ def render_crisis_card(ctx: Context) -> None:
         _render_crisis(ctx)
         # 빈 칸: Streamlit 마크다운의 음수 하단 여백(-1rem) 때문에 위아래 요소가 겹친다
         html('<div style="height:1.6rem"></div>')
-        with st.popover("가정 조정", width="stretch"):
+        # 수요·태양광 등 조정값은 목업 시계열에만 먹는다. 실측 기준일 때는 시각만 고른다
+        mock = ctx.real is None or ctx.real.balance is None
+        with st.popover("가정 조정" if mock else "관측 시각", width="stretch"):
             st.slider("관측 시각 (시)", 0, 23, key="overview_hour")
-            render_adjust_controls(ctx.settings)
+            if mock:
+                render_adjust_controls(ctx.settings)
 
 
 def page_overview() -> None:
@@ -1553,12 +1580,13 @@ def render_optimization_detail(ctx: Context) -> None:
 def render_crisis_detail(ctx: Context) -> None:
     """시나리오 3종을 관측 시각에 적용한 게이지 + 하루 최저 예비율 표."""
     s = ctx.settings
-    panel_title(f"위기 시나리오 상세 ({ctx.hour}시 적용)", mock_tag())
+    day, now, tag = _crisis_basis(ctx)
+    panel_title(f"위기 시나리오 상세 ({ctx.hour}시 적용)", tag)
     # 게이지 눈금 범위는 모두 같게 둔다 — 다르면 같은 값도 바늘 위치가 달라 보인다.
     steps = _reserve_steps(s, value_min=-30)
     cols = st.columns(len(s.crisis) + 1)
-    items = [("평시", ctx.now.reserve_pct)] + [
-        (sc.name, _scenario_reserve(ctx.now, sc)) for sc in s.crisis
+    items = [("평시", now.reserve_pct)] + [
+        (sc.name, _scenario_reserve(now, sc)) for sc in s.crisis
     ]
     for i, (col, (name, value)) in enumerate(zip(cols, items, strict=True)):
         with col:
@@ -1568,7 +1596,45 @@ def render_crisis_detail(ctx: Context) -> None:
                               bar_color=STATUS_COLOR[logic.reserve_status(s, value)[1]]),
                 width="stretch", key=f"g_crisis_{i}",
             )
-    st.dataframe(logic.crisis_table(ctx.df, s), hide_index=True, width="stretch")
+    st.dataframe(logic.crisis_table(day, s), hide_index=True, width="stretch")
+
+
+def _real_period(ctx: Context) -> pd.DataFrame:
+    """분석 기간의 실측 발전원별 출력 (logic.real_period). 응답이 없으면 빈 표."""
+    res = fetch_collector_range(ctx.urls["collector"], "trading_by_fuel",
+                                f"{ctx.start} 00:00:00", f"{ctx.end} 23:59:59")
+    return logic.real_period(logic.rows_frame(res, ("trade_mwh",)), ctx.start, ctx.end)
+
+
+def _render_real_period_carbon(ctx: Context, real: RealMix) -> None:
+    """사이드바 분석 기간의 실측 탄소: 시간대별 추이, 발전원별 내역, 여러 날이면 일별 표."""
+    period = _real_period(ctx)
+    label = ctx.period_label
+    if period.empty:  # 고른 기간에 실측이 없으면 가장 최근 실측 하루를 보여 준다
+        hours = pd.to_timedelta(real.mix.hour, unit="h")
+        period = real.mix.assign(ts=pd.Timestamp(real.day) + hours, date=real.day)
+        label = f"{real.day:%m/%d} 하루 · 고른 기간에 실측 없음"
+    panel_title(f"탄소 분석 ({label})", real_tag("실측"))
+    hourly = logic.real_period_carbon(period, real.co2)
+    one_day = period.date.nunique() == 1
+    fig = go.Figure()
+    _carbon_main(fig, hourly.index.hour if one_day else hourly.index, hourly.values, "실측")
+    fig = _compact_chart(fig, H_SMALL, "tCO2", "시" if one_day else "")
+    st.plotly_chart(fig.update_layout(showlegend=False), width="stretch",
+                    key="c_carbon_period", config=NO_BAR)
+    table = logic.real_carbon_by_fuel(period, real.co2, COLLECTOR_FUEL_KO, real.order)
+    st.dataframe(_comma_table(table), hide_index=True, width="stretch")
+    if not one_day:
+        st.dataframe(
+            _comma_table(logic.real_daily_carbon(period, real.co2)), hide_index=True,
+            width="stretch",
+            column_config={"날짜": st.column_config.DateColumn(format="MM/DD (ddd)")},
+        )
+    st.caption(
+        f"사이드바 분석 기간의 실측 발전량 x 배출계수. 합계 {ton(table['배출량(tCO2)'].sum())}. "
+        "배출계수는 config/generators.yaml (IAEA 2022 전과정 기준, 유류·국내탄은 출처 없는 "
+        "가정값). 태양광·풍력·기타 재생·양수는 0 으로 본다. ESS 비교는 위 MILP 계획 하루에만 있다."
+    )
 
 
 def render_carbon_detail(ctx: Context) -> None:
@@ -1595,16 +1661,7 @@ def render_carbon_detail(ctx: Context) -> None:
             "ESS 를 쓰지 않아 ESS 없는 MILP 와 같은 조건이다."
         )
     if ctx.real is not None:
-        real = ctx.real
-        panel_title("탄소 분석 (발전원별 배출)", real.tag)
-        table = logic.real_carbon_by_fuel(real.mix, real.co2, COLLECTOR_FUEL_KO, real.order)
-        st.dataframe(_comma_table(table), hide_index=True, width="stretch")
-        st.caption(
-            f"{real.day:%m/%d} 하루 실측 발전량 x 배출계수. 합계 "
-            f"{ton(table['배출량(tCO2)'].sum())}. 배출계수는 config/generators.yaml (IAEA 2022 "
-            "전과정 기준, 유류·국내탄은 출처 없는 가정값). 태양광·풍력·기타 재생·양수는 0 으로 "
-            "본다. 사이드바 분석 기간과 ESS 비교는 실측에 적용하지 않는다."
-        )
+        _render_real_period_carbon(ctx, ctx.real)
         return
     panel_title(f"탄소 · ESS 분석 ({ctx.period_label})", mock_tag())
     st.dataframe(_comma_table(logic.carbon_by_fuel(ctx.period, ctx.settings)), hide_index=True,
@@ -1688,8 +1745,39 @@ def render_generation_heatmap(
     st.plotly_chart(style_dark(fig, height=260), width="stretch", key="c_heatmap")
 
 
-def render_hourly_table(settings: Settings, df: pd.DataFrame) -> None:
-    """시간대 상세표와 CSV 내려받기."""
+def _render_real_hourly_table(settings: Settings, real: RealMix) -> None:
+    """실측 하루의 시간대 상세표와 CSV 내려받기."""
+    panel_title("시간대 상세표", real.tag)
+    table = logic.real_hourly_table(real.mix, real.balance, real.co2, COLLECTOR_FUEL_KO,
+                                    list(real.order))
+    crit, warn = settings.reserve_critical_pct, settings.reserve_warning_pct
+
+    def color_reserve(v: float) -> str:
+        if v < crit:
+            return "background-color:rgba(248,113,113,.25)"
+        if v < warn:
+            return "background-color:rgba(250,204,21,.22)"
+        return ""
+
+    styled = table.style.format(
+        "{:,.0f}", na_rep="–",
+        subset=[c for c in table.columns if c.endswith("(MW)") or c == "배출(tCO2)"],
+    )
+    if "예비율(%)" in table:
+        styled = (styled.map(color_reserve, subset=["예비율(%)"])
+                  .format("{:.1f}", subset=["예비율(%)"], na_rep="–"))
+    st.dataframe(styled, hide_index=True, width="stretch", height=420)
+    st.download_button(
+        "CSV 내려받기", table.to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"real_hourly_{real.day:%Y%m%d}.csv", mime="text/csv",
+    )
+
+
+def render_hourly_table(settings: Settings, df: pd.DataFrame, real: RealMix | None = None) -> None:
+    """시간대 상세표와 CSV 내려받기. real 이 있으면 실측 하루, 없으면 목업."""
+    if real is not None:
+        _render_real_hourly_table(settings, real)
+        return
     panel_title("시간대 상세표", mock_tag())
     table = logic.hourly_table(settings, df)
     crit, warn = settings.reserve_critical_pct, settings.reserve_warning_pct
@@ -1726,7 +1814,7 @@ def page_data() -> None:
     with c2, st.container(border=True):
         render_generation_heatmap(ctx.settings, ctx.df, ctx.real)
     with st.container(border=True):
-        render_hourly_table(ctx.settings, ctx.df)
+        render_hourly_table(ctx.settings, ctx.df, ctx.real)
 
 
 LOADER_HTML = Path(__file__).with_name("loader.html")
@@ -1784,11 +1872,11 @@ def _run_pages() -> None:
             icon=":material/science:", url_path="stochastic-test",
         ),
     ])
+    # 분석 상세·시간대 데이터만 전체 사이드바를 쓰고, 통합 관제는 간단한 사이드바를 쓴다.
+    st.session_state["vpp_overview"] = nav.url_path not in ("analysis", "data")
     # 사이드바 조정은 페이지 밖(여기)에서 그려야 페이지를 옮겨도 값이 유지된다.
-    if nav.url_path in ("analysis", "data"):
+    if nav.url_path not in ("scenarios", "stochastic-test"):
         st.session_state["vpp_ctx"] = build_context()
-    elif nav.url_path not in ("scenarios", "stochastic-test"):
-        st.session_state["vpp_ctx"] = build_context(overview=True)
     nav.run()
 
 

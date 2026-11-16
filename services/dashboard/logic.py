@@ -734,6 +734,74 @@ def real_carbon_by_fuel(
     return pd.DataFrame(rows)
 
 
+def real_balance(power: pd.DataFrame, mix: pd.DataFrame) -> pd.DataFrame | None:
+    """그날 시간별 실측 수급 (위기 시나리오 기준). 24시간이 다 없으면 None.
+
+    power 는 collector power_demand 의 그날 5분 값 (demand_mw, supply_mw) 이고 시간 평균을 쓴다.
+    반환 열은 목업 시계열과 같다 — hour, demand_mw, available_capacity_mw(공급능력), solar_mw,
+    reserve_pct — apply_scenario·crisis_table 이 같은 코드를 쓴다.
+    가정: 태양광은 trading_by_fuel 의 시장 거래분이고, 공급능력에 그만큼 들어 있다고 본다
+    (램프다운 시나리오는 공급능력에서 태양광 출력의 일부를 뺀다).
+    """
+    if power.empty or "supply_mw" not in power or "demand_mw" not in power:
+        return None
+    p = power.dropna(subset=["demand_mw", "supply_mw"])
+    p = p[p.demand_mw > 0]
+    hourly = p.assign(hour=pd.to_datetime(p.ts).dt.hour).groupby("hour")[
+        ["demand_mw", "supply_mw"]].mean()
+    if len(hourly) < 24:
+        return None
+    solar = mix[mix.fuel == "solar"].groupby("hour").mw.sum()
+    out = hourly.rename(columns={"supply_mw": "available_capacity_mw"}).reset_index()
+    out["solar_mw"] = out.hour.map(solar).fillna(0.0)
+    out["reserve_pct"] = (out.available_capacity_mw - out.demand_mw) / out.demand_mw * 100
+    return out
+
+
+def real_period(trading: pd.DataFrame, start: date, end: date) -> pd.DataFrame:
+    """trading_by_fuel 에서 분석 기간(양 끝 포함)의 실측 출력. 반환: ts, date, fuel, mw."""
+    if trading.empty:
+        return pd.DataFrame(columns=["ts", "date", "fuel", "mw"])
+    ts = pd.to_datetime(trading.ts)
+    t = trading.assign(ts=ts, date=ts.dt.date, mw=trading.trade_mwh).dropna(subset=["mw"])
+    t = t[(t.date >= start) & (t.date <= end)]
+    return t[["ts", "date", "fuel", "mw"]].reset_index(drop=True)
+
+
+def real_period_carbon(period: pd.DataFrame, co2: dict[str, float]) -> pd.Series:
+    """기간의 시각별 배출량 (tCO2) = 실측 출력 x 배출계수. 색인은 시각(ts)."""
+    return (period.mw * period.fuel.map(co2).fillna(0.0)).groupby(period.ts).sum()
+
+
+def real_daily_carbon(period: pd.DataFrame, co2: dict[str, float]) -> pd.DataFrame:
+    """기간의 일별 실측 발전량(MWh)·배출량(tCO2). 1시간 간격이라 MW 합 = MWh."""
+    carbon = period.mw * period.fuel.map(co2).fillna(0.0)
+    out = pd.DataFrame({
+        "발전량(MWh)": period.groupby("date").mw.sum().round(0),
+        "배출(tCO2)": carbon.groupby(period.date).sum().round(0),
+    })
+    return out.reset_index().rename(columns={"date": "날짜"})
+
+
+def real_hourly_table(
+    mix: pd.DataFrame, balance: pd.DataFrame | None, co2: dict[str, float],
+    names: dict[str, str], order: list[str],
+) -> pd.DataFrame:
+    """실측 하루의 시간대 상세표 (한글 컬럼, MW 원값). 화면 표시와 CSV 내려받기에 같이 쓴다."""
+    wide = mix.pivot(index="hour", columns="fuel", values="mw")
+    out = pd.DataFrame({"시각": [f"{h:02d}:00" for h in wide.index]})
+    out["수요(MW)"] = mix.groupby("hour").demand_mw.first().reindex(wide.index).round(0).values
+    for f in order:
+        if f in wide:
+            out[f"{names.get(f, f)}(MW)"] = wide[f].round(0).values
+    if balance is not None:
+        b = balance.set_index("hour").reindex(wide.index)
+        out["공급능력(MW)"] = b.available_capacity_mw.round(0).values
+        out["예비율(%)"] = b.reserve_pct.round(1).values
+    out["배출(tCO2)"] = real_carbon_by_hour(mix, co2).reindex(wide.index).round(0).values
+    return out
+
+
 def real_utilization(mix: pd.DataFrame, hour: int, top: int = 6) -> pd.DataFrame:
     """그 시각 발전원별 출력과 이용률(출력 / 설비용량). 출력 큰 순 top 개 + 나머지는 '기타'."""
     h = mix[mix.hour == hour].sort_values("mw", ascending=False)
