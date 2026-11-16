@@ -527,7 +527,7 @@ def test_app_renders_without_services(monkeypatch) -> None:
     assert at.selectbox(key="crisis_scenario").options[0] == "없음"
 
     at.selectbox(key="crisis_scenario").select(at.selectbox(key="crisis_scenario").options[1]).run()
-    at.sidebar.slider[0].set_value(3).run()
+    at.slider(key="overview_hour").set_value(3).run()  # 관측 시각 (위기 시나리오 카드 안)
     assert not at.exception
 
 
@@ -562,10 +562,11 @@ def test_app_renders_with_milp(monkeypatch, fresh_cache) -> None:
     at = AppTest.from_file(str(DASHBOARD_DIR / "app.py"), default_timeout=60).run()
     assert not at.exception
     page = "".join(m.value for m in at.markdown)
-    assert "MILP 09/17 계획" in page          # 최적화 결과 (cost 모드)
-    assert "MILP·peak 09/17 계획" in page     # ESS (peak_shaving 모드)
+    assert "급전 계획 09/17 하루 (MILP)" in page  # 제목 줄의 계획 날짜
+    assert ">MILP</span>" in page             # 최적화 결과 (cost 모드)
+    assert ">MILP·peak</span>" in page        # ESS (peak_shaving 모드)
     assert "Rule-based 대비" in page          # 탄소 (ESS 연계 / ESS 없음)
-    assert "순수요 기준" in page              # Merit Order 계획 스택
+    assert "아래부터 연료비 순" in page        # Merit Order 계획 스택
     # 기본 계획만 유닛 출력을 받는다
     assert {(c.get("ess_mode"), c.get("use_ess", True), c["include_units"]) for c in calls} == {
         (None, True, True), ("peak_shaving", True, False), (None, False, False)}
