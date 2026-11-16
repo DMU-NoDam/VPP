@@ -642,6 +642,32 @@ app.{page}()
     assert len(at.dataframe) >= 1
 
 
+def test_menu_hides_merged_pages(monkeypatch) -> None:
+    """시간대 데이터·시나리오 생성기는 다른 페이지로 합쳐 메뉴에서 뺀다."""
+    from types import SimpleNamespace
+
+    monkeypatch.syspath_prepend(str(DASHBOARD_DIR))
+    import app
+
+    paths = ["", "analysis", "data", "scenarios", "stochastic-test"]
+    shown = app._menu([SimpleNamespace(url_path=p) for p in paths])
+    assert [p.url_path for p in shown] == ["", "analysis", "stochastic-test"]
+
+
+def test_app_menu_runs_without_merged_pages(monkeypatch) -> None:
+    """메뉴를 거른 뒤에도 전체 앱(st.navigation)이 오류 없이 뜬다."""
+    from streamlit.testing.v1 import AppTest
+
+    def down(*a, **k):
+        raise requests.ConnectionError()
+
+    monkeypatch.setattr(logic.requests, "request", down)
+    monkeypatch.syspath_prepend(str(DASHBOARD_DIR))
+
+    at = AppTest.from_file(str(DASHBOARD_DIR / "app.py"), default_timeout=60).run()
+    assert not at.exception
+
+
 # ── 시나리오 생성기 페이지 ───────────────────────────────────────────────────
 
 
@@ -768,11 +794,11 @@ def test_scenario_page_helpers() -> None:
     assert page_scenarios.scenario_frame(data).loc[0, "라벨"] == "고수요"
 
 
-# ── Two-Stage 성능 비교 (테스트) 페이지 ──────────────────────────────────────
+# ── Two-Stage · VSS 페이지 (시나리오 생성 포함) ──────────────────────────────
 
 
 def _stochastic_page_script() -> None:
-    """AppTest 가 실행할 스크립트: Two-Stage 테스트 페이지만 단독으로 띄운다."""
+    """AppTest 가 실행할 스크립트: Two-Stage · VSS 페이지만 단독으로 띄운다."""
     import page_stochastic_test
     import ui
 
@@ -833,24 +859,39 @@ def _fake_dispatch_with_stochastic(monkeypatch):
 
 
 def test_stochastic_page_waits_then_runs(monkeypatch) -> None:
+    import streamlit as st
     from streamlit.testing.v1 import AppTest
 
+    st.cache_data.clear()  # 앞 테스트가 캐시한 시나리오 응답이 있으면 호출이 잡히지 않는다
     calls = _fake_dispatch_with_stochastic(monkeypatch)
     monkeypatch.syspath_prepend(str(DASHBOARD_DIR))
 
+    def stochastic_calls() -> list:
+        return [c for c in calls if c[0].endswith("/dispatch/stochastic")]
+
     at = AppTest.from_function(_stochastic_page_script, default_timeout=60).run()
     assert not at.exception
-    assert at.info and not calls  # '실행'을 누르기 전에는 호출하지 않는다
+    # 시나리오는 바로 만들어 보여 주고, Two-Stage 는 '실행'을 누르기 전에는 호출하지 않는다
+    assert calls and not stochastic_calls() and at.info
+    assert any("생성 결과" in m.value for m in at.markdown)
 
     next(b for b in at.button if b.label == "실행").click().run()
     assert not at.exception
-    url, body, timeout = calls[-1]
-    assert url.endswith("/dispatch/stochastic")
+    url, body, timeout = stochastic_calls()[-1]
     # 기본값은 제한 없음: solver 에 null 을 보내고 HTTP 응답도 끝까지 기다린다
     assert len(body["scenarios"]) == 10 and body["solver"]["time_limit_s"] is None
     assert timeout is None
     assert any("VSS 목표 달성" in m.value for m in at.markdown)
     assert len(at.session_state.sto_history) == 1
+
+    # 시나리오 조건만 바꾸면 다시 '실행'을 누를 때까지 풀지 않는다
+    at.sidebar.slider[0].set_value(12)            # 시나리오 수 (생성 조건 폼)
+    next(b for b in at.button if b.label == "시나리오 생성").click().run()
+    assert not at.exception
+    assert len(stochastic_calls()) == 1
+    assert any("시나리오 조건이 바뀌었다" in i.value for i in at.info)
+    next(b for b in at.button if b.label == "실행").click().run()
+    assert len(stochastic_calls()[-1][1]["scenarios"]) == 12
 
     next(b for b in at.button if b.label == "이력 지우기").click().run()
     assert not at.exception
@@ -882,6 +923,10 @@ def test_stochastic_page_helpers() -> None:
 
     req = {"start": "2026-09-22T00:00:00", "compute_ws": True,
            "scenarios": [{"scenario_id": "S01", "probability": 1.0}]}
+    scn = {"seed": 42, "n_scenarios": 10}
+    assert not page.stale_scenarios({**scn, "mip_gap_pct": 0.5}, scn)
+    assert page.stale_scenarios({**scn, "n_scenarios": 12}, scn)
+    assert page.stale_scenarios({"mip_gap_pct": 0.5}, scn)  # 시나리오 조건 없이 저장된 옛 값
     good = page.summarize(_stochastic_body(req), mip_gap=0.005)
     assert good["vss_pct"] == pytest.approx(5.0) and good["order_ok"] and good["significant"]
     assert good["evpi_won"] == pytest.approx(9.5e10 * 0.01)

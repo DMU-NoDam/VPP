@@ -6,10 +6,13 @@ config/dashboard.yaml 에 있다.
 페이지 구성:
     통합 관제      스크롤 없이 한 화면 — 수급 게이지·알람, Merit Order, 최적화 결과,
                    탄소 추이, ESS, 위기 시나리오 (CLAUDE.md 최종 결과물 4·기능 요구 10)
-    분석 상세      168h 예측·성능 지표, 최적화 상세, 위기 시나리오 게이지, 배출 내역
-    시간대 데이터  KPX 실측, 출력 히트맵, 시간대 상세표·CSV
-    시나리오 생성기 page_scenarios.py
-    Two-Stage 테스트 page_stochastic_test.py — RP·EV·EEV·WS 비교, VSS 판정
+    분석 상세      168h 예측·성능 지표, 최적화 상세, 위기 시나리오 게이지, 배출 내역,
+                   시간대 데이터 (KPX 실측, 출력 히트맵, 시간대 상세표·CSV)
+    Two-Stage · VSS page_stochastic_test.py — 시나리오 생성(page_scenarios.py) →
+                   RP·EV·EEV·WS 비교, VSS 판정
+    시간대 데이터·시나리오 생성기 페이지는 위 두 페이지로 합쳐 메뉴에서 뺐다 (_menu).
+    st.navigation 목록의 두 줄은 milp 브랜치가 main 에 들어온 뒤 지운다
+    (milp 가 같은 자리에 페이지를 넣어, 지금 지우면 머지가 충돌한다).
 사이드바의 관측 시각·조정값은 앞의 세 페이지가 함께 쓴다 (main 에서 한 번 그린다).
 
 데이터 출처 (모두 REST, 다른 서비스 코드는 import 하지 않는다):
@@ -23,7 +26,8 @@ config/dashboard.yaml 에 있다.
                                                        ESS 충방전·피크 감소 (peak_shaving 모드),
                                                        탄소 ESS 전/후·Rule-based 대비 (use_ess 끔)
                   GET  /api/v1/dispatch/stochastic/latest  VSS (미리 계산, StochasticLatest)
-                  POST /api/v1/scenarios               시나리오 생성기 페이지 (page_scenarios.py)
+                  POST /api/v1/scenarios               Two-Stage · VSS 페이지의 시나리오 생성
+                  POST /api/v1/dispatch/stochastic     Two-Stage · VSS 페이지 (page_stochastic_test)
 응답이 없거나 계약이 아직 없는 패널은 목업으로 그린다. 서비스 응답을 쓴 패널에는 LIVE,
 목업으로 그린 패널에는 목업 태그를 단다 (ui.source_tag, ui.mock_tag).
 
@@ -1682,10 +1686,11 @@ def render_carbon_detail(ctx: Context) -> None:
 
 
 def page_analysis() -> None:
-    """분석 상세 — 예측 성능, 최적화 수치, 위기 시나리오 게이지, 배출 내역."""
+    """분석 상세 — 예측 성능, 최적화 수치, 위기 시나리오 게이지, 배출 내역, 시간대 데이터."""
     ctx = _ctx()
     html('<div class="vpp-topbar"><div class="vpp-title">분석 상세</div>'
-         '<div class="vpp-subtitle">예측 · 최적화 · 위기 시나리오 · 탄소</div></div>')
+         '<div class="vpp-subtitle">예측 · 최적화 · 위기 시나리오 · 탄소 · 시간대 데이터'
+         '</div></div>')
     with st.container(border=True):
         render_forecast(ctx)
     c1, c2 = st.columns([1, 1])
@@ -1695,6 +1700,7 @@ def page_analysis() -> None:
         render_carbon_detail(ctx)
     with st.container(border=True):
         render_crisis_detail(ctx)
+    render_hourly_data(ctx)
 
 
 # ── 시간대 데이터 ────────────────────────────────────────────────────────────
@@ -1803,11 +1809,8 @@ def render_hourly_table(settings: Settings, df: pd.DataFrame, real: RealMix | No
     )
 
 
-def page_data() -> None:
-    """시간대 데이터 — 실측, 히트맵, 상세표."""
-    ctx = _ctx()
-    html('<div class="vpp-topbar"><div class="vpp-title">시간대 데이터</div>'
-         '<div class="vpp-subtitle">KPX 실측 · 발전원별 출력 · 24시간 상세표</div></div>')
+def render_hourly_data(ctx: Context) -> None:
+    """시간대 데이터 — KPX 실측 믹스, 출력 히트맵, 시간대 상세표·CSV (분석 상세 아래)."""
     c1, c2 = st.columns([1, 1.6])
     with c1, st.container(border=True):
         render_realtime_mix(ctx.urls["collector"])
@@ -1815,6 +1818,14 @@ def page_data() -> None:
         render_generation_heatmap(ctx.settings, ctx.df, ctx.real)
     with st.container(border=True):
         render_hourly_table(ctx.settings, ctx.df, ctx.real)
+
+
+def page_data() -> None:
+    """시간대 데이터 — 분석 상세 아래로 옮겨 메뉴에서 뺐다 (_menu). milp 머지 뒤 지운다."""
+    ctx = _ctx()
+    html('<div class="vpp-topbar"><div class="vpp-title">시간대 데이터</div>'
+         '<div class="vpp-subtitle">KPX 실측 · 발전원별 출력 · 24시간 상세표</div></div>')
+    render_hourly_data(ctx)
 
 
 LOADER_HTML = Path(__file__).with_name("loader.html")
@@ -1854,10 +1865,20 @@ def main() -> None:
             st.session_state["vpp_loaded"] = True
 
 
+# 다른 페이지로 합쳐 메뉴에서 뺀 페이지 (url_path): 시간대 데이터 → 분석 상세 아래,
+# 시나리오 생성기 → Two-Stage · VSS. milp 머지 뒤 _run_pages 목록에서 두 줄을 지우고 이것도 없앤다.
+MERGED_PAGES = ("data", "scenarios")
+
+
+def _menu(pages: list) -> list:
+    """메뉴에 둘 페이지만 남긴다 (MERGED_PAGES 를 뺀다). 뺀 주소로 오면 기본 페이지가 열린다."""
+    return [p for p in pages if p.url_path not in MERGED_PAGES]
+
+
 def _run_pages() -> None:
     """테마 CSS·내비게이션·공용 컨텍스트를 만들고 고른 페이지를 그린다."""
     inject_custom_css()
-    nav = st.navigation([
+    nav = st.navigation(_menu([
         st.Page(page_overview, title="통합 관제", icon=":material/monitoring:", default=True),
         st.Page(page_analysis, title="분석 상세", icon=":material/analytics:",
                 url_path="analysis"),
@@ -1868,10 +1889,10 @@ def _run_pages() -> None:
             icon=":material/stacked_line_chart:", url_path="scenarios",
         ),
         st.Page(
-            page_stochastic_test.render, title="Two-Stage 테스트",
+            page_stochastic_test.render, title="Two-Stage · VSS",
             icon=":material/science:", url_path="stochastic-test",
         ),
-    ])
+    ]))
     # 분석 상세·시간대 데이터만 전체 사이드바를 쓰고, 통합 관제는 간단한 사이드바를 쓴다.
     st.session_state["vpp_overview"] = nav.url_path not in ("analysis", "data")
     # 사이드바 조정은 페이지 밖(여기)에서 그려야 페이지를 옮겨도 값이 유지된다.

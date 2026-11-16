@@ -14,7 +14,7 @@
 | 시나리오 생성 `POST /api/v1/scenarios` | 구현 (300개 표본 → 10개 축약) | `services/dispatch_api/scenarios.py` |
 | 선택 A: Two-Stage Stochastic + VSS | 구현 | `services/dispatch_api/stochastic.py` |
 | 선택 B: RL 급전 에이전트 | 미구현 | - |
-| 위기 시나리오 시뮬레이터 | 미구현 (대시보드 패널은 목업) | `docs/formulation.md` 10장 |
+| 위기 시나리오 시뮬레이터 | 부분 구현 (대시보드가 collector 실측 하루에 3종을 적용해 예비율 표시, 시나리오별 재급전은 없음) | `services/dashboard`, `docs/formulation.md` 10장 |
 | 통합 관제 대시보드 (Streamlit) | 구현 | `services/dashboard` |
 
 ## 시스템 아키텍처
@@ -127,11 +127,9 @@ docker-compose up --build
 
 | 페이지 | 내용 |
 | --- | --- |
-| 통합 관제 | 수요·공급·예비율 게이지와 알람(7% 미만 Warning, 5% 미만 Critical), Merit Order, 최적화 결과, 탄소 추이, ESS, 위기 시나리오(목업) |
-| 분석 상세 | 168h 예측·성능 지표, 최적화 상세, 위기 시나리오 게이지, 배출 내역 |
-| 시간대 데이터 | KPX 실측, 출력 히트맵, 시간대 상세표·CSV |
-| 시나리오 생성기 | `POST /api/v1/scenarios` 결과 확인 |
-| Two-Stage 테스트 | RP·EV·EEV·WS 비교, VSS 판정 |
+| 통합 관제 | 수요·공급·예비율 게이지와 알람(7% 미만 Warning, 5% 미만 Critical), Merit Order, 최적화 결과, 탄소 추이, ESS, 위기 시나리오(실측 하루 기준) |
+| 분석 상세 | 168h 예측·성능 지표, 최적화 상세, 분석 기간별 탄소·ESS, 위기 시나리오 게이지, 시간대 데이터(KPX 실측 믹스, 출력 히트맵, 시간대 상세표·CSV) |
+| Two-Stage · VSS | 시나리오 생성(`POST /api/v1/scenarios`: 경로·확률·검증·내보내기) → Two-Stage 풀이 → RP·EV·EEV·WS 비교, VSS 판정 |
 
 판정 기준·알람 임계값·목업 값은 `config/dashboard.yaml`에 있다.
 
