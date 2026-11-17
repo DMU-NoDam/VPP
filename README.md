@@ -128,8 +128,10 @@ docker-compose up --build
 | 페이지 | 내용 |
 | --- | --- |
 | 통합 관제 | 수요·공급·예비율 게이지와 알람(7% 미만 Warning, 5% 미만 Critical), Merit Order, 최적화 결과, 탄소 추이, ESS, 위기 시나리오(실측 하루 기준) |
-| 분석 상세 | 168h 예측·성능 지표, 최적화 상세, 분석 기간별 탄소·ESS, 위기 시나리오 게이지, 시간대 데이터(KPX 실측 믹스, 출력 히트맵, 시간대 상세표·CSV) |
-| Two-Stage · VSS | 시나리오 생성(`POST /api/v1/scenarios`: 경로·확률·검증·내보내기) → Two-Stage 풀이 → RP·EV·EEV·WS 비교, VSS 판정 |
+| 분석 상세 | 168h 예측·성능 지표, 최적화 상세, 분석 기간별 탄소·ESS, 위기 시나리오 게이지, 배출 내역 |
+| 시간대 데이터 | KPX 실측 믹스, 출력 히트맵, 시간대 상세표·CSV |
+| 시나리오 생성기 | `POST /api/v1/scenarios` 결과 확인 (경로·확률·검증·내보내기) |
+| Two-Stage 테스트 | RP·EV·EEV·WS 비교, VSS 판정 |
 
 판정 기준·알람 임계값·목업 값은 `config/dashboard.yaml`에 있다.
 

@@ -334,12 +334,21 @@ def render_export(data: dict, params: dict) -> None:
 # ── 페이지 ───────────────────────────────────────────────────────────────────
 
 
-def render_body(params: dict) -> dict | None:
-    """생성 결과 화면 (요약 · 경로 · 목록 · 확률 · 내보내기). 받은 시나리오 묶음을 돌려준다.
+def render() -> None:
+    """시나리오 생성기 페이지."""
+    get_settings()  # 설정 파일이 없으면 여기서 바로 드러나게
+    params = render_controls()
+    with st.sidebar:
+        st.toggle("큰 단위로 보기 (GW · 억원 · 천t)", value=True, key="compact_units")
 
-    Two-Stage · VSS 페이지(page_stochastic_test)도 이 화면을 그대로 쓴다.
-    실패하면 오류를 띄우고 None.
-    """
+    st.markdown(
+        '<div class="vpp-topbar">'
+        '<div class="vpp-title"><span class="vpp-logo">⚡</span>불확실성 시나리오 생성기</div>'
+        '<div class="vpp-subtitle">forecast_api 90% 예측구간 → 오차 표본 → forward selection 축약 '
+        "→ 확률 시나리오 (Two-Stage 최적화 입력)</div></div>",
+        unsafe_allow_html=True,
+    )
+
     url = logic.service_urls()["dispatch_api"]
     res = fetch_scenarios(url, json.dumps(params, sort_keys=True))
     if not res.ok:
@@ -349,7 +358,7 @@ def render_body(params: dict) -> dict | None:
             "`docker compose up -d --build dispatch_api` 로 띄운 뒤 '시나리오 생성'을 다시 누른다. "
             f"(요청 주소: {url}{API_PREFIX}/scenarios)"
         )
-        return None
+        return
     data = res.data
 
     with st.container(border=True):
@@ -373,21 +382,3 @@ def render_body(params: dict) -> dict | None:
 
     with st.container(border=True):
         render_export(data, params)
-    return data
-
-
-def render() -> None:
-    """시나리오 생성기 페이지."""
-    get_settings()  # 설정 파일이 없으면 여기서 바로 드러나게
-    params = render_controls()
-    with st.sidebar:
-        st.toggle("큰 단위로 보기 (GW · 억원 · 천t)", value=True, key="compact_units")
-
-    st.markdown(
-        '<div class="vpp-topbar">'
-        '<div class="vpp-title"><span class="vpp-logo">⚡</span>불확실성 시나리오 생성기</div>'
-        '<div class="vpp-subtitle">forecast_api 90% 예측구간 → 오차 표본 → forward selection 축약 '
-        "→ 확률 시나리오 (Two-Stage 최적화 입력)</div></div>",
-        unsafe_allow_html=True,
-    )
-    render_body(params)

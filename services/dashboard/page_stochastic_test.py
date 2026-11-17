@@ -1,8 +1,7 @@
-"""Two-Stage · VSS 페이지 — 시나리오 생성 → Two-Stage 풀이 → VSS 판정을 한 페이지에서 본다.
+"""Two-Stage 성능 비교 (테스트) 페이지 — formulation.md 3장(Two-Stage · VSS)을 실제로 돌려 본다.
 
-1. POST /api/v1/scenarios 로 시나리오를 만들고 생성기 화면(page_scenarios.render_body)을 그린다.
-2. '실행'을 누르면 화면에 보이는 그 묶음을 그대로 POST /api/v1/dispatch/stochastic 에 넘겨
-   RP · EV · EEV · WS 를 비교한다 (formulation.md 7~9장).
+POST /api/v1/scenarios 로 시나리오를 만들고, 그 묶음을 그대로
+POST /api/v1/dispatch/stochastic 에 넘겨 RP · EV · EEV · WS 를 비교한다.
 VSS 는 RP 가 수렴했고 솔버 허용오차보다 클 때만 믿을 수 있어서, 그 두 가지를 같이 판정한다.
 """
 
@@ -16,8 +15,8 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import logic
-import page_scenarios
 from logic import API_PREFIX, ApiResult
+from page_scenarios import fetch_scenarios
 from ui import (
     C_BLUE,
     C_BRIGHT,
@@ -222,16 +221,14 @@ def stochastic_payload(params: dict, scenario_set: dict) -> dict:
 # ── 화면 조각 ────────────────────────────────────────────────────────────────
 
 
-def render_controls(scn: dict) -> dict | None:
-    """사이드바 Two-Stage 실행 조건 폼. '실행'을 누르기 전에는 None 을 돌려준다.
-
-    시나리오 조건은 위 생성 조건 폼(scn)에서 온다. 실행할 때의 시나리오 조건을 같이 저장해,
-    나중에 시나리오만 바꾸면 다시 '실행'을 누를 때까지 풀지 않는다 (stale_scenarios).
-    """
+def render_controls() -> dict | None:
+    """사이드바 실행 조건 폼. '실행'을 누르기 전에는 None 을 돌려준다."""
     current = st.session_state.get("sto_params") or DEFAULTS
     with st.sidebar:
-        panel_title("Two-Stage 조건")
+        panel_title("실행 조건")
         with st.form("stochastic_test_form", border=False):
+            seed = st.number_input("시나리오 seed", 0, 9999, int(current["seed"]))
+            n_scenarios = st.slider("시나리오 수", 10, 20, int(current["n_scenarios"]))
             time_limit = st.select_slider(
                 "문제당 제한 시간 (초)", [10, 30, 60, 120, None], value=current["time_limit_s"],
                 format_func=lambda v: "없음" if v is None else str(v),
@@ -248,23 +245,10 @@ def render_controls(scn: dict) -> dict | None:
             submitted = st.form_submit_button("실행", type="primary", width="stretch")
         if submitted:
             st.session_state.sto_params = {
-                **scn, "time_limit_s": time_limit, "mip_gap_pct": gap, "compute_ws": ws,
+                "seed": int(seed), "n_scenarios": n_scenarios, "time_limit_s": time_limit,
+                "mip_gap_pct": gap, "compute_ws": ws,
             }
     return st.session_state.get("sto_params")
-
-
-def stale_scenarios(params: dict, scn: dict) -> bool:
-    """마지막 실행 뒤 시나리오 조건이 바뀌었는가 (바뀌었으면 다시 '실행'을 눌러야 푼다)."""
-    return any(params.get(k) != v for k, v in scn.items())
-
-
-def _step(title: str, subtitle: str) -> None:
-    """페이지 안 단계 제목 (1 · 시나리오, 2 · Two-Stage)."""
-    st.markdown(
-        f'<div class="vpp-topbar"><div class="vpp-title" style="font-size:1.1rem">{title}</div>'
-        f'<div class="vpp-subtitle">{subtitle}</div></div>',
-        unsafe_allow_html=True,
-    )
 
 
 def render_verdict(summary: dict, res: ApiResult) -> None:
@@ -429,35 +413,33 @@ def render_history() -> None:
 
 
 def render() -> None:
-    """Two-Stage · VSS 페이지: 1 · 시나리오 생성, 2 · Two-Stage 풀이와 VSS 판정."""
+    """Two-Stage 성능 비교 (테스트) 페이지."""
     get_settings()
-    scn = page_scenarios.render_controls()
-    params = render_controls(scn)
+    params = render_controls()
     with st.sidebar:
         st.toggle("큰 단위로 보기 (GW · 억원 · 천t)", value=True, key="compact_units")
 
     st.markdown(
         '<div class="vpp-topbar">'
-        '<div class="vpp-title"><span class="vpp-logo">⚡</span>Two-Stage · VSS</div>'
-        '<div class="vpp-subtitle">forecast_api 90% 예측구간 → 확률 시나리오 → Two-Stage 풀이 '
-        "→ RP · EV · EEV · WS 비교 (formulation.md 7~9장)</div></div>",
+        '<div class="vpp-title"><span class="vpp-logo">⚡</span>Two-Stage 성능 비교 (테스트)</div>'
+        '<div class="vpp-subtitle">시나리오 생성 → Two-Stage 풀이 → RP · EV · EEV · WS 비교 '
+        "(formulation.md 3장)</div></div>",
         unsafe_allow_html=True,
     )
-    _step("1 · 불확실성 시나리오", "오차 표본 → forward selection 축약 → 확률 시나리오")
-    scenario_set = page_scenarios.render_body(scn)
-    if scenario_set is None:
-        return
-
-    _step("2 · Two-Stage 풀이와 VSS", "위 시나리오 묶음을 그대로 넣어 푼다")
     if params is None:
-        st.info("사이드바 'Two-Stage 조건'에서 '실행'을 누르면 위 시나리오로 푼다. "
-                "기본 조건으로 30초 안팎 걸린다.")
-        return
-    if stale_scenarios(params, scn):
-        st.info("마지막 실행 뒤 시나리오 조건이 바뀌었다. '실행'을 다시 누르면 위 시나리오로 푼다.")
+        st.info("사이드바에서 조건을 정하고 '실행'을 누른다. 기본 조건으로 30초 안팎 걸린다.")
         return
 
     url = logic.service_urls()["dispatch_api"]
+    gen = {"seed": params["seed"], "n_scenarios": params["n_scenarios"]}
+    scen_res = fetch_scenarios(url, json.dumps(gen, sort_keys=True))
+    if not scen_res.ok:
+        fetch_scenarios.clear()
+        st.error(f"dispatch_api 에서 시나리오를 받지 못했다 ({scen_res.error}). "
+                 f"(요청 주소: {url}{API_PREFIX}/scenarios)")
+        return
+    scenario_set = scen_res.data
+
     payload = json.dumps(stochastic_payload(params, scenario_set), sort_keys=True)
     timeout = request_timeout(
         params["time_limit_s"], len(scenario_set["scenarios"]), params["compute_ws"]
