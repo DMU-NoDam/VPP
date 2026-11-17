@@ -180,4 +180,4 @@ GitHub Actions(`.github/workflows/ci.yml`)가 push·PR마다 Python 3.11에서 `
 | 이권희 | A 데이터·인프라 | collector 수집 파이프라인(KPX·data.go.kr·기상청·K-water), CSV 스냅샷과 data_api, `docs/data_sources.md`, 발전기 데이터 |
 | 최진솔 | B 예측 | forecast_api, LightGBM·LSTM 학습과 비교, Conformal 예측구간, 피처 엔지니어링 |
 | 육나윤 | C 최적화 | UC/ED MILP, Rule-based 베이스라인, ESS, 탄소 계산, 제약 사후 검증, config 로더, KPI 측정 스크립트, CI |
-| 민도련 | D 확률·문서·통합 | 시나리오 생성기, Two-Stage Stochastic·VSS, 미리 계산, forecast_api 연동, 대시보드, `formulation.md`·`api_spec.md` |
+| 민도현 | D 확률·문서·통합 | 시나리오 생성기, Two-Stage Stochastic·VSS, 미리 계산, forecast_api 연동, 대시보드, `formulation.md`·`api_spec.md` |
