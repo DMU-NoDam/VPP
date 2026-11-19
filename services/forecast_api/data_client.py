@@ -11,7 +11,8 @@ collector의 domain.py 기준 실제 컬럼:
     결측 표기는 문자열 "None" (domain.MISSING)
 
 target별로 반환되는 DataFrame (1시간 간격):
-- demand : datetime, demand_mw, temperature_c(전 지점 평균 기온)
+- demand : datetime, demand_mw, temperature_c(전 지점 평균 기온),
+           irradiance(태양광 7개 지점 평균 일사량)
 - solar  : datetime, solar_mw, capacity_mw, irradiance_108 ... irradiance_143, irradiance(지점 평균)
 - wind   : datetime, wind_mw,  capacity_mw, wind_speed_100 ... wind_speed_252, wind_speed(지점 평균)
 
@@ -74,13 +75,15 @@ _RENEWABLE = {
     "wind": (WIND_FUEL_CODE, "wind_speed_ms", "wind_speed", WIND_STATIONS),
 }
 TEMPERATURE_COLUMN = "temperature_c"
+# 수요용 일사량: 맑은 낮에는 자가용(비계량) 태양광 발전만큼 계통 수요가 줄어서 넣는다
+DEMAND_IRRADIANCE_COLUMN = "irradiance"
 
 
 def weather_columns(target: str) -> list[str]:
     """target이 쓰는 기상 컬럼 이름 목록.
-    demand: 기온(전 지점 평균) / solar·wind: 지점별 + 지점 평균."""
+    demand: 기온(전 지점 평균) + 일사량(태양광 지점 평균) / solar·wind: 지점별 + 지점 평균."""
     if target == "demand":
-        return [TEMPERATURE_COLUMN]
+        return [TEMPERATURE_COLUMN, DEMAND_IRRADIANCE_COLUMN]
     _, _, prefix, stations = _RENEWABLE[target]
     return [f"{prefix}_{s}" for s in stations] + [prefix]
 
@@ -101,8 +104,10 @@ def make_synthetic_demand(start: str = "2026-01-01", end: str = "2026-03-01") ->
     daily_pattern = 10000 * np.sin((hour - 6) / 24 * 2 * np.pi)
     demand = (55000 + daily_pattern) * weekday_boost + np.random.normal(0, 1500, n)
     temperature = 15 + 8 * np.sin((hour - 9) / 24 * 2 * np.pi) + np.random.normal(0, 1, n)
+    irradiance = np.clip(np.sin((hour - 6) / 12 * np.pi), 0, None) * 3.0
     return pd.DataFrame({"datetime": dates, "demand_mw": demand.round(1),
-                         TEMPERATURE_COLUMN: temperature.round(1)})
+                         TEMPERATURE_COLUMN: temperature.round(1),
+                         DEMAND_IRRADIANCE_COLUMN: irradiance.round(2)})
 
 
 def make_synthetic_solar(start: str = "2026-01-01", end: str = "2026-03-01") -> pd.DataFrame:
@@ -199,6 +204,10 @@ def get_weather(target: str, start: str, end: str) -> pd.DataFrame:
         # 전국 13개 지점 평균 기온 (특정 지역 쏠림을 줄이기 위해 평균 사용)
         t = w.groupby("datetime")[TEMPERATURE_COLUMN].mean().resample("h").mean()
         out = t.interpolate(limit_direction="both").to_frame(TEMPERATURE_COLUMN)
+        # 태양광 지점 평균 일사량 (밤 "None" → 0)
+        sw = w[w["station_id"].isin(SOLAR_STATIONS)]
+        irr = sw.groupby("datetime")["solar_radiation_mj"].mean().fillna(0.0).resample("h").mean()
+        out[DEMAND_IRRADIANCE_COLUMN] = irr.reindex(out.index).fillna(0.0)
         out.index.name = "datetime"
         return out[cols]
 
@@ -228,7 +237,7 @@ def _attach_weather(df: pd.DataFrame, target: str, start: str, end: str) -> pd.D
 
 
 def get_demand(start: str, end: str) -> pd.DataFrame:
-    """수요 이력(5분 → 1시간 평균) + 전국 평균 기온."""
+    """수요 이력(5분 → 1시간 평균) + 전국 평균 기온 + 태양광 지점 평균 일사량."""
     df = _filter_range(_read_power_demand(), start, end)
     hourly = _to_hourly(df, ["demand_mw"]) if len(df) else df
     if len(hourly) < MIN_HOURS_REQUIRED:
