@@ -24,6 +24,8 @@ API_PREFIX = "/api/v1"
 # 단위 환산 (정의상 상수라 config 에 두지 않는다)
 KRW_PER_KWH_TO_KRW_PER_MWH = 1000
 WON_PER_EOK = 1e8  # 1억 원
+# forecast_api 는 이 길이 이하 요청에 24h 성적, 더 긴 요청에 168h 성적을 돌려준다
+FORECAST_SHORT_HORIZON_H = 24
 
 
 # ── 설정 ─────────────────────────────────────────────────────────────────────
@@ -819,11 +821,11 @@ def parse_forecast(data: dict) -> tuple[pd.DataFrame, dict]:
     """forecast_api POST /forecast 응답 → (수요 예측 시계열, 화면 지표).
 
     응답 스키마는 services/forecast_api/schemas.py (shared 와 아직 다름, B 담당).
-    미래 예측이라 실측 열은 없다. 지표는 forecast_api 가 보정 구간에서 잰 값이라
-    목업의 forecast_metrics 와 정의가 다르다:
-      - mape: 1시간 앞 예측 (lag 에 실측 사용). 24h·168h ahead 가 아니다
-      - nmae: MAE / 실측 평균. 대시보드 기준(설비용량)과 다르다
-      - coverage: 컨포멀 구간을 맞춘 같은 구간에서 잰 값
+    미래 예측이라 실측 열은 없다. 지표는 forecast_api 가 학습에 안 쓴 시험 구간에서
+    API 와 같은 방식으로 이어서 예측해 잰 값이다 (docs/api_spec.md):
+      - mape: 요청 horizon 이 24h 이하면 24h ahead, 더 길면 168h ahead 성적
+      - nmae: 평균 절대오차 / 설비용량 x 100 (대시보드 기준과 같다)
+      - coverage: 같은 시험 구간에서 잰 90% 예측구간 적중률
     """
     fcs = data["forecasts"]
     pts = fcs["demand"]["points"]
@@ -834,8 +836,10 @@ def parse_forecast(data: dict) -> tuple[pd.DataFrame, dict]:
         "demand_lo_mw": [float(p["lower_bound"]) for p in pts],
         "demand_hi_mw": [float(p["upper_bound"]) for p in pts],
     })
+    horizon = "24h" if int(data["horizon_hours"]) <= FORECAST_SHORT_HORIZON_H else "168h"
     metrics = {
-        "mape_1h_pct": float(fcs["demand"]["metrics"]["mape"]),
+        "mape_horizon": horizon,
+        f"mape_{horizon}_pct": float(fcs["demand"]["metrics"]["mape"]),
         "pi_coverage_pct": float(fcs["demand"]["metrics"]["coverage"]),
         "model": fcs["demand"]["model_used"],
     }

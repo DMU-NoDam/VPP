@@ -190,9 +190,18 @@ def test_parse_forecast() -> None:
     assert fc.ts.iloc[0] == pd.Timestamp("2026-10-17 10:00")
     assert (fc.demand_lo_mw < fc.demand_fc_mw).all() and (fc.demand_fc_mw < fc.demand_hi_mw).all()
     assert "demand_actual_mw" not in fc
-    assert m["mape_1h_pct"] == 0.9 and m["pi_coverage_pct"] == 90.0
+    assert m["mape_horizon"] == "24h"  # horizon_hours 3 <= 24 이면 24h 성적
+    assert m["mape_24h_pct"] == 0.9 and m["pi_coverage_pct"] == 90.0
     assert m["nmae_solar_pct"] == 7.2 and m["nmae_wind_pct"] == 11.0
     assert m["solar_start"] == pd.Timestamp("2026-09-19")
+
+
+def test_parse_forecast_168h_metric() -> None:
+    data = _forecast_response()
+    data["horizon_hours"] = 168
+    _, m = logic.parse_forecast(data)
+    assert m["mape_horizon"] == "168h" and m["mape_168h_pct"] == 0.9
+    assert "mape_24h_pct" not in m
 
 
 def test_parse_forecast_demand_only() -> None:
