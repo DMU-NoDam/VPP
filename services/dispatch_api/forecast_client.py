@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -37,6 +38,9 @@ logger = logging.getLogger(__name__)
 KST = timezone(timedelta(hours=9))
 TARGETS = ("demand", "solar", "wind")
 HOUR = timedelta(hours=1)
+# cached_latest_base 용: {요청 시각(시 단위): 기준 예측}. 항목은 최대 1개
+_CACHE: dict[datetime, ScenarioProfile] = {}
+_CACHE_LOCK: threading.Lock = threading.Lock()
 
 
 class ForecastUnavailableError(RuntimeError):
@@ -173,10 +177,26 @@ def latest_base(now: datetime | None = None, cfg: ForecastConfig | None = None) 
     )
 
 
+def cached_latest_base(now: datetime | None = None) -> ScenarioProfile:
+    """latest_base 를 시(時) 단위로 캐시한다. 못 만들면 ForecastUnavailableError (캐시하지 않음).
+
+    결정 시각이 시 단위로만 바뀌므로 같은 시간 안의 호출은 결과가 같다. 대시보드는 MILP 를
+    ESS 모드별로 여러 번 부르고 VSS 미리 계산도 같은 예측을 쓰므로, forecast_api 를 매번
+    두 번씩 부르지 않도록 한 번 받은 예측을 같이 쓴다. 락으로 동시 호출을 한 번으로 묶는다.
+    """
+    key = (now or datetime.now(KST)).astimezone(KST).replace(minute=0, second=0, microsecond=0)
+    with _CACHE_LOCK:
+        if key not in _CACHE:
+            profile = latest_base(key)
+            _CACHE.clear()  # 지난 시간 예측은 다시 쓰지 않는다
+            _CACHE[key] = profile
+        return _CACHE[key]
+
+
 def resolve_base(now: datetime | None = None) -> ScenarioProfile:
     """forecast_api 기준 예측. 쓸 수 없으면 config 의 base_profile (source="config")."""
     try:
-        return latest_base(now)
+        return cached_latest_base(now)
     except ForecastUnavailableError as e:
         logger.warning("forecast_api 기준 예측을 쓸 수 없어 base_profile 로 폴백한다: %s", e)
         return DEFAULT_BASE

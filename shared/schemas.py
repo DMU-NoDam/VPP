@@ -243,12 +243,17 @@ class StochasticLatest(BaseModel):
 class MilpRequest(BaseModel):
     """모든 필드에 기본값이 있어 `{}` 만 보내도 된다.
 
-    수요는 두 경로로 들어온다.
-      - `net_demand_mw` 를 주면 그 값을 쓴다 (forecast_api 연동·시나리오 재실행)
-      - 비우면 수집 데이터의 **최신 연속 구간** horizon_h 시간을 쓴다
+    수요는 세 경로로 들어온다.
+      - `net_demand_mw` 를 주면 그 값을 쓴다 (시나리오 재실행 등)
+      - 비우면 `demand_source` 를 따른다
+        - forecast (기본): forecast_api 의 Day-ahead 예측 (수요 - 태양광 - 풍력 - 기저 신재생).
+          horizon_h 는 예측 길이(24)와 같아야 한다. 예측을 받을 수 없으면 data 로 대신하고
+          notes 에 남긴다
+        - data: 수집 데이터의 **최신 연속 구간** horizon_h 시간
     """
 
     horizon_h: int = Field(24, ge=1, le=168)
+    demand_source: Literal["forecast", "data"] = "forecast"  # net_demand_mw 를 주면 무시
     net_demand_mw: list[float] | None = None   # 순수요 = 수요 - (태양광+풍력+신재생)
     start: datetime | None = None              # net_demand_mw 의 첫 시각 (없으면 데이터 기준)
     reserve_ratio: float | None = Field(None, ge=0, le=1)      # None 이면 settings.yaml
@@ -356,4 +361,6 @@ class MilpResponse(BaseModel):
     baseline: BaselineComparison | None = None
     reserve_ratio: float
     hydro_factor: float                   # 수력 상한에 곱한 계수 (1.0 = 제한 없음)
+    # 실제로 쓴 수요: request(직접 준 값) / forecast(forecast_api 예측) / data(수집 실측)
+    demand_source: Literal["request", "forecast", "data"] = "data"
     notes: list[str]                      # 모델링 선택·가정·경고

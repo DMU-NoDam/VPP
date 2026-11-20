@@ -9,11 +9,15 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 import pytest
 from fastapi.testclient import TestClient
 
+import forecast_client
 import main
-from shared.schemas import MilpResponse
+import service
+from shared.schemas import MilpResponse, ScenarioProfile
 
 
 @pytest.fixture
@@ -206,13 +210,15 @@ def test_carbon_and_merit_order_are_consistent(client):
 
 
 def test_demand_from_collected_data(client):
-    """수요를 안 주면 수집 데이터의 최신 연속 구간을 쓴다."""
+    """demand_source=data 면 수집 데이터의 최신 연속 구간을 쓴다."""
     payload = MilpResponse.model_validate(
         client.post("/api/v1/dispatch/milp",
-                    json={"horizon_h": 6, "include_units": False}).json()
+                    json={"horizon_h": 6, "demand_source": "data",
+                          "include_units": False}).json()
     )
 
     assert payload.status == "optimal"
+    assert payload.demand_source == "data"
     assert len(payload.timestamps) == 6
     gaps = {
         (b - a).total_seconds()
@@ -311,3 +317,53 @@ def test_baseline_comparison_notes_ess_condition(client):
 
     assert payload.baseline is not None
     assert any("ESS" in note and "미정" in note for note in payload.notes)
+
+
+# ── forecast_api 수요 (demand_source=forecast, 기본) ─────────────────────────
+
+
+def _forecast_profile() -> ScenarioProfile:
+    """forecast_client.latest_base 가 돌려주는 모양. 2026-11-09 0시부터 24시간."""
+    start = datetime(2026, 11, 9, tzinfo=forecast_client.KST)
+    return ScenarioProfile(
+        demand_mw=[60000.0] * 24, solar_mw=[3000.0] * 24, wind_mw=[500.0] * 24,
+        start=start, issued_at=start - timedelta(hours=13), source="forecast_api",
+    )
+
+
+def test_demand_from_forecast_by_default(client, monkeypatch):
+    """수요를 안 주면 forecast_api 예측의 순수요(수요 - 태양광 - 풍력 - 기저 신재생)를 쓴다."""
+    monkeypatch.setattr(service, "cached_latest_base", lambda: _forecast_profile())
+    payload = MilpResponse.model_validate(
+        client.post("/api/v1/dispatch/milp", json={"include_units": False}).json()
+    )
+
+    assert payload.status == "optimal"
+    assert payload.demand_source == "forecast"
+    assert payload.timestamps[0] == datetime(2026, 11, 9, tzinfo=forecast_client.KST)
+    renewable = 60000.0 - 3000.0 - 500.0 - payload.hours[0].demand_mw  # 최근 실측 평균
+    assert all(h.demand_mw == pytest.approx(payload.hours[0].demand_mw) for h in payload.hours)
+    assert 0.0 < renewable < 5000.0
+    assert any("forecast_api" in note for note in payload.notes)
+
+
+def test_forecast_unavailable_falls_back_to_data(client, monkeypatch):
+    """예측을 받을 수 없으면 수집 실측으로 풀고 notes 에 남긴다."""
+    def unavailable():
+        raise forecast_client.ForecastUnavailableError("forecast_api 호출 실패: 테스트")
+
+    monkeypatch.setattr(service, "cached_latest_base", unavailable)
+    payload = MilpResponse.model_validate(
+        client.post("/api/v1/dispatch/milp", json={"include_units": False}).json()
+    )
+
+    assert payload.status == "optimal"
+    assert payload.demand_source == "data"
+    assert any("수집 실측" in note for note in payload.notes)
+
+
+def test_forecast_rejects_other_horizon(client, monkeypatch):
+    """예측은 24시간이라 다른 horizon_h 는 422 로 거절한다."""
+    monkeypatch.setattr(service, "cached_latest_base", lambda: _forecast_profile())
+    response = client.post("/api/v1/dispatch/milp", json={"horizon_h": 6})
+    assert response.status_code == 422

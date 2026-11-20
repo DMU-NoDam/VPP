@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import math
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -384,6 +385,69 @@ def build_dispatch_input(
         reserve_margin_ratio=settings.reserve_margin_ratio,
         storage_rate_pct=_latest_storage_rate(dam_rows),
     )
+
+
+def build_forecast_input(
+    generators: list[Generator],
+    settings: Settings,
+    forecast: dict[str, list[float]],
+    timestamps: list[datetime],
+    trading_rows: list[dict[str, Any]],
+    dam_rows: list[dict[str, Any]] | None = None,
+) -> DispatchInput:
+    """forecast_api 예측(수요·태양광·풍력, MW)으로 MILP 입력을 만든다.
+
+    순수요는 실측 경로(`build_net_demand`)와 같은 정의로 맞춘다. forecast_api 는 KPX 의
+    'renewable'(기저 신재생, 1,836~2,680 MW 로 거의 상수)을 예측하지 않으므로 최근
+    `RENEWABLE_RECENT_H` 시간 실측 평균을 매 시간 같은 값으로 뺀다.
+    """
+    demand = pd.Series(forecast["demand"], dtype=float)
+    if len(timestamps) != len(demand):
+        raise DataError(f"예측 시각 {len(timestamps)}개 != 수요 예측 {len(demand)}개")
+    mode = settings.net_demand_mode
+    if mode == "demand_only":
+        subtract: list[str] = []
+    elif mode == "subtract_renewable_only":
+        subtract = ["renewable"]
+    else:
+        subtract = list(constants.MUST_TAKE_FUELS)
+
+    net = demand.copy()
+    for fuel in subtract:
+        if fuel in forecast:
+            net -= pd.Series(forecast[fuel], dtype=float).clip(lower=0.0)
+        else:
+            net -= _recent_fuel_mean(trading_rows, settings, fuel)
+    if (net < 0).any():
+        raise DataError(f"예측 순수요가 음수가 되는 시각이 있다 (최소 {net.min():.1f} MW)")
+
+    return DispatchInput(
+        generators=generators,
+        timestamps=list(timestamps),
+        net_demand_mw=[float(v) for v in net.to_numpy()],
+        reserve_margin_ratio=settings.reserve_margin_ratio,
+        storage_rate_pct=_latest_storage_rate(dam_rows),
+    )
+
+
+# 예측이 없는 발전원(renewable)을 최근 실측 평균으로 채울 때 쓰는 기간
+RENEWABLE_RECENT_H = 24
+
+
+def _recent_fuel_mean(
+    trading_rows: list[dict[str, Any]], settings: Settings, fuel: str
+) -> float:
+    """trading_by_fuel 에서 fuel 의 최근 RENEWABLE_RECENT_H 시간 평균 거래량(MW)."""
+    hourly = to_hourly(
+        wide_trading(trading_rows), "ts", [fuel],
+        timezone=settings.timezone, resample=settings.resample,
+        source_interval_min=TRADING_INTERVAL_MIN,
+        min_sample_ratio=settings.min_sample_ratio,
+    )
+    values = hourly[fuel].dropna()
+    if values.empty:
+        raise DataError(f"trading_by_fuel 에 '{fuel}' 거래량이 없어 예측 순수요를 만들 수 없다")
+    return float(values.iloc[-RENEWABLE_RECENT_H:].mean())
 
 
 def _latest_storage_rate(dam_rows: list[dict[str, Any]] | None) -> float | None:

@@ -29,7 +29,13 @@ from loaders.config_loader import (
     load_settings,
     resolve_fuel_costs,
 )
-from loaders.data_loader import DataError, build_dispatch_input, read_csv_dataset
+from forecast_client import ForecastUnavailableError, cached_latest_base
+from loaders.data_loader import (
+    DataError,
+    build_dispatch_input,
+    build_forecast_input,
+    read_csv_dataset,
+)
 from models import DispatchInput, DispatchResult, EssSpec, Generator, Settings
 from schedule import cost_reduction_pct, merit_order
 from shared.schemas import (
@@ -134,8 +140,14 @@ def _hourly_timestamps(start: datetime | None, horizon_h: int, timezone: str) ->
     return [first + timedelta(hours=h) for h in range(horizon_h)]
 
 
-def build_input(req: MilpRequest, cfg: Settings, fleet: list[Generator]) -> DispatchInput:
-    """요청 -> DispatchInput. 수요를 직접 받았는지에 따라 경로가 갈린다."""
+def build_input(
+    req: MilpRequest, cfg: Settings, fleet: list[Generator]
+) -> tuple[DispatchInput, str, list[str]]:
+    """요청 -> (DispatchInput, 실제로 쓴 수요 출처, notes).
+
+    수요 출처는 request(net_demand_mw 직접) / forecast(forecast_api 예측) / data(수집 실측)다.
+    forecast 를 요청했는데 예측을 받을 수 없으면 data 로 대신하고 notes 에 이유를 남긴다.
+    """
     units = fleet
     if req.unit_ids is not None:
         chosen = set(req.unit_ids)
@@ -160,7 +172,25 @@ def build_input(req: MilpRequest, cfg: Settings, fleet: list[Generator]) -> Disp
             reserve_margin_ratio=reserve,
             storage_rate_pct=req.storage_rate_pct,
             p_init_mw=req.p_init_mw,
-        )
+        ), "request", []
+
+    notes: list[str] = []
+    if req.demand_source == "forecast":
+        try:
+            fc_input, note = _forecast_input(req, cfg, units)
+        except ForecastUnavailableError as exc:
+            logger.warning("MILP: forecast_api 예측을 쓸 수 없어 수집 실측으로 푼다: %s", exc)
+            notes.append(f"forecast_api 예측을 받을 수 없어 수집 실측 수요로 풀었다 ({exc})")
+        else:
+            return replace(
+                fc_input,
+                reserve_margin_ratio=reserve,
+                storage_rate_pct=(
+                    fc_input.storage_rate_pct if req.storage_rate_pct is None
+                    else req.storage_rate_pct
+                ),
+                p_init_mw=req.p_init_mw,
+            ), "forecast", [note]
 
     data_input = build_dispatch_input(
         units,
@@ -180,7 +210,36 @@ def build_input(req: MilpRequest, cfg: Settings, fleet: list[Generator]) -> Disp
             else req.storage_rate_pct
         ),
         p_init_mw=req.p_init_mw,
+    ), "data", notes
+
+
+def _forecast_input(
+    req: MilpRequest, cfg: Settings, units: list[Generator]
+) -> tuple[DispatchInput, str]:
+    """forecast_api Day-ahead 예측으로 만든 입력과 그 설명 한 줄.
+
+    예측 길이는 config/stochastic.yaml 의 forecast.horizon (VSS 와 같은 계획일)이다.
+    """
+    profile = cached_latest_base()
+    if req.horizon_h != len(profile.demand_mw):
+        raise DataError(
+            f"demand_source=forecast 는 horizon_h {len(profile.demand_mw)} 만 지원한다 "
+            f"(요청 {req.horizon_h}). 다른 길이는 demand_source=data 로 요청한다"
+        )
+    start = profile.start.astimezone(ZoneInfo(cfg.timezone))
+    inp = build_forecast_input(
+        units,
+        cfg,
+        {"demand": profile.demand_mw, "solar": profile.solar_mw, "wind": profile.wind_mw},
+        [start + timedelta(hours=h) for h in range(req.horizon_h)],
+        _dataset("trading_by_fuel"),
+        _dataset("dam_status"),
     )
+    note = (
+        f"수요: forecast_api Day-ahead 예측 ({profile.issued_at:%m/%d %H}시 데이터까지 → "
+        f"{start:%m/%d} 계획). 순수요 = 수요 - 태양광 - 풍력 - 기저 신재생(최근 실측 평균)"
+    )
+    return inp, note
 
 
 def _solver_config(req: MilpRequest, cfg: Settings) -> milp.SolverConfig:
@@ -299,7 +358,7 @@ def run_milp(req: MilpRequest) -> MilpResponse:
     """
     cfg = settings()
     fleet = generators(cfg)
-    inp = build_input(req, cfg, fleet)
+    inp, demand_source, input_notes = build_input(req, cfg, fleet)
 
     penalty = (
         cfg.shed_penalty_krw_per_mwh if req.shed_penalty_won_per_mwh is None
@@ -362,5 +421,6 @@ def run_milp(req: MilpRequest) -> MilpResponse:
         baseline=comparison,
         reserve_ratio=inp.reserve_margin_ratio,
         hydro_factor=result.hydro_factor,
-        notes=result.notes,
+        demand_source=demand_source,
+        notes=input_notes + result.notes,
     )
