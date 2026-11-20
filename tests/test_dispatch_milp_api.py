@@ -11,10 +11,10 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+import forecast_client
 import pytest
 from fastapi.testclient import TestClient
 
-import forecast_client
 import main
 import service
 from shared.schemas import MilpResponse, ScenarioProfile

@@ -18,6 +18,8 @@ from functools import lru_cache
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from forecast_client import ForecastUnavailableError, cached_latest_base
+
 import baseline
 import carbon
 import milp
@@ -29,7 +31,6 @@ from loaders.config_loader import (
     load_settings,
     resolve_fuel_costs,
 )
-from forecast_client import ForecastUnavailableError, cached_latest_base
 from loaders.data_loader import (
     DataError,
     build_dispatch_input,
