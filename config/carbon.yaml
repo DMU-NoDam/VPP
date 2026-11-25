@@ -17,3 +17,11 @@ pareto:
   total_time_limit_s: 30
   emission_tolerance_ton: 0.0001
   cost_tolerance_krw: 1.0
+
+# 기본 MILP 응답(`POST /api/v1/dispatch/milp`)에 함께 계산하는 탄소 감축 계획.
+# [팀 설정] 과제 정량 기준에 탄소 감축 항목은 없다. 기본 급전 계획은 비용 최소를
+# 유지하고(비용 절감률 KPI 보존), 이 목표는 부가 분석 블록에만 적용한다.
+# time_limit_s: 감축 solve 1회에 허용하는 시간. 10초 응답 KPI 안에서 끝나게 둔다.
+reduction:
+  default_target_pct: 5.0
+  time_limit_s: 5.0

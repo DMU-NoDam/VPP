@@ -62,6 +62,7 @@ class ApiSpec:
     timeout_short_s: float
     timeout_health_s: float
     timeout_scenarios_s: float
+    timeout_pareto_s: float
     stochastic_timeout_margin_s: float
     ttl_range_s: int
     ttl_scenarios_s: int
@@ -271,6 +272,7 @@ def load_settings(path: Path | None = None) -> Settings:
             timeout_short_s=float(cfg_value(api["timeout_short"], "s")),
             timeout_health_s=float(cfg_value(api["timeout_health"], "s")),
             timeout_scenarios_s=cfg_value(api["timeout_scenarios"], "s"),
+            timeout_pareto_s=float(cfg_value(api["timeout_pareto"], "s")),
             stochastic_timeout_margin_s=float(cfg_value(api["stochastic_timeout_margin"], "s")),
             ttl_range_s=int(cfg_value(api["cache_ttl_range"], "s")),
             ttl_scenarios_s=int(cfg_value(api["cache_ttl_scenarios"], "s")),
@@ -298,6 +300,7 @@ HIGHER_IS_BETTER: dict[str, bool] = {
     "vss_pct": True,
     "ess_peak_cut_pct": True,
     "crisis_reserve_pct": True,
+    "carbon_cut_pct": True,
 }
 
 
@@ -467,6 +470,8 @@ def parse_milp(data: dict, latency_s: float | None = None) -> dict | None:
         "carbon_by_fuel_ton": {k: float(v) for k, v in data["carbon"]["by_fuel_ton"].items()},
         "carbon_intensity": float(data["carbon"]["intensity_ton_per_mwh"]),
         "rule_carbon_ton": float(base["carbon_total_ton"]),  # Rule-based 는 ESS 를 쓰지 않는다
+        # 탄소 감축 계획 (기본 계획을 대체하지 않는 부가 블록). 없거나 해가 없으면 None
+        "carbon_reduction": carbon_reduction(data),
         # Merit Order 스택용. units 는 include_units 로 요청했을 때만 있다
         "timestamps": [pd.Timestamp(ts) for ts in data["timestamps"]],
         "fuel_order": [m["fuel"] for m in sorted(data["merit_order"], key=lambda m: m["rank"])],
@@ -525,6 +530,83 @@ def carbon_tradeoff(with_ess: dict, no_ess: dict) -> dict:
         "ess_pct": _pct(with_ess["carbon_ton"], no_ess["carbon_ton"]),
         "rule_pct": _pct(no_ess["carbon_ton"], no_ess["rule_carbon_ton"]),
     }
+
+
+def carbon_reduction(data: dict) -> dict | None:
+    """MilpResponse.carbon_reduction → 화면 값. 검증을 통과한 계획만 숫자를 넘긴다.
+
+    valid 가 아니면 감축률·비용 대신 status 와 달성 여부만 남긴다. 계산되지 않은 값을
+    0 으로 채우지 않는다 (화면이 "감축 0%" 로 오해하지 않게).
+    """
+    block = data.get("carbon_reduction")
+    if not block:
+        return None
+    out = {
+        "target_pct": float(block["target_pct"]),
+        "cap_ton": float(block["cap_ton"]),
+        "status": block["status"],
+        "valid": bool(block["valid"]),
+        "achieved": bool(block["achieved"]),
+        "basis": block["accounting_basis"],
+        "reference_ton": float(block["reference_ton"]),
+        "max_reduction_pct": block["max_reduction_pct"],
+        "elapsed_s": float(block["elapsed_s"]),
+        "notes": list(block.get("notes", [])),
+        "hourly_ton": [float(v) for v in block.get("hourly_ton", [])],
+        "by_fuel_delta_mwh": {k: float(v) for k, v in block.get("by_fuel_delta_mwh", {}).items()},
+        "by_fuel_delta_ton": {k: float(v) for k, v in block.get("by_fuel_delta_ton", {}).items()},
+        "by_fuel_ton": {k: float(v) for k, v in block.get("by_fuel_ton", {}).items()},
+        "unit_changes": list(block.get("unit_changes", [])),
+        "checks": {c["name"]: bool(c["ok"]) for c in block.get("checks", [])},
+    }
+    if not out["valid"]:
+        return out
+    out.update({
+        "plan_ton": float(block["plan_ton"]),
+        "reduction_pct": float(block["reduction_pct"]),
+        "plan_cost_won": float(block["plan_cost_won"]),
+        "reference_cost_won": float(block["reference_cost_won"]),
+        "cost_increase_pct": float(block["cost_increase_pct"]),
+        "cost_reduction_pct": block["cost_reduction_pct"],
+        "abatement_cost_krw_per_ton": block["abatement_cost_krw_per_ton"],
+    })
+    return out
+
+
+def carbon_reduction_by_fuel(reduction: dict, names: dict[str, str]) -> pd.DataFrame:
+    """감축 계획이 발전원을 어떻게 바꿨는지 (발전량·배출량 변화). 큰 변화부터."""
+    fuels = sorted(
+        set(reduction["by_fuel_delta_mwh"]) | set(reduction["by_fuel_delta_ton"]),
+        key=lambda f: -abs(reduction["by_fuel_delta_ton"].get(f, 0.0)),
+    )
+    return pd.DataFrame([
+        {
+            "발전원": names.get(f, f),
+            "발전량 변화(MWh)": round(reduction["by_fuel_delta_mwh"].get(f, 0.0)),
+            "배출량(tCO2)": round(reduction["by_fuel_ton"].get(f, 0.0)),
+            "배출량 변화(tCO2)": round(reduction["by_fuel_delta_ton"].get(f, 0.0)),
+        }
+        for f in fuels
+    ])
+
+
+def carbon_reduction_units(reduction: dict, names: dict[str, str],
+                           limit: int = 10) -> pd.DataFrame:
+    """운전이 바뀐 유닛 (발전량 변화 큰 순). 변화가 없는 유닛은 뺀다."""
+    rows = [
+        {
+            "발전기": u["unit_id"],
+            "발전원": names.get(u["fuel"], u["fuel"]),
+            "발전량(MWh)": round(float(u["energy_mwh"])),
+            "발전량 변화(MWh)": round(float(u["energy_delta_mwh"])),
+            "가동 시간 변화(h)": int(u["on_hours_delta"]),
+            "기동 횟수 변화": int(u["startups_delta"]),
+        }
+        for u in reduction["unit_changes"]
+        if abs(float(u["energy_delta_mwh"])) >= 1.0 or u["on_hours_delta"] or u["startups_delta"]
+    ]
+    rows.sort(key=lambda r: -abs(r["발전량 변화(MWh)"]))
+    return pd.DataFrame(rows[:limit])
 
 
 def carbon_plan_table(with_ess: dict, no_ess: dict) -> pd.DataFrame:

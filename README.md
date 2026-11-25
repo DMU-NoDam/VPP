@@ -127,8 +127,8 @@ docker-compose up --build
 
 | 페이지 | 내용 |
 | --- | --- |
-| 통합 관제 | 수요·공급·예비율 게이지와 알람(7% 미만 Warning, 5% 미만 Critical), Merit Order, 최적화 결과, 탄소 추이, ESS, 위기 시나리오(목업) |
-| 분석 상세 | 168h 예측·성능 지표, 최적화 상세, 위기 시나리오 게이지, 배출 내역 |
+| 통합 관제 | 수요·공급·예비율 게이지와 알람(7% 미만 Warning, 5% 미만 Critical), Merit Order, 최적화 결과(비용 절감률·응답시간·탄소 감축률), 탄소 추이(ESS 전후·감축 계획), ESS, 위기 시나리오(목업) |
+| 분석 상세 | 168h 예측·성능 지표, 최적화 상세, 위기 시나리오 게이지, 탄소 감축 방법(발전원 전환·유닛 운전 변화·감축 비용), 비용–탄소 Pareto(요청 시), 배출 내역 |
 | 시간대 데이터 | KPX 실측, 출력 히트맵, 시간대 상세표·CSV |
 | 시나리오 생성기 | `POST /api/v1/scenarios` 결과 확인 |
 | Two-Stage 테스트 | RP·EV·EEV·WS 비교, VSS 판정 |
@@ -182,16 +182,25 @@ GitHub Actions(`.github/workflows/ci.yml`)가 push·PR마다 Python 3.11에서 `
 | 육나윤 | C 최적화 | UC/ED MILP, Rule-based 베이스라인, ESS, 탄소 계산, 제약 사후 검증, config 로더, KPI 측정 스크립트, CI |
 | 민도련 | D 확률·문서·통합 | 시나리오 생성기, Two-Stage Stochastic·VSS, 미리 계산, forecast_api 연동, 대시보드, `formulation.md`·`api_spec.md` |
 
-### 탄소 감축 분석
+### 탄소 감축
 
-대시보드 **탄소 감축 분석** 페이지에서 감축 목표와 ESS 사용 여부를 선택하고 실행한다.
-같은 수요·예비율에서 비용 최소 MILP와 탄소 상한 계획의 비용, 발전원별 발전량,
-유닛별 출력·가동 시간·기동 횟수, ESS 운전을 비교한다. 부하차단은 허용하지 않는다.
-이 화면은 API 실패 시 목업으로 대체하지 않는다.
+`POST /api/v1/dispatch/milp` 기본 응답에 **탄소 감축 계획**이 함께 들어간다
+(`carbon_reduction` 블록). 같은 수요·예비율·ESS 조건에서 비용 최소 계획의 배출량을
+기준으로 상한을 걸고 다시 풀어, 감축률·운영비 증가율·감축 비용(원/tCO2)·발전원별
+발전량과 배출 변화·유닛별 가동·기동 변화를 돌려준다.
 
-- `POST /api/v1/dispatch/milp`: 선택 `carbon_cap_ton`으로 배출 상한 적용(기본 off).
-- `POST /api/v1/dispatch/pareto`: 비용–탄소 표본과 목표 감축률의 실현 가능성 계산.
+주 급전 계획과 비용 절감률 KPI는 **비용 최소 해를 그대로 쓴다** — 감축 계획은 이를
+대체하지 않는 부가 블록이다. 대시보드는 통합 관제의 최적화 결과 타일·탄소 추이와
+분석 상세의 탄소 감축 패널에서 이 블록만 읽으며, API 실패 시 목업으로 대체하지 않는다.
+
+- 기본 목표 5% (`config/carbon.yaml` 의 `reduction.default_target_pct`).
+  요청의 `carbon_reduction_target_pct`가 우선하고 `include_carbon_reduction=false`로 끈다.
+- 목표가 불가능하면 감축률 대신 풀이 상태와 현재 조건의 **최대 감축 가능률**을 싣는다.
+- 선택 `carbon_cap_ton`으로 배출 상한을 직접 지정할 수도 있다(이때 감축 분석은 생략).
+- `POST /api/v1/dispatch/pareto`: 비용–탄소 표본과 목표 감축률의 실현 가능성 계산
+  (여러 번 푸는 분석이라 분석 상세에서 요청할 때만 호출한다).
 - 새 분석 계수: `config/carbon.yaml`. 급전 가능한 발전원의 전과정 배출 범위 중간값을
   사용하는 시나리오이며 국내 발전소 실측·공식 감축 실적이 아니다. 기존 기본 계수는 유지한다.
 - 반복 측정: `python scripts/measure_carbon_kpi.py --windows 3 --json /tmp/carbon.json`.
-- 계약·해석: `docs/api_spec.md`, `docs/formulation.md` 6.1–6.2.
+- 응답시간: `python scripts/measure_dispatch_kpi.py --api-windows 3` 이 감축 off/on을 따로 기록한다.
+- 계약·해석: `docs/api_spec.md`, `docs/formulation.md` 6.1–6.3.

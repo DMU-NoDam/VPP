@@ -14,6 +14,11 @@ CLAUDE.md 정량 기준 중 C 담당 항목을 **반복 측정 가능하게** �
     milp+ess    ESS cost 모드        -> 비용 최소화가 부수적으로 깎는 피크
     milp+shave  ESS peak_shaving 모드 -> 피크 감소율 5% KPI 판정
 
+10초 KPI 는 POST /api/v1/dispatch/milp 의 응답시간이다. 기본 응답에는 탄소 감축
+계획이 함께 들어가므로(config/carbon.yaml reduction) 마지막 몇 창은 service 계층을
+그대로 호출해 **감축 off / on 두 조건**을 따로 잰다. 기준값은 기존 정의와 같은
+off 조건이고, on 조건은 실제 기본 응답시간이다.
+
 사용법 (레포 루트에서):
     python scripts/measure_dispatch_kpi.py
     python scripts/measure_dispatch_kpi.py --windows 14 --horizon 24 --json out.json
@@ -110,6 +115,57 @@ def windows(net_demand, horizon_h: int, count: int, align_hour: int | None = Non
             # 정렬을 맞추려면 창을 1시간씩 밀어 본다
             end -= horizon_h if align_hour is None else 1
     return out
+
+
+def measure_api_latency(chunks, config_dir: Path, csv_dir: Path, count: int) -> dict:
+    """service.run_milp 왕복 시간을 탄소 감축 off/on 으로 잰다 (10초 KPI 조건 기록).
+
+    FastAPI route 는 검증·직렬화만 하므로 service 계층 호출이 응답시간의 본체다.
+    감축 off 가 기존 KPI 정의와 같은 조건이다.
+    """
+    import os
+
+    os.environ["VPP_CONFIG_DIR"] = str(config_dir)
+    os.environ["VPP_CSV_DIR"] = str(csv_dir)
+    import service  # noqa: PLC0415 - 환경변수를 먼저 정해야 한다
+    from shared.schemas import MilpRequest  # noqa: PLC0415
+
+    rows = []
+    for chunk in reversed(chunks[:count]):
+        demand = [float(v) for v in chunk.to_numpy()]
+        start = chunk.index[0].to_pydatetime()
+        times: dict[str, float | None] = {}
+        for label, flag in (("off", False), ("on", True)):
+            request = MilpRequest(
+                horizon_h=len(demand), net_demand_mw=demand, start=start,
+                include_units=False, include_carbon_reduction=flag,
+            )
+            began = time.perf_counter()
+            response = service.run_milp(request)
+            times[label] = time.perf_counter() - began
+            if flag:
+                red = response.carbon_reduction
+                times["reduction_pct"] = (
+                    red.reduction_pct if red and red.valid else None
+                )
+                times["reduction_cost_increase_pct"] = (
+                    red.cost_increase_pct if red and red.valid else None
+                )
+                times["reduction_elapsed_s"] = red.elapsed_s if red else None
+        rows.append({"start": str(chunk.index[0]), **times})
+        cut, more = times["reduction_pct"], times["reduction_cost_increase_pct"]
+        print(f"{str(chunk.index[0]):<22}{times['off']:>11.2f}{times['on']:>10.2f}"
+              + ("       -" if cut is None else f"{cut:>8.2f}")
+              + ("       -" if more is None else f"{more:>8.2f}"))
+    return {
+        "windows": rows,
+        "off_max_s": max((r["off"] for r in rows), default=None),
+        "off_mean_s": statistics.fmean([r["off"] for r in rows]) if rows else None,
+        "on_max_s": max((r["on"] for r in rows), default=None),
+        "on_mean_s": statistics.fmean([r["on"] for r in rows]) if rows else None,
+        "target_s": RUNTIME_TARGET_S,
+        "target_met": bool(rows) and max(r["on"] for r in rows) <= RUNTIME_TARGET_S,
+    }
 
 
 def measure(args) -> dict:
@@ -234,10 +290,15 @@ def measure(args) -> dict:
               f"{row['solve_time_s']:>9.2f}"
               f"{len(milp_violations) + len(ess_violations):>5}")
 
-    return summarize(rows)
+    api = None
+    if args.api_windows > 0 and chunks:
+        print("\n── API 응답시간 (service.run_milp, 탄소 감축 off/on) ──")
+        print(f"{'window 시작':<22}{'off s':>11}{'on s':>10}{'감축%':>8}{'운영비%':>8}")
+        api = measure_api_latency(chunks, config_dir, csv_dir, args.api_windows)
+    return summarize(rows, api)
 
 
-def summarize(rows: list[dict]) -> dict:
+def summarize(rows: list[dict], api: dict | None = None) -> dict:
     """창별 결과를 KPI 판정으로 접는다."""
     optimal = [r for r in rows if r["status"] == "optimal"]
     reductions = [r["cost_reduction_pct"] for r in optimal]
@@ -288,6 +349,7 @@ def summarize(rows: list[dict]) -> dict:
             and len(shave_feasible) == len(rows)
             and min(shave_peaks) >= PEAK_REDUCTION_TARGET_PCT - 1e-6,
         },
+        "api_latency_s": api,
         "milp_violations": violations,
         "baseline_violations": baseline_violations,
         "ess_violations": ess_violations,
@@ -314,6 +376,12 @@ def summarize(rows: list[dict]) -> dict:
               f"기준 {peak['target_pct']}% -> {'통과' if peak['target_met'] else '미달'}")
         print(f"             cost 모드 평균 {peak['cost_mode_mean']:.2f}% "
               f"(5% 이상 달성 {peak['cost_mode_met_windows']}창 — 보장되지 않음)")
+    if api is not None:
+        print(f"API 응답시간 감축 off 평균 {api['off_mean_s']:.2f}s · 최대 "
+              f"{api['off_max_s']:.2f}s (기존 KPI 정의와 같은 조건)")
+        print(f"             감축 on  평균 {api['on_mean_s']:.2f}s · 최대 "
+              f"{api['on_max_s']:.2f}s · 기준 {api['target_s']}s -> "
+              f"{'통과' if api['target_met'] else '미달'} (기본 응답)")
     print(f"MILP 제약 위반     {violations}건 -> {'통과' if violations == 0 else '실패'}")
     print(f"ESS 제약 위반      {ess_violations}건 -> "
           f"{'통과' if ess_violations == 0 else '실패'}")
@@ -335,6 +403,8 @@ def main() -> int:
                         help="이 시각에 시작하는 창만 쓴다 (0 = 자정 정렬, day-ahead 기준)")
     parser.add_argument("--peak-target", type=float, default=PEAK_REDUCTION_TARGET_PCT,
                         help="peak_shaving 모드 목표 감소율 (기본 5%%)")
+    parser.add_argument("--api-windows", type=int, default=3,
+                        help="API 응답시간을 탄소 감축 off/on 으로 잴 창 수 (0 = 생략)")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -349,8 +419,10 @@ def main() -> int:
         )
         print(f"\nJSON 저장: {args.json}")
 
+    api = summary["api_latency_s"]
     ok = (
-        summary["runtime_s"]["target_met"]
+        (api is None or api["target_met"])
+        and summary["runtime_s"]["target_met"]
         and summary["milp_violations"] == 0
         and summary["ess_violations"] == 0
     )

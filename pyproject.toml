@@ -43,7 +43,7 @@ known-first-party = [
   # forecast_api
   "data_client", "features", "metrics", "pi", "forecast_engine", "router", "schemas",
   # dashboard
-  "logic", "ui", "page_carbon", "page_scenarios", "page_stochastic_test",
+  "logic", "ui", "page_scenarios", "page_stochastic_test",
 ]
 
 [tool.pytest.ini_options]

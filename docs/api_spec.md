@@ -141,6 +141,10 @@ UC 포함 경제급전 MILP. 스키마는 `shared/schemas.py` 의 `MilpRequest` 
 | `use_ess` | 기본 true. false 면 ESS 없이 푼다 (피크 전/후 비교의 "전") |
 | `ess_mode` | `cost`(기본) / `peak_shaving` / `combined`. 비우면 `config/ess.yaml`. 피크 5% KPI 는 `peak_shaving` 으로 본다 |
 | `ess_peak_target_pct` | `peak_shaving` 목표 감소율(%). 비우면 ess.yaml (5.0) |
+| `include_carbon_reduction` | 탄소 감축 계획을 같은 응답에 포함 (기본 true). solve 1회가 늘어난다 |
+| `carbon_reduction_target_pct` | 감축 목표(%, 0 초과 100 미만). 비우면 `config/carbon.yaml` 의 `reduction.default_target_pct`(5) |
+| `carbon_cap_ton` | 배출 상한(tCO2)을 직접 지정. 주면 감축 분석은 생략한다 |
+| `carbon_accounting` | `configured`(기본, generators.yaml 계수) / `lifecycle`(config/carbon.yaml). `carbon` 과 `carbon_reduction` 에 같이 적용된다 |
 | `include_baseline` | Rule-based 비교와 절감률 포함 (기본 true) |
 | `include_units` | 유닛 x 시간 급전값 포함 (29기 x 24h = 696행) |
 | `solver` | 요청별 time limit / MIP gap |
@@ -181,7 +185,32 @@ forecast_api 연동 전까지는 `net_demand_mw` 를 직접 주는 경로를 쓴
   "carbon": {
     "total_ton": 714512.2, "hourly_ton": [26823.7, 24817.0],
     "by_fuel_ton": { "nuclear": 3594.9, "bituminous_coal": 702087.9 },
-    "intensity_ton_per_mwh": 0.498
+    "intensity_ton_per_mwh": 0.498,
+    "accounting_basis": "configured_generator_factors", "factor_unit": "tCO2/MWh",
+    "cap_ton": null, "cap_slack_ton": null, "cap_binding": null, "valid": true
+  },
+  "carbon_reduction": {
+    "target_pct": 5.0, "cap_ton": 659674.3, "status": "optimal",
+    "valid": true, "optimal": true, "achieved": true,
+    "accounting_basis": "configured_generator_factors", "factor_unit": "tCO2/MWh",
+    "reference_ton": 694394.0, "plan_ton": 659674.3, "reduction_pct": 5.0,
+    "max_reduction_pct": null,
+    "reference_cost_won": 66329619482.1, "plan_cost_won": 70383603343.3,
+    "cost_increase_pct": 6.11, "cost_reduction_pct": 0.77,
+    "abatement_cost_krw_per_ton": 116763.2,
+    "hourly_ton": [30847.1, 28863.9],
+    "by_fuel_ton": { "bituminous_coal": 617321.3, "lng": 37351.4 },
+    "by_fuel_delta_mwh": { "bituminous_coal": -71605.6, "lng": 68035.3 },
+    "by_fuel_delta_ton": { "bituminous_coal": -70961.2, "lng": 37351.4 },
+    "unit_changes": [
+      { "unit_id": "coal_5", "fuel": "bituminous_coal", "energy_mwh": 58089.5,
+        "energy_delta_mwh": -58390.1, "on_hours": 10, "on_hours_delta": -7,
+        "startups": 1, "startups_delta": -1 }
+    ],
+    "ess": { "mode": "cost", "peak_reduction_pct": 0.0, "target_met": false },
+    "checks": [{ "name": "탄소 상한", "ok": true, "detail": "659674.265251 <= 659674.265251 t" }],
+    "elapsed_s": 2.61,
+    "notes": ["기준은 같은 입력·예비율·ESS 조건의 비용 최소 MILP 계획이다 (Rule-based 아님)"]
   },
   "ess": {
     "mode": "peak_shaving",
@@ -488,12 +517,47 @@ Two-Stage Stochastic 급전 계획과 VSS. 스키마: `shared/schemas.py` 의 `S
 
 `carbon_cap_ton` 기본 null(제약 없음), 0 이상 유한 값. `carbon_accounting` 기본
 `configured`는 기존 generators.yaml 계수, `lifecycle`은 config/carbon.yaml 프로필이다.
+
+#### 기본 응답의 `carbon_reduction` 블록
+
+기본 MILP 응답에는 탄소 감축 계획이 함께 들어간다. 같은 입력·예비율·ESS 조건에서
+비용 최소 계획의 배출량 $E_{cost}$ 에 상한 $E_{cost}(1-r/100)$ 을 걸고 한 번 더 푼
+결과이며, **주 계획(비용 최소)과 비용 절감률 KPI를 대체하지 않는다**
+(docs/formulation.md 6.2).
+
+위 응답 예시의 `carbon_reduction` 은 2026-10-09 창을 뒤에 측정한 실행값이라, 같은
+예시의 `carbon.total_ton`(다른 날 실행)과 기준 배출량이 일치하지 않는다.
+
+| 필드 | 뜻 |
+|---|---|
+| `target_pct`, `cap_ton` | 목표 감축률과 적용한 배출 상한 |
+| `status`, `valid`, `optimal`, `achieved` | 풀이 상태, 제약 재검증 통과, 최적성, 목표 달성 |
+| `reference_ton`, `plan_ton`, `reduction_pct` | 기준·감축 계획 배출량과 실제 감축률 |
+| `max_reduction_pct` | 목표 미달 시 현재 조건의 최대 감축 가능률 (배출 최소 해 기준) |
+| `reference_cost_won`, `plan_cost_won`, `cost_increase_pct` | 운영비(연료+기동)와 증가율 |
+| `cost_reduction_pct` | 감축 계획의 Rule-based 대비 절감률 (`include_baseline` 일 때) |
+| `abatement_cost_krw_per_ton` | 1 tCO2 감축 비용 |
+| `by_fuel_delta_mwh`, `by_fuel_delta_ton`, `unit_changes` | 감축 수단 (석탄↓ / LNG↑, 유닛 운전 변화) |
+| `checks` | 감축 계획의 제약 재검증 + 탄소 상한 검사 |
+
+- 기본 목표는 `config/carbon.yaml` 의 `reduction.default_target_pct`(5%)이고
+  `include_carbon_reduction=false` 로 끈다. 끄면 블록이 null 이다.
+- 검증을 통과하지 못한 계획은 감축률·비용을 **null** 로 두고 status 만 싣는다.
+- 생략 조건(블록 null + `notes` 에 이유): 기준 해 없음, `allow_load_shedding=true`,
+  요청에 `carbon_cap_ton` 이 있는 경우.
+- 두 풀이는 `reduction.time_limit_s` 예산을 공유하고 상대 gap 0 으로 푼다.
+  10초 응답 KPI 는 `scripts/measure_dispatch_kpi.py --api-windows N` 이
+  감축 off/on 두 조건으로 측정한다.
 상한과 `allow_load_shedding=true` 조합은 422. 동일 산정 프로필끼리 비교해야 한다.
 응답 carbon에는 `accounting_basis`, `factor_unit`, `cap_ton`, `cap_slack_ton`,
 `cap_binding`, `valid`를 추가했다. 상한 없음/유효해 없음이면 slack/binding은 null이다.
 기존 응답 숫자 필드는 하위 호환을 위해 유지하지만 `valid=false`는 배출 0 실적이 아니다.
 
-`POST /api/v1/dispatch/pareto`는 비용 최소 계획 대비 탄소 감축 비용을 비교한다.
+`POST /api/v1/dispatch/pareto`는 비용 최소 계획 대비 탄소 감축 비용을 여러 목표에서
+비교한다 (기본 MILP 의 감축 블록은 한 점만 계산한다). 여러 번 푸는 분석이므로 대시보드
+분석 상세에서 사용자가 요청할 때만 호출한다. `include_carbon_reduction` 은 false 고정이며
+감축 점은 `reduction_targets_pct` 로 지정한다. 기본 `carbon_accounting` 은 `lifecycle`
+이므로, 기본 MILP(`configured`)와 숫자를 나란히 볼 때는 같은 값을 명시해야 한다.
 
 ```json
 {

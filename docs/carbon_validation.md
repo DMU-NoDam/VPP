@@ -40,3 +40,54 @@
 - `config/ess.yaml`: `54a952ac9aeb2212c783f835bbcb24d93acd62f924bb18b42de04db224a71116`
 - `config/settings.yaml`: `572e4fb0e98e031b226689e2c4afaea84e4188270540e0011bc75f43a738ee9c`
 - `data/csv/fuel_cost.csv`: `38b3d8d2429d34be23551fe2182b033d59a25dd602da06312f3aba3e6d9dd22b`
+
+---
+
+# 기본 MILP 응답에 합친 감축 계획 — 검증 기록
+
+측정일: 2026-11-17. 위 기록은 `/dispatch/pareto` 전용 분석이었고, 이 절은 탄소 감축을
+기본 MILP 응답(`carbon_reduction` 블록)으로 옮긴 뒤의 재측정이다. 모델 재계산이며
+실제 배출 감축 실적이 아니다.
+
+## 재현 조건
+
+- 실행: `.venv/bin/python scripts/measure_dispatch_kpi.py --windows 5 --align-hour 0 --api-windows 5 --json /tmp/vpp-kpi.json`
+- 자정부터 연속 24시간인 최신 5개 창. 기본 요청(`{}`)과 같은 조건: ESS cost 모드,
+  부하차단 금지, 감축 목표 5%(`config/carbon.yaml` 의 `reduction.default_target_pct`),
+  계수 기준 `configured`(generators.yaml), 감축 solve 상대 gap=0.
+- 응답시간은 `service.run_milp` 왕복이며 감축 off/on 두 조건을 따로 잰다. off 가
+  기존 10초 KPI 정의와 같은 조건이다. 이 로컬 환경 측정값이며 모든 입력에서의 보장이 아니다.
+- 계수 기준이 위 절(`lifecycle`)과 다르므로 두 절의 배출량 절대값을 직접 비교하지 않는다.
+
+## 측정 결과
+
+| 수요 날짜 | 감축률 | 운영비 증가 | 응답 off(초) | 응답 on(초) |
+|---|---:|---:|---:|---:|
+| 2026-10-03 | 5.00% | 6.88% | 0.59 | 2.87 |
+| 2026-10-04 | 5.00% | 6.90% | 0.79 | 4.01 |
+| 2026-10-05 | 5.00% | 6.87% | 0.12 | 1.96 |
+| 2026-10-06 | 5.00% | 5.91% | 0.16 | 2.13 |
+| 2026-10-09 | 5.00% | 6.11% | 0.30 | 2.90 |
+
+- 5개 창 모두 목표 5%를 달성하고 제약 재검증을 통과했다 (MILP·ESS·baseline 위반 0건).
+- 응답시간: 감축 off 평균 0.39초·최대 0.79초, on 평균 2.77초·최대 4.01초.
+  10초 기준을 두 조건 모두 통과한다.
+- 기본 계획의 비용 절감률은 감축 블록을 켜도 바뀌지 않는다 (평균 3.66%, 기준 10% 미달 —
+  원인과 레버는 기존 기록과 동일하며 이 작업으로 달라지지 않았다).
+- 감축 수단은 석탄 감발·정지와 LNG 대체다. 예: 2026-10-09 창에서 유연탄
+  −71,606 MWh / 무연탄 −1,120 MWh, LNG +68,035 MWh, 감축 비용 116,763 원/tCO2.
+
+## 테스트
+
+- 신규/이전 테스트: 감축 블록 API 계약·기본값·불가능 목표·생략 조건·요청 범위(dispatch),
+  parse·표·패널·Pareto 요청 분리(dashboard).
+- 전체 회귀: 486 passed, 전체 coverage 93% (dispatch_api 83~100%).
+- `ruff check .` 통과.
+
+## 입력 파일 SHA-256 (이 측정 시점)
+
+- `config/carbon.yaml`: `e135a015533ddb639e3a16ee09a92e1016179a1611a2d206663f7d922ce24a86`
+- `config/generators.yaml`: `aa2e434e52855043c92371752727682d42b868d5e142aa9a197be6005e3ff7c8`
+- `config/ess.yaml`: `54a952ac9aeb2212c783f835bbcb24d93acd62f924bb18b42de04db224a71116`
+- `config/settings.yaml`: `572e4fb0e98e031b226689e2c4afaea84e4188270540e0011bc75f43a738ee9c`
+- `data/csv/fuel_cost.csv`: `38b3d8d2429d34be23551fe2182b033d59a25dd602da06312f3aba3e6d9dd22b`

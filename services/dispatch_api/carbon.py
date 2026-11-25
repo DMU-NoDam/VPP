@@ -90,14 +90,20 @@ def load_analysis_config(path: str | Path) -> dict[str, Any]:
     try:
         factors = raw["factors"]
         options = raw["pareto"]
+        reduction = raw["reduction"]
         numbers = list(factors.values()) + [
             options["total_time_limit_s"], options["emission_tolerance_ton"],
-            options["cost_tolerance_krw"],
+            options["cost_tolerance_krw"], reduction["default_target_pct"],
+            reduction["time_limit_s"],
         ]
         if not factors or any(not math.isfinite(float(x)) or float(x) < 0 for x in numbers):
             raise ValueError("계수·허용오차는 유한한 비음수여야 한다")
         if not 2 <= options["points"] <= 20 or options["total_time_limit_s"] <= 0:
             raise ValueError("점 개수 또는 시간 제한 오류")
+        if not 0 < float(reduction["default_target_pct"]) < 100:
+            raise ValueError("기본 감축 목표는 0 초과 100 미만이어야 한다")
+        if float(reduction["time_limit_s"]) <= 0:
+            raise ValueError("감축 solve 시간 제한은 양수여야 한다")
         if raw["unit"] != "tCO2eq/MWh" or not raw["basis"] or not raw["source"]:
             raise ValueError("배출 단위·출처·범위 필요")
     except (KeyError, TypeError, ValueError) as exc:

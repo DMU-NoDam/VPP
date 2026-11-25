@@ -423,7 +423,37 @@ Pareto는 입력을 한 번 로드하여 수요·설비·초기상태·예비율
 유한 표본이며 완전한 Pareto 집합을 주장하지 않는다. 정확한 단조성 검증은 최적해에만 적용한다.
 전체 시간 예산은 solver와 다음 풀이 시작에 적용하며 빌드/응답 처리 때문에 소폭 초과 가능하다.
 
-### 6.2 배출계수의 범위
+### 6.2 기본 응답의 탄소 감축 계획
+
+구현: `pareto.reduce_to_target`, `service._carbon_reduction`,
+`POST /api/v1/dispatch/milp` 응답의 `carbon_reduction` 블록.
+
+기본 응답의 주 계획은 비용 최소 해다. 감축 계획은 같은 입력에 상한
+$E_{cap} = E_{cost}\,(1 - r/100)$ 을 걸고 다시 푼 **부가 블록**이며 주 계획도,
+비용 절감률 KPI도 대체하지 않는다. 과제 정량 기준에 탄소 항목이 없으므로
+(VPP_PROJECT_CONTEXT.md 4장) KPI 기준선은 비용 최소 해로 고정한다.
+
+- 기준 해를 재사용하므로 solve는 1회만 늘어난다. 목표가 불가능할 때만
+  `objective_mode=carbon`으로 1회 더 풀어 최대 감축률
+  $(E_{cost} - E_{min}) / E_{cost}$ 를 보고한다.
+- 두 풀이는 `config/carbon.yaml` 의 `reduction.time_limit_s` 예산을 공유하고
+  상대 gap은 0이다. 예산이 소진되면 계산하지 않고 그 사실을 notes에 남긴다.
+- 기본 목표 $r$ 은 `reduction.default_target_pct`(5%)이고 요청의
+  `carbon_reduction_target_pct`가 우선한다. `include_carbon_reduction=false`로 끈다.
+- 생략 조건: 기준 해가 없음 / `allow_load_shedding=true`(상한과 동시 사용 금지) /
+  요청에 `carbon_cap_ton`이 있음(상한 중복). 생략 이유는 응답 notes에 남긴다.
+- 감축 계획도 `validation.report`로 재검증하고 상한 검사를 더한다. 검증을 통과하지
+  못하면 감축률·비용을 null로 두고 status만 싣는다 — 0으로 채우지 않는다.
+- 지표: 감축률, 운영비 증가율, 감축 비용
+  $(C_{plan} - C_{cost}) / (E_{cost} - E_{plan})$ (원/tCO2), 발전원별 발전량·배출
+  변화, 유닛별 가동시간·기동 횟수 변화. `cost_reduction_pct`는 감축 계획을 같은
+  Rule-based baseline과 비교한 값이다 (감축 후에도 남는 절감률).
+- 계수 기준은 요청의 `carbon_accounting`을 그대로 따른다(기본 `configured`).
+  같은 응답의 `carbon` 블록과 기준이 같아야 한 화면에서 숫자가 어긋나지 않는다.
+- 응답시간은 `scripts/measure_dispatch_kpi.py --api-windows N`이 감축 off/on을
+  따로 기록한다. 10초 기준은 두 조건 모두에서 판정한다.
+
+### 6.3 배출계수의 범위
 
 기존 MILP는 `carbon_accounting=configured`로 generators.yaml의 기존 계수를 유지한다.
 새 분석의 기본 `lifecycle`은 `config/carbon.yaml`을 사용한다. docs/data_sources.md에

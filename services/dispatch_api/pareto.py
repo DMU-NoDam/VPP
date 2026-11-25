@@ -100,3 +100,73 @@ def run(
             completed = False
     sweep.complete = completed
     return finish()
+
+
+@dataclass
+class Reduction:
+    """비용 최소 계획을 기준으로 목표만큼 배출을 줄인 계획 하나의 계산 결과."""
+
+    target_pct: float
+    cap_ton: float
+    reference_ton: float
+    plan: DispatchResult | None = None      # 상한을 걸고 푼 계획 (solve 를 건너뛰면 None)
+    plan_ton: float | None = None
+    minimum: DispatchResult | None = None   # 목표가 불가능할 때만 계산한다
+    minimum_ton: float | None = None
+    elapsed_s: float = 0.0
+    notes: list[str] = field(default_factory=list)
+
+
+def reduce_to_target(
+    inp: DispatchInput,
+    reference: DispatchResult,
+    *,
+    solver_config: milp.SolverConfig,
+    hydro_policy: HydroPolicy,
+    ess: EssSpec | None,
+    target_pct: float,
+    emission_tolerance_ton: float,
+    time_limit_s: float,
+) -> Reduction:
+    """이미 푼 비용 최소 해를 기준으로 ε-constraint 한 점만 계산한다.
+
+    기준 해를 다시 풀지 않으므로 solve 는 1회만 늘어난다 (목표가 불가능하면 최대
+    감축 가능량 확인에 1회 더). 두 solve 를 합쳐 `time_limit_s` 안에서 끝낸다.
+    기본 급전 계획을 대체하지 않는 부가 분석이다 (docs/formulation.md 6.2).
+    """
+    started = time.perf_counter()
+    ref_ton = carbon.total_ton(reference.units)
+    red = Reduction(
+        target_pct=target_pct,
+        cap_ton=max(0.0, ref_ton * (1.0 - target_pct / 100.0)),
+        reference_ton=ref_ton,
+    )
+    if ref_ton <= emission_tolerance_ton:
+        red.notes.append("기준 계획의 배출량이 0에 가까워 감축할 여지가 없다")
+        red.elapsed_s = time.perf_counter() - started
+        return red
+
+    def solve(**kwargs: object) -> DispatchResult | None:
+        remaining = time_limit_s - (time.perf_counter() - started)
+        if remaining <= 0:
+            red.notes.append("감축 분석 시간 예산 소진; 계산하지 않음")
+            return None
+        limit = min(remaining, solver_config.time_limit_s or remaining)
+        config = replace(solver_config, time_limit_s=limit, mip_gap=0.0)
+        return milp.solve(inp, solver_config=config, hydro_policy=hydro_policy, ess=ess, **kwargs)
+
+    red.plan = solve(carbon_cap_ton=red.cap_ton)
+    if red.plan is not None and red.plan.has_solution:
+        red.plan_ton = carbon.total_ton(red.plan.units)
+    elif red.plan is not None:
+        # 목표를 못 맞췄으면 "얼마까지 줄일 수 있는지"를 배출 최소 목적으로 확인한다.
+        if ess is not None and ess.mode == "combined":
+            red.notes.append("ESS combined 모드에서는 최대 감축 가능량을 계산하지 않는다")
+        else:
+            red.minimum = solve(objective_mode="carbon")
+            if red.minimum is not None and red.minimum.has_solution:
+                red.minimum_ton = carbon.total_ton(red.minimum.units)
+            elif red.minimum is not None:
+                red.notes.append("최대 감축 가능량의 최적성을 확인하지 못했다")
+    red.elapsed_s = time.perf_counter() - started
+    return red

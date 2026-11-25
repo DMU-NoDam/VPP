@@ -243,6 +243,32 @@ def _milp_response(status: str = "optimal", hours: int = 24, carbon: float = 744
             "soc_pct": [50.0] * hours, "peak_before_mw": 71930.0, "peak_after_mw": 68334.0,
             "peak_reduction_pct": 5.0, "target_met": True,
         },
+        "carbon_reduction": {
+            "target_pct": 5.0, "cap_ton": carbon * 0.95, "status": "optimal",
+            "valid": True, "optimal": True, "achieved": True,
+            "accounting_basis": "configured_generator_factors", "factor_unit": "tCO2/MWh",
+            "reference_ton": carbon, "plan_ton": carbon * 0.95, "reduction_pct": 5.0,
+            "max_reduction_pct": None,
+            "reference_cost_won": 7.86e10, "plan_cost_won": 8.3e10,
+            "cost_increase_pct": 5.6, "cost_reduction_pct": 1.8,
+            "abatement_cost_krw_per_ton": 118_000.0,
+            "hourly_ton": [carbon * 0.95 / hours] * hours,
+            "by_fuel_ton": {"bituminous_coal": carbon * 0.95 - 9000.0, "lng": 9000.0},
+            "by_fuel_delta_mwh": {"bituminous_coal": -11_000.0, "lng": 11_000.0},
+            "by_fuel_delta_ton": {"bituminous_coal": -42_200.0, "lng": 5_000.0},
+            "unit_changes": [
+                {"unit_id": "coal_1", "fuel": "bituminous_coal", "energy_mwh": 9_000.0,
+                 "energy_delta_mwh": -11_000.0, "on_hours": 24, "on_hours_delta": 0,
+                 "startups": 0, "startups_delta": 0},
+                {"unit_id": "lng_9", "fuel": "lng", "energy_mwh": 11_000.0,
+                 "energy_delta_mwh": 11_000.0, "on_hours": 24, "on_hours_delta": 6,
+                 "startups": 1, "startups_delta": 1},
+            ],
+            "ess": None,
+            "checks": [{"name": "수급 균형", "ok": True, "detail": ""},
+                       {"name": "탄소 상한", "ok": True, "detail": ""}],
+            "elapsed_s": 0.9, "notes": ["기준은 비용 최소 MILP 계획"],
+        },
         "notes": ["mode=cost"],
         "merit_order": [{"rank": 2, "fuel": "lng"}, {"rank": 1, "fuel": "nuclear"}],
         # 0시 충전 500 MW, 1시 방전 300 MW, 나머지 0 → Σp + ESS = 순수요
@@ -270,6 +296,47 @@ def test_parse_milp_reads_baseline_and_constraints() -> None:
     assert set(logic.sample_dispatch_summary(
         pd.DataFrame({"fuel_cost_won": [1.0]}), logic.load_settings(CONFIG))) - {
         "n_scenarios"} <= set(data)
+
+
+def test_parse_milp_reads_carbon_reduction() -> None:
+    red = logic.parse_milp(_milp_response())["carbon_reduction"]
+    assert red["valid"] and red["achieved"]
+    assert red["reduction_pct"] == pytest.approx(5.0)
+    assert red["cost_increase_pct"] == pytest.approx(5.6)
+    assert red["cost_reduction_pct"] == pytest.approx(1.8)
+    assert red["checks"] == {"수급 균형": True, "탄소 상한": True}
+
+
+def test_parse_milp_without_carbon_reduction_is_none_block() -> None:
+    """감축 분석을 생략한 응답도 그대로 읽힌다 (블록만 None)."""
+    data = _milp_response()
+    data["carbon_reduction"] = None
+    assert logic.parse_milp(data)["carbon_reduction"] is None
+
+
+def test_carbon_reduction_invalid_plan_keeps_no_numbers() -> None:
+    """목표를 못 맞춘 계획은 감축률·비용을 0 으로 채우지 않는다."""
+    data = _milp_response()
+    data["carbon_reduction"].update({
+        "valid": False, "optimal": False, "achieved": False, "status": "infeasible",
+        "plan_ton": None, "reduction_pct": None, "plan_cost_won": None,
+        "cost_increase_pct": None, "cost_reduction_pct": None,
+        "abatement_cost_krw_per_ton": None, "max_reduction_pct": 3.2,
+    })
+    red = logic.parse_milp(data)["carbon_reduction"]
+    assert not red["valid"] and "reduction_pct" not in red
+    assert red["max_reduction_pct"] == pytest.approx(3.2)
+
+
+def test_carbon_reduction_tables_show_fuel_switch() -> None:
+    red = logic.parse_milp(_milp_response())["carbon_reduction"]
+    fuels = logic.carbon_reduction_by_fuel(red, {"bituminous_coal": "유연탄", "lng": "가스"})
+    coal = fuels.set_index("발전원").loc["유연탄"]
+    assert coal["발전량 변화(MWh)"] == -11_000
+    assert coal["배출량 변화(tCO2)"] == -42_200
+    units = logic.carbon_reduction_units(red, {"lng": "가스"})
+    assert list(units["발전기"]) == ["coal_1", "lng_9"]  # 변화량 큰 순
+    assert units.set_index("발전기").loc["lng_9", "기동 횟수 변화"] == 1
 
 
 def test_parse_milp_latency_falls_back_to_server_time() -> None:
@@ -565,10 +632,14 @@ def test_app_renders_with_milp(monkeypatch, fresh_cache) -> None:
     assert "MILP 09/17 계획" in page          # 최적화 결과 (cost 모드)
     assert "MILP·peak 09/17 계획" in page     # ESS (peak_shaving 모드)
     assert "Rule-based 대비" in page          # 탄소 (ESS 연계 / ESS 없음)
+    assert "탄소 감축" in page                # 최적화 결과 타일 + 추이의 감축 계획 선
     assert "순수요 기준" in page              # Merit Order 계획 스택
     # 기본 계획만 유닛 출력을 받는다
-    assert {(c.get("ess_mode"), c.get("use_ess", True), c["include_units"]) for c in calls} == {
-        (None, True, True), ("peak_shaving", True, False), (None, False, False)}
+    # 탄소 감축 계획(solve 1회 추가)과 유닛 출력은 기본 계획에서만 받는다
+    assert {(c.get("ess_mode"), c.get("use_ess", True), c["include_units"],
+             c["include_carbon_reduction"]) for c in calls} == {
+        (None, True, True, True), ("peak_shaving", True, False, False),
+        (None, False, False, False)}
 
 
 def test_app_adjust_controls(monkeypatch) -> None:
@@ -1104,49 +1175,105 @@ def test_crisis_ok_column_follows_target(settings) -> None:
     assert col == f"{settings.targets['crisis_reserve_pct']:g}% 유지"
 
 
-def _carbon_page_script():
-    import page_carbon
+def _analysis_page_script() -> None:
+    """AppTest 가 실행할 스크립트: 분석 상세 페이지만 단독으로 띄운다."""
+    import app
+    import streamlit as st
 
-    page_carbon.render()
+    st.session_state["vpp_ctx"] = app.build_context()
+    app.page_analysis()
 
 
-def test_carbon_page_requires_execution_and_never_uses_mock(monkeypatch):
+def test_carbon_reduction_panel_uses_real_api_contract(monkeypatch, fresh_cache):
+    """감축 패널은 dispatch_api 의 실제 carbon_reduction 응답으로 그려진다."""
     from streamlit.testing.v1 import AppTest
 
-    monkeypatch.syspath_prepend(str(DASHBOARD_DIR))
-    calls = []
+    import service
+    from shared.schemas import MilpRequest
 
-    def fail(*args, **kwargs):
-        calls.append(kwargs)
+    # 외부 네트워크 없이 실제 서비스 응답을 화면에 연결한다.
+    data = service.run_milp(MilpRequest(
+        horizon_h=24, net_demand_mw=[65_000.0] * 24, include_units=False,
+    )).model_dump(mode="json")
+    assert data["carbon_reduction"]["valid"]
+
+    def fake(method, url, json=None, params=None, timeout=None):
+        if url.endswith(":8002/health"):
+            return _FakeResponse(200, {"status": "ok"})
+        if url.endswith("/dispatch/milp"):
+            return _FakeResponse(200, data)
         raise requests.ConnectionError()
 
-    monkeypatch.setattr(logic.requests, "request", fail)
-    at = AppTest.from_function(_carbon_page_script, default_timeout=30).run()
-    assert not at.exception and not calls
-    at.button[0].click().run()
+    monkeypatch.setattr(logic.requests, "request", fake)
+    monkeypatch.delenv("DISPATCH_URL", raising=False)
+    monkeypatch.syspath_prepend(str(DASHBOARD_DIR))
+
+    at = AppTest.from_function(_analysis_page_script, default_timeout=120).run()
     assert not at.exception
-    assert calls[0]["json"]["carbon_accounting"] == "lifecycle"
-    assert at.error and "carbon_analysis_result" not in at.session_state
+    page = "".join(m.value for m in at.markdown)
+    assert "탄소 감축 (목표 5%)" in page
+    assert "배출 상한" in "".join(c.value for c in at.caption)
+    assert any("탄소 감축" in m.label for m in at.metric)
 
 
-def test_carbon_page_renders_real_api_contract(monkeypatch):
+def test_carbon_pareto_is_requested_not_automatic(monkeypatch, fresh_cache):
+    """Pareto 는 버튼을 눌렀을 때만 호출하고, 같은 계수 기준으로 요청한다."""
     from streamlit.testing.v1 import AppTest
 
     import service
     from shared.schemas import ParetoRequest
 
-    # 실제 서비스 응답을 화면에 연결하되 외부 네트워크는 사용하지 않는다.
-    data = service.run_pareto(ParetoRequest(
-        horizon_h=1, net_demand_mw=[65000], use_ess=False, points=2,
+    pareto_data = service.run_pareto(ParetoRequest(
+        horizon_h=1, net_demand_mw=[65_000.0], use_ess=False, points=2,
         reduction_targets_pct=[5], total_time_limit_s=10,
     )).model_dump(mode="json")
+    calls: list[dict] = []
+
+    def fake(method, url, json=None, params=None, timeout=None):
+        if url.endswith(":8002/health"):
+            return _FakeResponse(200, {"status": "ok"})
+        if url.endswith("/dispatch/milp"):
+            return _FakeResponse(200, _milp_response())
+        if url.endswith("/dispatch/pareto"):
+            calls.append(json)
+            return _FakeResponse(200, pareto_data)
+        raise requests.ConnectionError()
+
+    monkeypatch.setattr(logic.requests, "request", fake)
+    monkeypatch.delenv("DISPATCH_URL", raising=False)
     monkeypatch.syspath_prepend(str(DASHBOARD_DIR))
-    monkeypatch.setattr(logic.requests, "request", lambda *a, **k: _FakeResponse(200, data))
-    at = AppTest.from_function(_carbon_page_script, default_timeout=30).run()
-    at.button[0].click().run()
+
+    at = AppTest.from_function(_analysis_page_script, default_timeout=120).run()
+    assert not at.exception and not calls      # 화면을 그리는 것만으로는 부르지 않는다
+
+    tables_before = len(at.dataframe)
+    next(b for b in at.button if "Pareto" in b.label).click().run()
     assert not at.exception and not at.error
-    assert len(at.dataframe) >= 3
-    assert at.metric
+    assert calls[0]["carbon_accounting"] == "configured"
+    assert calls[0]["reduction_targets_pct"] == [5.0, 10.0]
+    assert len(at.dataframe) > tables_before
+
+
+def test_carbon_pareto_failure_shows_error_not_mock(monkeypatch, fresh_cache):
+    """Pareto 호출이 실패하면 목업으로 대체하지 않고 오류를 보여 준다."""
+    from streamlit.testing.v1 import AppTest
+
+    def fake(method, url, json=None, params=None, timeout=None):
+        if url.endswith(":8002/health"):
+            return _FakeResponse(200, {"status": "ok"})
+        if url.endswith("/dispatch/milp"):
+            return _FakeResponse(200, _milp_response())
+        raise requests.ConnectionError()
+
+    monkeypatch.setattr(logic.requests, "request", fake)
+    monkeypatch.delenv("DISPATCH_URL", raising=False)
+    monkeypatch.syspath_prepend(str(DASHBOARD_DIR))
+
+    at = AppTest.from_function(_analysis_page_script, default_timeout=120).run()
+    next(b for b in at.button if "Pareto" in b.label).click().run()
+    assert not at.exception
+    assert at.error
+    assert "vpp_pareto" not in at.session_state
 
 
 def test_parse_milp_rejects_timeout_without_incumbent():

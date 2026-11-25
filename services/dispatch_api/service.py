@@ -36,7 +36,9 @@ from models import DispatchInput, DispatchResult, EssSpec, Generator, Settings
 from schedule import cost_reduction_pct, merit_order
 from shared.schemas import (
     BaselineComparison,
+    CarbonReduction,
     CarbonSummary,
+    CarbonUnitChange,
     CarbonUnitOperation,
     CheckItem,
     CostBreakdown,
@@ -328,6 +330,7 @@ def run_milp(req: MilpRequest) -> MilpResponse:
     )
 
     comparison: BaselineComparison | None = None
+    rule: DispatchResult | None = None
     if req.include_baseline:
         # baseline 은 페널티 없이 돈다. 규칙으로 못 채운 양은 shed_mw 로 남기고
         # 비용에는 섞지 않는다 (섞으면 절감률이 페널티 크기에 좌우된다).
@@ -351,6 +354,8 @@ def run_milp(req: MilpRequest) -> MilpResponse:
             constraints=_checks(rule, list(inp.generators), inp),
         )
 
+    reduction = _carbon_reduction(req, inp, cfg, result, ess, rule)
+
     size = result.size
     return MilpResponse(
         status=result.status,
@@ -369,6 +374,7 @@ def run_milp(req: MilpRequest) -> MilpResponse:
         units=_units(result) if req.include_units else None,
         merit_order=[MeritOrderEntry(**row) for row in merit_order(result)],
         carbon=_carbon_summary(result, req),
+        carbon_reduction=reduction,
         ess=_ess(result),
         constraints=_checks(result, list(inp.generators), inp) + _cap_checks(result, req),
         baseline=comparison,
@@ -399,14 +405,167 @@ def _carbon_summary(result: DispatchResult, req: MilpRequest) -> CarbonSummary:
         ]
         slack = req.carbon_cap_ton - values["total_ton"]
         binding = abs(slack) <= tolerance
-    lifecycle = req.carbon_accounting == "lifecycle"
+    basis, unit = _accounting(req)
     return CarbonSummary(
         **values, cap_ton=req.carbon_cap_ton, cap_slack_ton=slack, cap_binding=binding,
-        valid=result.has_solution,
-        accounting_basis="dispatchable_lifecycle_midpoint" if lifecycle
-        else "configured_generator_factors",
-        factor_unit="tCO2eq/MWh" if lifecycle else "tCO2/MWh",
+        valid=result.has_solution, accounting_basis=basis, factor_unit=unit,
     )
+
+
+def _accounting(req: MilpRequest) -> tuple[str, str]:
+    """응답에 적을 배출 계수의 산정 범위와 단위."""
+    if req.carbon_accounting == "lifecycle":
+        return "dispatchable_lifecycle_midpoint", "tCO2eq/MWh"
+    return "configured_generator_factors", "tCO2/MWh"
+
+
+def _fuel_energy_mwh(result: DispatchResult) -> dict[str, float]:
+    energy: dict[str, float] = {}
+    for unit in result.units:
+        energy[unit.fuel] = energy.get(unit.fuel, 0.0) + unit.energy_mwh
+    return energy
+
+
+def _unit_changes(plan: DispatchResult, reference: DispatchResult) -> list[CarbonUnitChange]:
+    """유닛별 운전 변화. 두 계획은 같은 유닛 집합을 쓴다."""
+    before = {u.unit_id: u for u in reference.units}
+    changes: list[CarbonUnitChange] = []
+    for unit in plan.units:
+        base = before.get(unit.unit_id)
+        changes.append(CarbonUnitChange(
+            unit_id=unit.unit_id,
+            fuel=unit.fuel,
+            energy_mwh=unit.energy_mwh,
+            energy_delta_mwh=unit.energy_mwh - (base.energy_mwh if base else 0.0),
+            on_hours=sum(unit.on),
+            on_hours_delta=sum(unit.on) - (sum(base.on) if base else 0),
+            startups=unit.n_startups,
+            startups_delta=unit.n_startups - (base.n_startups if base else 0),
+        ))
+    return changes
+
+
+def _carbon_reduction(
+    req: MilpRequest,
+    inp: DispatchInput,
+    cfg: Settings,
+    result: DispatchResult,
+    ess: EssSpec | None,
+    rule: DispatchResult | None,
+) -> CarbonReduction | None:
+    """비용 최소 해(`result`)를 기준으로 목표만큼 배출을 줄인 계획을 덧붙인다.
+
+    기본 계획과 비용 절감률 KPI 는 건드리지 않는다. 조건이 맞지 않으면 None 을
+    돌려주고 이유를 result.notes 에 남긴다 (docs/formulation.md 6.2).
+    """
+    if not req.include_carbon_reduction:
+        return None
+    if not result.has_solution or result.status not in SOLVED_STATUSES:
+        return None  # 기준 계획이 없으면 감축 기준도 없다
+    if req.allow_load_shedding:
+        result.notes.append("부하차단을 켜면 탄소 감축 분석을 생략한다 (상한과 함께 쓸 수 없다)")
+        return None
+    if req.carbon_cap_ton is not None:
+        result.notes.append("요청에 탄소 상한이 있어 추가 감축 분석을 생략한다")
+        return None
+
+    config = carbon.load_analysis_config(CONFIG_DIR / "carbon.yaml")
+    options = config["reduction"]
+    tolerance = float(config["pareto"]["emission_tolerance_ton"])
+    target = float(
+        req.carbon_reduction_target_pct
+        if req.carbon_reduction_target_pct is not None else options["default_target_pct"]
+    )
+    red = pareto.reduce_to_target(
+        inp, result,
+        solver_config=_solver_config(req, cfg),
+        hydro_policy=cfg.hydro_policy,
+        ess=ess,
+        target_pct=target,
+        emission_tolerance_ton=tolerance,
+        time_limit_s=float(options["time_limit_s"]),
+    )
+
+    plan = red.plan
+    checks: list[CheckItem] = []
+    if plan is not None and plan.has_solution:
+        checks = _checks(plan, list(inp.generators), inp)
+        checks.append(CheckItem(
+            name="탄소 상한",
+            ok=(red.plan_ton or 0.0) <= red.cap_ton + tolerance,
+            detail=f"{red.plan_ton or 0.0:.6f} <= {red.cap_ton:.6f} t",
+        ))
+    valid = plan is not None and plan.has_solution and all(c.ok for c in checks)
+    ref_cost = result.operating_cost_krw
+    basis, unit = _accounting(req)
+
+    plan_ton = red.plan_ton if valid else None
+    plan_cost = plan.operating_cost_krw if valid and plan else None
+    cut_ton = red.reference_ton - plan_ton if plan_ton is not None else None
+    reduction_pct = (
+        cut_ton / red.reference_ton * 100.0
+        if cut_ton is not None and red.reference_ton > 0 else None
+    )
+    achieved = reduction_pct is not None and reduction_pct >= target - 1e-6
+    notes = list(red.notes)
+    notes.append("기준은 같은 입력·예비율·ESS 조건의 비용 최소 MILP 계획이다 (Rule-based 아님)")
+    notes.append("기본 급전 계획과 비용 절감률 KPI 는 비용 최소 해를 그대로 쓴다")
+    if valid and not achieved:
+        notes.append("상한을 걸고 푼 해가 목표 감축률에 미달한다 — 숫자를 그대로 싣는다")
+    if not valid and plan is not None and plan.status == "infeasible":
+        notes.append("목표 감축률이 현재 설비·수요 조건에서 불가능하다")
+
+    return CarbonReduction(
+        target_pct=target,
+        cap_ton=red.cap_ton,
+        status=plan.status if plan is not None else "error",
+        valid=valid,
+        optimal=valid and plan is not None and plan.status == "optimal",
+        achieved=achieved,
+        accounting_basis=basis,
+        factor_unit=unit,
+        reference_ton=red.reference_ton,
+        plan_ton=plan_ton,
+        reduction_pct=reduction_pct,
+        max_reduction_pct=(
+            (red.reference_ton - red.minimum_ton) / red.reference_ton * 100.0
+            if not achieved and red.minimum_ton is not None and red.reference_ton > 0 else None
+        ),
+        reference_cost_won=ref_cost,
+        plan_cost_won=plan_cost,
+        cost_increase_pct=(
+            (plan_cost / ref_cost - 1.0) * 100.0
+            if plan_cost is not None and ref_cost > 0 else None
+        ),
+        cost_reduction_pct=(
+            cost_reduction_pct(rule, plan) if valid and plan is not None and rule is not None
+            else None
+        ),
+        abatement_cost_krw_per_ton=(
+            (plan_cost - ref_cost) / cut_ton
+            if plan_cost is not None and cut_ton is not None and cut_ton > tolerance else None
+        ),
+        hourly_ton=carbon.hourly_ton(plan.units) if valid and plan else [],
+        by_fuel_ton=carbon.by_fuel_ton(plan.units) if valid and plan else {},
+        by_fuel_delta_mwh=_delta_by_fuel(
+            _fuel_energy_mwh(plan), _fuel_energy_mwh(result)) if valid and plan else {},
+        by_fuel_delta_ton=_delta_by_fuel(
+            carbon.by_fuel_ton(plan.units), carbon.by_fuel_ton(result.units)
+        ) if valid and plan else {},
+        unit_changes=_unit_changes(plan, result) if valid and plan else [],
+        ess=_ess(plan) if valid and plan else None,
+        checks=checks,
+        elapsed_s=red.elapsed_s,
+        notes=notes,
+    )
+
+
+def _delta_by_fuel(after: dict[str, float], before: dict[str, float]) -> dict[str, float]:
+    """발전원별 변화량. 한쪽에만 있는 발전원도 남긴다."""
+    return {
+        fuel: after.get(fuel, 0.0) - before.get(fuel, 0.0)
+        for fuel in sorted(set(after) | set(before))
+    }
 
 
 def run_pareto(req: ParetoRequest) -> ParetoResponse:

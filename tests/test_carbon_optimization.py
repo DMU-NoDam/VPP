@@ -194,3 +194,153 @@ def test_zero_gap_is_forwarded_to_solver(monkeypatch):
     monkeypatch.setattr(milp.pulp, "HiGHS", Solver)
     milp.build_solver(milp.SolverConfig(mip_gap=0))
     assert calls[0]["gapRel"] == 0
+
+
+# ── 기본 MILP 응답에 합친 탄소 감축 블록 ─────────────────────────────────────
+
+
+def test_reduce_to_target_reuses_reference_solution(two_fuel):
+    reference = milp.solve(two_fuel)
+    red = pareto.reduce_to_target(
+        two_fuel, reference, solver_config=milp.SolverConfig(),
+        hydro_policy=HydroPolicy(), ess=None, target_pct=25,
+        emission_tolerance_ton=0.0001, time_limit_s=10,
+    )
+    assert red.reference_ton == pytest.approx(100)
+    assert red.cap_ton == pytest.approx(75)
+    assert red.plan.status == "optimal"
+    assert red.plan_ton == pytest.approx(75)
+    assert red.minimum is None  # 목표를 맞췄으면 배출 최소 해는 풀지 않는다
+
+
+def test_impossible_target_reports_maximum_reduction(two_fuel):
+    reference = milp.solve(two_fuel)
+    red = pareto.reduce_to_target(
+        two_fuel, reference, solver_config=milp.SolverConfig(),
+        hydro_policy=HydroPolicy(), ess=None, target_pct=60,
+        emission_tolerance_ton=0.0001, time_limit_s=10,
+    )
+    assert red.plan.status == "infeasible"
+    assert red.plan_ton is None
+    assert red.minimum_ton == pytest.approx(50)  # 최대 50% 까지만 줄일 수 있다
+
+
+def test_zero_emission_reference_has_nothing_to_reduce(two_fuel):
+    clean = [replace(g, co2_ton_per_mwh=0) for g in two_fuel.generators]
+    inp = replace(two_fuel, generators=clean)
+    red = pareto.reduce_to_target(
+        inp, milp.solve(inp), solver_config=milp.SolverConfig(),
+        hydro_policy=HydroPolicy(), ess=None, target_pct=5,
+        emission_tolerance_ton=0.0001, time_limit_s=10,
+    )
+    assert red.plan is None and red.plan_ton is None
+    assert any("감축할 여지가 없다" in note for note in red.notes)
+
+
+def test_milp_api_includes_carbon_reduction_by_default(toy_api):
+    body = {"horizon_h": 1, "net_demand_mw": [100], "reserve_ratio": 0, "use_ess": False}
+    data = toy_api.post("/api/v1/dispatch/milp", json={**body,
+                                                      "carbon_reduction_target_pct": 25}).json()
+    red = data["carbon_reduction"]
+    assert red["valid"] and red["optimal"] and red["achieved"]
+    assert red["reduction_pct"] == pytest.approx(25)
+    assert red["cap_ton"] == pytest.approx(75)
+    assert red["plan_ton"] == pytest.approx(75)
+    # 기본 계획과 비용 절감률 KPI 는 비용 최소 해를 그대로 쓴다
+    assert data["carbon"]["total_ton"] == pytest.approx(100)
+    assert data["cost"]["total_won"] == pytest.approx(1_000_000)
+    assert red["reference_cost_won"] == pytest.approx(1_000_000)
+    assert red["plan_cost_won"] == pytest.approx(1_500_000)
+    assert red["cost_increase_pct"] == pytest.approx(50)
+    assert red["abatement_cost_krw_per_ton"] == pytest.approx(20_000)
+    assert red["by_fuel_delta_mwh"]["bituminous_coal"] == pytest.approx(-50)
+    assert red["by_fuel_delta_mwh"]["lng"] == pytest.approx(50)
+    assert red["by_fuel_delta_ton"]["bituminous_coal"] == pytest.approx(-50)
+    assert {u["unit_id"] for u in red["unit_changes"]} == {"coal", "gas"}
+    assert all(c["ok"] for c in red["checks"])
+    assert red["accounting_basis"] == "configured_generator_factors"
+
+
+def test_carbon_reduction_uses_config_default_target(toy_api):
+    """요청에 목표가 없으면 config/carbon.yaml 의 기본값(5%)을 쓴다."""
+    config = carbon.load_analysis_config(service.CONFIG_DIR / "carbon.yaml")
+    data = toy_api.post("/api/v1/dispatch/milp", json={
+        "horizon_h": 1, "net_demand_mw": [100], "reserve_ratio": 0, "use_ess": False}).json()
+    red = data["carbon_reduction"]
+    assert red["target_pct"] == pytest.approx(config["reduction"]["default_target_pct"])
+    assert red["reduction_pct"] == pytest.approx(red["target_pct"])
+
+
+def test_carbon_reduction_reports_unreachable_target(toy_api):
+    data = toy_api.post("/api/v1/dispatch/milp", json={
+        "horizon_h": 1, "net_demand_mw": [100], "reserve_ratio": 0, "use_ess": False,
+        "carbon_reduction_target_pct": 60}).json()
+    red = data["carbon_reduction"]
+    assert data["status"] == "optimal"            # 기본 계획은 영향받지 않는다
+    assert red["status"] == "infeasible"
+    assert not red["valid"] and not red["achieved"]
+    assert red["plan_ton"] is None and red["reduction_pct"] is None
+    assert red["max_reduction_pct"] == pytest.approx(50)
+    assert red["checks"] == []                    # 검증할 계획이 없다
+
+
+@pytest.mark.parametrize(("updates", "reason"), [
+    ({"include_carbon_reduction": False}, None),
+    ({"allow_load_shedding": True, "include_baseline": False}, "부하차단"),
+    ({"carbon_cap_ton": 80}, "탄소 상한"),
+])
+def test_carbon_reduction_is_skipped_with_reason(toy_api, updates, reason):
+    data = toy_api.post("/api/v1/dispatch/milp", json={
+        "horizon_h": 1, "net_demand_mw": [100], "reserve_ratio": 0, "use_ess": False,
+        **updates}).json()
+    assert data["carbon_reduction"] is None
+    if reason:
+        assert any(reason in note for note in data["notes"])
+
+
+def test_infeasible_plan_has_no_carbon_reduction(toy_api):
+    data = toy_api.post("/api/v1/dispatch/milp", json={
+        "horizon_h": 1, "net_demand_mw": [10_000], "reserve_ratio": 0,
+        "use_ess": False}).json()
+    assert data["status"] == "infeasible"
+    assert data["carbon_reduction"] is None
+
+
+def test_carbon_reduction_request_bounds(toy_api):
+    body = {"horizon_h": 1, "net_demand_mw": [100], "reserve_ratio": 0, "use_ess": False}
+    for value in (0, 100, -5, 101):
+        assert toy_api.post("/api/v1/dispatch/milp", json={
+            **body, "carbon_reduction_target_pct": value}).status_code == 422
+    # Pareto 는 감축 점을 reduction_targets_pct 로만 받는다
+    assert toy_api.post("/api/v1/dispatch/pareto", json={
+        **body, "include_carbon_reduction": True}).status_code == 422
+
+
+def test_reduction_respects_time_budget(two_fuel, monkeypatch):
+    """예산이 없으면 계획을 만들지 않고 그 사실을 남긴다 (0 으로 채우지 않는다)."""
+    reference = milp.solve(two_fuel)
+    clock = iter([0, 2, 2])
+    monkeypatch.setattr(pareto.time, "perf_counter", lambda: next(clock))
+    red = pareto.reduce_to_target(
+        two_fuel, reference, solver_config=milp.SolverConfig(),
+        hydro_policy=HydroPolicy(), ess=None, target_pct=5,
+        emission_tolerance_ton=0.0001, time_limit_s=1,
+    )
+    assert red.plan is None and red.plan_ton is None
+    assert any("시간 예산" in note for note in red.notes)
+
+
+def test_combined_ess_skips_maximum_reduction(two_fuel, make_ess):
+    """ESS combined 모드에서는 배출 최소 목적을 쓸 수 없어 최대 감축량을 계산하지 않는다."""
+    # 종료 SOC 하한이 없으면 1시간 창에서 ESS 가 수요를 전부 대 배출이 0 이 된다
+    ess = make_ess(mode="combined", peak_target_pct=0, soc_final_min_pct=50)
+    reference = milp.solve(two_fuel, ess=ess)
+    assert reference.status == "optimal"
+    red = pareto.reduce_to_target(
+        two_fuel, reference, solver_config=milp.SolverConfig(),
+        hydro_policy=HydroPolicy(), ess=ess, target_pct=60,
+        emission_tolerance_ton=0.0001, time_limit_s=10,
+    )
+    assert red.plan.status == "infeasible"
+    assert red.minimum is None and red.minimum_ton is None
+    assert any("combined" in note for note in red.notes)

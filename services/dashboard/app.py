@@ -6,7 +6,8 @@ config/dashboard.yaml 에 있다.
 페이지 구성:
     통합 관제      스크롤 없이 한 화면 — 수급 게이지·알람, Merit Order, 최적화 결과,
                    탄소 추이, ESS, 위기 시나리오 (CLAUDE.md 최종 결과물 4·기능 요구 10)
-    분석 상세      168h 예측·성능 지표, 최적화 상세, 위기 시나리오 게이지, 배출 내역
+    분석 상세      168h 예측·성능 지표, 최적화 상세, 위기 시나리오 게이지,
+                   탄소 감축 방법·배출 내역·비용–탄소 Pareto(요청 시)
     시간대 데이터  KPX 실측, 출력 히트맵, 시간대 상세표·CSV
     시나리오 생성기 page_scenarios.py
     Two-Stage 테스트 page_stochastic_test.py — RP·EV·EEV·WS 비교, VSS 판정
@@ -21,7 +22,9 @@ config/dashboard.yaml 에 있다.
     dispatch_api  GET  /health                         연결 상태
                   POST /api/v1/dispatch/milp           MILP 절감률·비용·제약 (cost 모드),
                                                        ESS 충방전·피크 감소 (peak_shaving 모드),
-                                                       탄소 ESS 전/후·Rule-based 대비 (use_ess 끔)
+                                                       탄소 ESS 전/후·Rule-based 대비 (use_ess 끔),
+                                                       탄소 감축 계획 (carbon_reduction 블록)
+                  POST /api/v1/dispatch/pareto         비용–탄소 Pareto (분석 상세에서 요청 시)
                   GET  /api/v1/dispatch/stochastic/latest  VSS (미리 계산, StochasticLatest)
                   POST /api/v1/scenarios               시나리오 생성기 페이지 (page_scenarios.py)
 응답이 없거나 계약이 아직 없는 패널은 목업으로 그린다. 서비스 응답을 쓴 패널에는 LIVE,
@@ -48,7 +51,6 @@ from plotly.subplots import make_subplots
 from streamlit.delta_generator import DeltaGenerator
 
 import logic
-import page_carbon
 import page_scenarios
 import page_stochastic_test
 from logic import API_PREFIX, ApiResult, Settings
@@ -319,13 +321,16 @@ def stochastic_result(ctx: Context, label: str = "") -> tuple[dict, str]:
 
 @st.cache_data(ttl=CFG.api.ttl_range_s, show_spinner="MILP 급전 계획 계산 중…")
 def fetch_milp(base_url: str, ess_mode: str | None, timeout: float,
-               use_ess: bool = True, include_units: bool = False) -> ApiResult:
+               use_ess: bool = True, include_units: bool = False,
+               carbon_reduction: bool = False) -> ApiResult:
     """POST /dispatch/milp. 수요를 주지 않으면 dispatch_api 가 수집 데이터의 최신 연속 24h 를 쓴다.
 
-    ess_mode None 은 config/ess.yaml 기본(cost). 유닛 x 시간 급전값(응답 ~70KB)은 Merit Order
-    스택이 쓰는 기본 계획에서만 받는다.
+    ess_mode None 은 config/ess.yaml 기본(cost). 유닛 x 시간 급전값(응답 ~70KB)과 탄소 감축
+    계획(solve 1회 추가)은 화면이 실제로 쓰는 기본 계획에서만 받는다 — ESS 피크용·ESS 전후
+    비교용 호출까지 켜면 같은 화면에서 solve 가 3번 더 돈다.
     """
-    payload: dict = {"include_units": include_units}
+    payload: dict = {"include_units": include_units,
+                     "include_carbon_reduction": carbon_reduction}
     if ess_mode:
         payload["ess_mode"] = ess_mode
     if not use_ess:
@@ -343,9 +348,11 @@ def milp_result(ctx: Context, ess_mode: str | None = None, use_ess: bool = True)
     """
     if not ctx.health["dispatch_api"].ok:
         return None
-    # 기본 계획(cost 모드 + ESS)만 유닛 출력을 받는다 — 같은 인자라야 캐시를 같이 쓴다
-    units = ess_mode is None and use_ess
-    res = fetch_milp(ctx.urls["dispatch_api"], ess_mode, ctx.settings.timeout_s, use_ess, units)
+    # 기본 계획(cost 모드 + ESS)만 유닛 출력과 탄소 감축 계획을 받는다
+    # — 같은 인자라야 캐시를 같이 쓴다
+    primary = ess_mode is None and use_ess
+    res = fetch_milp(ctx.urls["dispatch_api"], ess_mode, ctx.settings.timeout_s, use_ess,
+                     primary, primary)
     try:
         return logic.parse_milp(res.data, res.latency_s) if res.ok else None
     except (KeyError, TypeError, ValueError):
@@ -950,7 +957,11 @@ def _render_real_mix(head: DeltaGenerator, real: RealMix, height: int) -> None:
 
 
 def render_optimization(ctx: Context) -> None:
-    """최적화 결과 — MILP 절감률·비용·응답·제약 + Two-Stage VSS. dispatch_api 가 없으면 목업."""
+    """최적화 결과 — MILP 절감률·비용·응답·탄소 감축·제약 + Two-Stage VSS.
+
+    dispatch_api 가 없으면 목업. 탄소 감축 타일은 MILP 응답의 carbon_reduction 블록이
+    있을 때만 그린다 (목업에는 없다).
+    """
     s = ctx.settings
     live = milp_result(ctx)
     milp = live or logic.sample_dispatch_summary(ctx.df, ctx.settings)
@@ -976,10 +987,24 @@ def render_optimization(ctx: Context) -> None:
         return (f'<div class="vpp-tile opt"><div><span>{label}</span><small>{sub}</small></div>'
                 f"<div><b>{value}</b>{badge_html}</div></div>")
 
+    # 탄소 감축 계획 (같은 응답의 부가 블록). 기본 계획은 비용 최소 해 그대로다.
+    red = live["carbon_reduction"] if live else None
+    carbon_tile = ""
+    if red and red["valid"]:
+        sub = f'운영비 {red["cost_increase_pct"]:+.1f}%'
+        if red["cost_reduction_pct"] is not None:
+            sub += f' · 감축 후 절감 {red["cost_reduction_pct"]:.1f}%'
+        carbon_tile = tile("탄소 감축", f'{red["reduction_pct"]:.1f}%', sub,
+                           "carbon_cut_pct", red["reduction_pct"])
+    elif red:
+        detail = (f'최대 {red["max_reduction_pct"]:.1f}% 가능'
+                  if red["max_reduction_pct"] is not None else f'풀이 {red["status"]}')
+        carbon_tile = tile("탄소 감축", "미달", f'목표 {red["target_pct"]:g}% · {detail}')
+
     with card():
         html(
             '<div class="vpp-kpi-head">'
-            f'<span>최적화 결과{tag}</span><small>MILP · Two-Stage</small></div>'
+            f'<span>최적화 결과{tag}</span><small>MILP · 탄소 · Two-Stage</small></div>'
             '<div class="vpp-kpi-row">'
             f'<span class="vpp-kpi-value" style="color:{C_GREEN if ok_saving else C_RED}">'
             f'{milp["saving_pct"]:.1f}<span class="u">%</span></span>'
@@ -994,6 +1019,7 @@ def render_optimization(ctx: Context) -> None:
                    f'Two-Stage · 시나리오 {vss["n_scenarios"]}개'
                    + (f' · 예비율 {vss["reserve_ratio"]:.0%}' if "reserve_ratio" in vss else ""),
                    "vss_pct", vss["vss_pct"])
+            + carbon_tile
             + "</div>"
         )
         html(
@@ -1095,8 +1121,14 @@ def _signed_pct(value: float) -> str:
 
 
 def _render_milp_carbon(with_ess: dict, no_ess: dict) -> None:
-    """MILP 계획 하루의 시간대별 배출 (ESS 연계 / ESS 없음) 과 Rule-based 대비 증감."""
+    """MILP 계획 하루의 시간대별 배출 (ESS 연계 / ESS 없음 / 탄소 감축 계획).
+
+    감축 계획은 같은 MILP 응답의 carbon_reduction 블록이다. 제약 재검증을 통과한
+    계획만 그린다.
+    """
     t = logic.carbon_tradeoff(with_ess, no_ess)
+    red = with_ess["carbon_reduction"]
+    cut = red if red and red["valid"] else None
     hours = list(range(len(with_ess["carbon_hourly_ton"])))
     with card():
         html(
@@ -1105,7 +1137,9 @@ def _render_milp_carbon(with_ess: dict, no_ess: dict) -> None:
             '<div class="vpp-kpi-row">'
             f'<span class="vpp-kpi-value sm">{ton(t["with_ess_ton"])}</span>'
             f'<span class="vpp-kpi-sub">일간 · ESS 연계 {_signed_pct(t["ess_pct"])}'
-            f' · Rule-based 대비 {_signed_pct(t["rule_pct"])}</span></div>'
+            f' · Rule-based 대비 {_signed_pct(t["rule_pct"])}'
+            + (f' · 감축 계획 {_signed_pct(-cut["reduction_pct"])}' if cut else "")
+            + "</span></div>"
         )
         fig = go.Figure()
         fig.add_scatter(
@@ -1118,6 +1152,12 @@ def _render_milp_carbon(with_ess: dict, no_ess: dict) -> None:
             x=hours, y=no_ess["carbon_hourly_ton"], mode="lines", name="ESS 없음",
             line=dict(color=C_TEXT, width=1.4, dash="dot", shape="spline"),
         )
+        if cut:
+            fig.add_scatter(
+                x=hours, y=cut["hourly_ton"], mode="lines",
+                name=f'탄소 감축 {cut["target_pct"]:g}%',
+                line=dict(color=C_GREEN, width=2, shape="spline"),
+            )
         st.plotly_chart(_compact_chart(fig, H_SMALL), width="stretch", key="c_carbon",
                         config=NO_BAR)
 
@@ -1125,7 +1165,8 @@ def _render_milp_carbon(with_ess: dict, no_ess: dict) -> None:
 def render_carbon(ctx: Context) -> None:
     """시간대별 탄소 배출량.
 
-    우선순위: MILP 계획(ESS 연계 / ESS 없음 비교) → collector 실측 하루 → 분석 기간 목업.
+    우선순위: MILP 계획(ESS 연계 / ESS 없음 / 탄소 감축 계획) → collector 실측 하루
+    → 분석 기간 목업.
     """
     pair = milp_carbon_pair(ctx)
     if pair is not None:
@@ -1403,8 +1444,156 @@ def render_crisis_detail(ctx: Context) -> None:
     st.dataframe(logic.crisis_table(ctx.df, s), hide_index=True, width="stretch")
 
 
+PARETO_PLAN_KO = {
+    "cost_reference": "기준: 비용 최소",
+    "minimum_carbon": "탄소 최소",
+    "minimum_carbon_cost_tiebreak": "탄소 최소 · 비용 비교 완료",
+}
+
+
+def pareto_plan_label(label: str) -> str:
+    """/dispatch/pareto 의 계획 식별자를 화면 설명으로 바꾼다."""
+    if label.startswith("target_"):
+        return f"감축 목표 {label[7:-3]}%"
+    if label.startswith("frontier_"):
+        return f"중간 감축 계획 {label[9:]}"
+    return PARETO_PLAN_KO.get(label, label)
+
+
+def _render_carbon_reduction(ctx: Context, milp: dict) -> None:
+    """탄소를 어떻게 줄였는지 — 발전원 전환·유닛 운전 변화·감축 비용.
+
+    MILP 응답의 carbon_reduction 블록만 쓴다 (추가 호출 없음). 제약 재검증을
+    통과하지 못한 계획은 숫자 대신 상태와 최대 감축 가능률을 보여 준다.
+    """
+    red = milp["carbon_reduction"]
+    if red is None:
+        return
+    panel_title(f'탄소 감축 (목표 {red["target_pct"]:g}%)', milp_tag(milp))
+    if not red["valid"]:
+        limit = (f' 현재 설비·수요 조건의 최대 감축 가능률은 {red["max_reduction_pct"]:.2f}% 다.'
+                 if red["max_reduction_pct"] is not None else "")
+        st.warning(f'목표 {red["target_pct"]:g}% 감축 계획을 확보하지 못했다 '
+                   f'(풀이 상태 {red["status"]}).{limit}')
+        if red["notes"]:
+            st.caption(" · ".join(red["notes"]))
+        return
+    cut_ton = red["reference_ton"] - red["plan_ton"]
+    c1, c2, c3 = st.columns(3)
+    c1.metric("탄소 감축", f'{red["reduction_pct"]:.2f}%', f"−{ton(cut_ton)}", delta_color="off")
+    c2.metric("운영비 증가", f'{red["cost_increase_pct"]:+.2f}%',
+              won(red["plan_cost_won"] - red["reference_cost_won"]), delta_color="off")
+    c3.metric("감축 비용", f'{red["abatement_cost_krw_per_ton"]:,.0f} 원/tCO2'
+              if red["abatement_cost_krw_per_ton"] is not None else "—")
+    badges = kpi_badge(ctx.settings, "carbon_cut_pct", "탄소 감축", red["reduction_pct"])
+    if red["cost_reduction_pct"] is not None:
+        badges += kpi_badge(ctx.settings, "milp_saving_pct", "감축 후 절감률",
+                            red["cost_reduction_pct"])
+    html(badges)
+    st.dataframe(
+        logic.carbon_reduction_by_fuel(red, COLLECTOR_FUEL_KO), hide_index=True,
+        width="stretch",
+        column_config={
+            "발전량 변화(MWh)": st.column_config.NumberColumn(format="%+d"),
+            "배출량 변화(tCO2)": st.column_config.NumberColumn(format="%+d"),
+        },
+    )
+    units = logic.carbon_reduction_units(red, COLLECTOR_FUEL_KO)
+    if not units.empty:
+        st.dataframe(
+            units, hide_index=True, width="stretch",
+            column_config={
+                "발전량 변화(MWh)": st.column_config.NumberColumn(format="%+d"),
+                "가동 시간 변화(h)": st.column_config.NumberColumn(format="%+d"),
+                "기동 횟수 변화": st.column_config.NumberColumn(format="%+d"),
+            },
+        )
+    failed = [name for name, ok in red["checks"].items() if not ok]
+    st.caption(
+        f'같은 수요·예비율·ESS 조건에서 배출 상한 {red["cap_ton"]:,.0f} tCO2 를 걸고 다시 푼 '
+        f'계획이다 (풀이 {red["status"]}, {red["elapsed_s"]:.1f}초). 연료비가 싼 석탄을 줄이고 '
+        "LNG 로 옮기는 것이 감축 수단이라 운영비가 오른다 — 비용·탄소 trade-off "
+        "(docs/formulation.md 6.2). 기본 급전 계획과 비용 절감률 KPI 는 비용 최소 해를 "
+        "그대로 쓴다. 제약 재검증 "
+        + ("전 항목 통과." if not failed else f'위반: {", ".join(failed)}.')
+    )
+
+
+@st.cache_data(ttl=CFG.api.ttl_range_s, show_spinner="비용–탄소 Pareto 계산 중…")
+def fetch_pareto(base_url: str, targets: tuple[float, ...], use_ess: bool,
+                 timeout: float) -> ApiResult:
+    """POST /dispatch/pareto. 사용자가 요청할 때만 부른다 (여러 번 푸는 분석이다)."""
+    return logic.call_api(
+        "POST", f"{base_url}{API_PREFIX}/dispatch/pareto",
+        payload={"reduction_targets_pct": list(targets), "use_ess": use_ess,
+                 "ess_mode": "cost", "carbon_accounting": "configured",
+                 "include_units": False},
+        timeout=timeout,
+    )
+
+
+def _render_carbon_pareto(ctx: Context) -> None:
+    """비용–탄소 Pareto 표본 (보너스). 접힌 채로 두고 버튼을 눌렀을 때만 호출한다."""
+    with st.expander("비용–탄소 Pareto 곡선 (여러 감축 목표 비교)"):
+        st.caption(
+            "같은 수요·예비율·ESS 조건에서 감축 목표별로 MILP 를 다시 풀어 배출량과 운영비를 "
+            "비교한다 (POST /dispatch/pareto). 여러 번 푸는 분석이라 요청할 때만 계산한다."
+        )
+        with st.form("carbon_pareto"):
+            targets = st.multiselect("감축 목표 (%)", [1, 3, 5, 10, 20], default=[5, 10])
+            use_ess = st.checkbox("ESS 사용", value=True)
+            submitted = st.form_submit_button("Pareto 계산")
+        if submitted:
+            if not ctx.health["dispatch_api"].ok:
+                st.error("dispatch_api 응답이 없어 계산할 수 없다.")
+                return
+            res = fetch_pareto(ctx.urls["dispatch_api"], tuple(float(t) for t in targets),
+                               use_ess, ctx.settings.api.timeout_pareto_s)
+            if not res.ok:
+                st.session_state.pop("vpp_pareto", None)
+                st.error(f"Pareto 분석을 완료하지 못했다: {res.error}")
+            else:
+                st.session_state["vpp_pareto"] = res.data
+        data = st.session_state.get("vpp_pareto")
+        if not data:
+            return
+        st.caption(f'마지막 실행 · {data["timestamps"][0]} ~ {data["timestamps"][-1]} · '
+                   f'{data["elapsed_s"]:.1f}초 · 상태 {data["state"]}')
+        if data["state"] != "complete":
+            st.warning("일부 계획의 계산 또는 검증이 끝나지 않았다. 상태 열을 확인하라.")
+        st.dataframe(pd.DataFrame([{
+            "계획": pareto_plan_label(p["label"]), "상태": p["status"], "검증 통과": p["valid"],
+            "배출량(tCO2)": p["carbon_ton"], "운영비(원)": p["operating_cost_krw"],
+            "탄소 감축(%)": p["reduction_pct"], "비용 증가(%)": p["cost_increase_pct"],
+            "계산 시간(초)": p["elapsed_s"],
+        } for p in data["points"]]), hide_index=True, width="stretch")
+        if data["maximum_reduction_pct"] is not None:
+            st.caption(f'현재 조건의 최대 감축 가능률 {data["maximum_reduction_pct"]:.2f}%.')
+        frontier = [p for p in data["frontier"] if p["carbon_ton"] is not None]
+        if frontier:
+            fig = go.Figure()
+            fig.add_scatter(
+                x=[p["carbon_ton"] for p in frontier],
+                y=[p["operating_cost_krw"] for p in frontier],
+                mode="lines+markers", name="비지배 표본",
+                text=[pareto_plan_label(p["label"]) for p in frontier],
+                hovertemplate="%{text}<br>%{x:,.0f} tCO2<br>%{y:,.0f} 원<extra></extra>",
+                line=dict(color=C_GREEN, width=2),
+                marker=dict(size=9, color=C_GREEN),
+            )
+            fig.update_xaxes(title_text="배출량(tCO2)")
+            fig.update_yaxes(title_text="운영비(원)")
+            st.plotly_chart(_compact_chart(fig, H_SMALL), width="stretch",
+                            key="c_pareto", config=NO_BAR)
+        st.caption("frontier 는 계산한 점 중 비지배 표본이며 전체 Pareto 집합이 아니다. "
+                   "계수 기준: " + data["accounting_basis"])
+
+
 def render_carbon_detail(ctx: Context) -> None:
-    """비용-탄소 Trade-off (MILP 계획) + 발전원별 배출 내역 (실측 하루, 없으면 분석 기간 목업)."""
+    """비용-탄소 Trade-off·탄소 감축 방법·Pareto(요청 시) + 발전원별 배출 내역.
+
+    배출 내역은 실측 하루, 없으면 분석 기간 목업이다.
+    """
     pair = milp_carbon_pair(ctx)
     if pair is not None:
         with_ess, no_ess = pair
@@ -1426,6 +1615,8 @@ def render_carbon_detail(ctx: Context) -> None:
             "ESS 는 왕복효율 손실만큼 추가 발전이 필요하다 (formulation.md 5.7). Rule-based 는 "
             "ESS 를 쓰지 않아 ESS 없는 MILP 와 같은 조건이다."
         )
+        _render_carbon_reduction(ctx, with_ess)
+        _render_carbon_pareto(ctx)
     if ctx.real is not None:
         real = ctx.real
         panel_title("탄소 분석 (발전원별 배출)", real.tag)
@@ -1460,7 +1651,7 @@ def page_analysis() -> None:
     """분석 상세 — 예측 성능, 최적화 수치, 위기 시나리오 게이지, 배출 내역."""
     ctx = _ctx()
     html('<div class="vpp-topbar"><div class="vpp-title">분석 상세</div>'
-         '<div class="vpp-subtitle">예측 · 최적화 · 위기 시나리오 · 탄소</div></div>')
+         '<div class="vpp-subtitle">예측 · 최적화 · 위기 시나리오 · 탄소 감축</div></div>')
     with st.container(border=True):
         render_forecast(ctx)
     c1, c2 = st.columns([1, 1])
@@ -1607,8 +1798,6 @@ def _run_pages() -> None:
                 url_path="analysis"),
         st.Page(page_data, title="시간대 데이터", icon=":material/table_chart:",
                 url_path="data"),
-        st.Page(page_carbon.render, title="탄소 감축 분석",
-                icon=":material/eco:", url_path="carbon"),
         st.Page(
             page_scenarios.render, title="시나리오 생성기",
             icon=":material/stacked_line_chart:", url_path="scenarios",
@@ -1619,7 +1808,7 @@ def _run_pages() -> None:
         ),
     ])
     # 사이드바 조정은 페이지 밖(여기)에서 그려야 페이지를 옮겨도 값이 유지된다.
-    if nav.url_path not in ("scenarios", "stochastic-test", "carbon"):
+    if nav.url_path not in ("scenarios", "stochastic-test"):
         st.session_state["vpp_ctx"] = build_context()
     nav.run()
 

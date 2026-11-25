@@ -262,6 +262,10 @@ class MilpRequest(BaseModel):
     ess_peak_target_pct: float | None = Field(None, ge=0, lt=100)  # peak_shaving 목표
     carbon_cap_ton: float | None = Field(None, ge=0, allow_inf_nan=False)
     carbon_accounting: Literal["configured", "lifecycle"] = "configured"
+    # 기본 계획(비용 최소)은 그대로 두고 탄소 감축 계획을 같은 응답에 덧붙인다.
+    include_carbon_reduction: bool = True
+    # None 이면 config/carbon.yaml 의 reduction.default_target_pct (기본 5%)
+    carbon_reduction_target_pct: float | None = Field(None, gt=0, lt=100, allow_inf_nan=False)
     include_baseline: bool = True              # Rule-based 비교와 절감률을 같이 계산
     include_units: bool = True                 # 유닛 x 시간 급전값 (응답이 커진다)
     solver: SolverOptions | None = None
@@ -348,6 +352,58 @@ class EssSummary(BaseModel):
     target_met: bool
 
 
+class CarbonUnitChange(BaseModel):
+    """감축 계획에서 유닛의 운전이 어떻게 바뀌었는지 (기준 = 비용 최소 계획)."""
+
+    unit_id: str
+    fuel: str
+    energy_mwh: float
+    energy_delta_mwh: float
+    on_hours: int
+    on_hours_delta: int
+    startups: int
+    startups_delta: int
+
+
+class CarbonReduction(BaseModel):
+    """같은 입력에서 배출 상한을 걸고 다시 푼 계획. 기본 계획을 대체하지 않는다.
+
+    과제 정량 기준에 탄소 항목은 없으므로(VPP_PROJECT_CONTEXT.md 4장) 응답의 주
+    계획과 비용 절감률 KPI 는 비용 최소 해를 유지하고, 이 블록만 감축 계획을 담는다.
+    """
+
+    target_pct: float                   # 기준 계획 대비 목표 감축률
+    cap_ton: float                      # 적용한 배출 상한
+    status: SolveStatus
+    valid: bool                         # 해가 있고 제약 재검증을 모두 통과했는지
+    optimal: bool
+    achieved: bool                      # 목표 감축률을 실제로 달성했는지
+    accounting_basis: str
+    factor_unit: str
+
+    reference_ton: float                # 비용 최소 계획의 배출량
+    plan_ton: float | None = None
+    reduction_pct: float | None = None
+    max_reduction_pct: float | None = None   # 목표 미달 시 현재 조건의 최대 감축률
+
+    reference_cost_won: float           # 비용 최소 계획의 운영비 (연료비 + 기동비)
+    plan_cost_won: float | None = None
+    cost_increase_pct: float | None = None
+    cost_reduction_pct: float | None = None  # 감축 계획의 Rule-based 대비 절감률
+    abatement_cost_krw_per_ton: float | None = None   # 1 tCO2 감축 비용
+
+    hourly_ton: list[float] = Field(default_factory=list)
+    by_fuel_ton: dict[str, float] = Field(default_factory=dict)
+    by_fuel_delta_mwh: dict[str, float] = Field(default_factory=dict)
+    by_fuel_delta_ton: dict[str, float] = Field(default_factory=dict)
+    unit_changes: list[CarbonUnitChange] = Field(default_factory=list)
+
+    ess: EssSummary | None = None
+    checks: list[CheckItem] = Field(default_factory=list)
+    elapsed_s: float
+    notes: list[str] = Field(default_factory=list)
+
+
 class MilpResponse(BaseModel):
     status: SolveStatus
     method: str = "milp"
@@ -359,6 +415,8 @@ class MilpResponse(BaseModel):
     units: list[UnitHour] | None = None
     merit_order: list[MeritOrderEntry]
     carbon: CarbonSummary
+    # 탄소 감축 계획 (기본 ON). 해가 없거나 분석을 생략하면 null — notes 에 이유를 남긴다
+    carbon_reduction: CarbonReduction | None = None
     ess: EssSummary | None = None         # use_ess: false 면 null
     constraints: list[CheckItem]          # 필수 제약 위반 검사 (해를 다시 검증한 결과)
     baseline: BaselineComparison | None = None
@@ -375,6 +433,8 @@ class ParetoRequest(MilpRequest):
     total_time_limit_s: float | None = Field(None, gt=0, le=120, allow_inf_nan=False)
     reduction_targets_pct: list[float] = Field(default_factory=list, max_length=10)
     include_units: bool = False
+    # 감축 점은 reduction_targets_pct 로 지정한다. 기본 MILP 의 감축 블록은 쓰지 않는다
+    include_carbon_reduction: Literal[False] = False
 
 
 class CarbonUnitOperation(BaseModel):

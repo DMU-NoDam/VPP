@@ -23,6 +23,10 @@ targets:
   vss_pct: {value: 3.0, unit: "%", source: 과제 원문 L90 (이상)}
   ess_peak_cut_pct: {value: 5.0, unit: "%", source: 과제 원문 L103 (이상)}
   crisis_reserve_pct: {value: 5.0, unit: "%", source: 과제 원문 L109 (이상)}
+  carbon_cut_pct:
+    value: 5.0
+    unit: "%"
+    source: "[팀 설정] 과제 정량 기준에 탄소 항목 없음. config/carbon.yaml reduction.default_target_pct 와 같은 값"
 
 # ── API 호출 ─────────────────────────────────────────────────────────────────
 
@@ -31,6 +35,10 @@ api:
   timeout_short: {value: 5.0, unit: s, source: "[가정] collector 조회·미리 계산 결과 조회 (바로 응답)"}
   timeout_health: {value: 2.0, unit: s, source: "[가정] /health. 꺼진 서비스 때문에 화면이 오래 멈추지 않게"}
   timeout_scenarios: {value: 30, unit: s, source: "[가정] POST /scenarios (표본 생성·축약)"}
+  timeout_pareto:
+    value: 120
+    unit: s
+    source: "[가정] POST /dispatch/pareto. config/carbon.yaml 의 총 시간 예산 30초 + 모델 생성·직렬화 여유"
   stochastic_timeout_margin:
     value: 60.0
     unit: s
