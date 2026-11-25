@@ -127,6 +127,68 @@ def apply_horizon_pi(y_pred: np.ndarray, margins: np.ndarray,
     return lower, upper
 
 
+# --- "몇 시간 뒤 × 몇 시" 가변 폭 (normalized conformal) --------------------------
+#
+# 이어서 예측(recursive)하는 모델은 "몇 시간 뒤"만으로 폭을 정하면, 오차가 큰 낮 시간과
+# 오차가 작은 새벽에 같은 폭을 씌우게 된다 (수요는 맑은/흐린 날 낮 오차가 특히 크다).
+# 그래서 폭 = q × (몇 시간 뒤 크기) × (몇 시 배율) 로 나눠서 정한다.
+#   1) horizon_scale[h]: h시간 뒤 예측의 평균 절대오차 (h±pool 묶음, 단조 증가)
+#   2) hour_scale[k]   : 오차를 horizon_scale로 나눈 값의 k시 평균 (평균 1이 되도록 정규화)
+#   3) q               : |오차| / (horizon_scale × hour_scale) 의 conformal 분위수
+# q를 calibration 오차에서 한 번에 정하므로 전체 커버리지 보장(split conformal)은 그대로이고,
+# 폭만 어려운 시간대에 넓게, 쉬운 시간대에 좁게 나뉜다.
+
+
+def target_hours(origins, n_steps: int) -> np.ndarray:
+    """(n_origins, n_steps) 각 예측 칸이 가리키는 시각(0~23시). 첫 칸 = origin 시각."""
+    start = np.array([int(o.hour) for o in origins])
+    return (start[:, None] + np.arange(n_steps)[None, :]) % 24
+
+
+def compute_horizon_hour_pi(abs_residuals: np.ndarray, hours: np.ndarray,
+                            confidence: float = 0.9, pool: int = 3,
+                            hour_pool: int = 1) -> dict:
+    """(n_origins, H) 절대오차 + 같은 모양의 시각(0~23) -> 가변 폭 PI 파라미터 dict."""
+    res = np.asarray(abs_residuals, dtype=float)
+    hrs = np.asarray(hours, dtype=int)
+    n_steps = res.shape[1]
+
+    horizon_scale = np.empty(n_steps)
+    for h in range(n_steps):
+        lo, hi = max(0, h - pool), min(n_steps, h + pool + 1)
+        horizon_scale[h] = np.nanmean(res[:, lo:hi])
+    horizon_scale = np.maximum.accumulate(np.maximum(horizon_scale, 1e-9))
+
+    rel = res / horizon_scale[None, :]
+    hour_scale = np.empty(24)
+    for k in range(24):
+        near = [(k + d) % 24 for d in range(-hour_pool, hour_pool + 1)]
+        vals = rel[np.isin(hrs, near)]
+        hour_scale[k] = np.nanmean(vals) if np.isfinite(vals).any() else 1.0
+    hour_scale = np.maximum(hour_scale, 1e-6)
+    hour_scale = hour_scale / hour_scale.mean()
+
+    scale = horizon_scale[None, :] * hour_scale[hrs]
+    score = (res / scale).ravel()
+    q = conformal_quantile(score[~np.isnan(score)], confidence)
+    return {"horizon_scale": horizon_scale, "hour_scale": hour_scale, "q": q,
+            "margins": q * horizon_scale}  # margins: 하루 평균 배율(1) 기준 참고값
+
+
+def apply_horizon_hour_pi(y_pred: np.ndarray, horizon_scale: np.ndarray,
+                          hour_scale: np.ndarray, q: float, hours: np.ndarray,
+                          floor: float | None = 0.0) -> tuple[np.ndarray, np.ndarray]:
+    """i번째 예측값(시각 hours[i])에 q × horizon_scale[i] × hour_scale[시각] 폭을 씌운다."""
+    y_pred = np.asarray(y_pred, dtype=float)
+    hz = np.asarray(horizon_scale, dtype=float)[: len(y_pred)]
+    hs = np.asarray(hour_scale, dtype=float)[np.asarray(hours, dtype=int)]
+    m = q * hz * hs
+    lower, upper = y_pred - m, y_pred + m
+    if floor is not None:
+        lower = np.maximum(lower, floor)
+    return lower, upper
+
+
 if __name__ == "__main__":
     import sys
     from pathlib import Path

@@ -11,6 +11,10 @@ router.py는 이 모듈을 호출하기만 하고, HTTP 관련 코드는 여기 
           학습하고, 마지막에 설비용량을 곱한다 (태양광 설비가 계속 늘어나는 걸 반영).
 - wind  : direct — 기상 + 달력만으로 각 시각의 발전량(MW)을 바로 예측.
 
+서빙 모델 (model="auto"일 때, models/saved/model_comparison.md 비교 결과로 정함):
+- demand: LSTM, solar: LSTM, wind: LSTM (기준 통과 모델 중 더 정확한 쪽)
+  LSTM 파일/torch가 없으면 자동으로 LightGBM으로 대체한다.
+
 미래 기상(기온/일사량/풍속)은 원래 기상청 "예보"를 써야 하지만, 예보 API가 아직 없어서
 data_client.get_weather로 해당 시각의 "관측값"을 예보값 대용으로 쓴다.
 관측값도 없는 시각(데이터 끝 이후)은 과거 데이터의 "시간대별 평균"으로 채운다.
@@ -19,6 +23,7 @@ data_client.get_weather로 해당 시각의 "관측값"을 예보값 대용으�
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import lightgbm as lgb
@@ -28,9 +33,10 @@ import pandas as pd
 from data_client import get_mock_data, get_weather, weather_columns
 from features import TARGET_COLUMN, build_exog_features, build_features, feature_columns
 from metrics import evaluate
-from pi import apply_horizon_pi, apply_hourly_pi, fit_conformal
+from pi import apply_horizon_hour_pi, apply_horizon_pi, apply_hourly_pi, fit_conformal
 
-SAVED_DIR = Path(__file__).resolve().parent / "models" / "saved"
+MODELS_DIR = Path(__file__).resolve().parent / "models"
+SAVED_DIR = MODELS_DIR / "saved"
 
 STRATEGY = {"demand": "recursive", "solar": "direct", "wind": "direct"}
 TARGET_MODE = {"demand": "mw", "solar": "cf", "wind": "mw"}  # cf = 이용률(발전량/설비용량)
@@ -39,24 +45,57 @@ TARGET_MODE = {"demand": "mw", "solar": "cf", "wind": "mw"}  # cf = 이용률(�
 _CONTEXT_BEFORE_H = 24
 _CONTEXT_AFTER_H = 12
 
+# model="auto"일 때 target별로 쓰는 모델 (같은 test 구간에서 기준을 통과한 모델 중 더 정확한 쪽)
+SERVING_MODEL = {"demand": "lstm", "solar": "lstm", "wind": "lstm"}
+
 # 하위 호환: 예전 코드에서 쓰던 이름
 FEATURE_COLUMNS = {t: feature_columns(t) for t in TARGET_COLUMN}
 
 
-def _load_model(target: str, model_name: str) -> tuple[lgb.Booster, str]:
-    """model_name이 "auto"면 lightgbm을 쓴다 (비교 결과 LightGBM이 더 정확했음)."""
-    if model_name == "lstm":
-        lstm_path = SAVED_DIR / f"{target}_lstm.pt"
-        if not lstm_path.exists():
-            raise FileNotFoundError(
-                f"{lstm_path} 없음 — 본인 컴퓨터에서 models/train_lstm.py 먼저 실행 필요"
-            )
-        raise NotImplementedError("LSTM 서빙 로직은 아직 미구현 (LightGBM 사용 권장)")
+class ModelLoadError(Exception):
+    """모델 파일은 있지만 읽을 수 없을 때 (손상, 형식 불일치 등)."""
 
+
+def _load_model(target: str, model_name: str = "lightgbm") -> tuple[lgb.Booster, str]:
+    """LightGBM 모델을 읽는다. (LSTM은 _load_lstm)"""
     lgbm_path = SAVED_DIR / f"{target}_lgbm.txt"
     if not lgbm_path.exists():
         raise FileNotFoundError(f"{lgbm_path} 없음 — models/train_lgbm.py 먼저 실행 필요")
     return lgb.Booster(model_file=str(lgbm_path)), "lightgbm"
+
+
+def _load_lstm(target: str):
+    """LSTM 모델 + 정규화 통계 + 평가 결과(PI margin, test 성적)를 읽는다.
+
+    반환: (train_lstm 모듈, 모델, 정규화 통계, 평가 dict)
+    - 파일 없음 → FileNotFoundError / torch 미설치 → NotImplementedError / 손상 → ModelLoadError
+    """
+    pt_path = SAVED_DIR / f"{target}_lstm.pt"
+    eval_path = SAVED_DIR / f"{target}_lstm_eval.json"
+    if not pt_path.exists() or not eval_path.exists():
+        raise FileNotFoundError(f"{pt_path.name} / {eval_path.name} 없음 — "
+                                "models/train_lstm.py 먼저 실행 필요")
+    try:
+        import torch
+
+        # torch가 필요해서 LSTM을 쓸 때만 불러온다. "models" 패키지 이름은 dispatch_api/models.py와
+        # 겹칠 수 있어서, models/ 폴더를 경로에 넣고 train_lstm 모듈 이름으로 직접 부른다.
+        if str(MODELS_DIR) not in sys.path:
+            sys.path.insert(0, str(MODELS_DIR))
+        import train_lstm
+    except ImportError as e:
+        raise NotImplementedError("LSTM 예측에는 torch 설치가 필요합니다") from e
+
+    try:
+        ckpt = torch.load(pt_path, map_location="cpu")
+        model = train_lstm.SimpleLSTM(input_size=ckpt["input_size"],
+                                      hidden_size=ckpt.get("hidden_size", train_lstm.HIDDEN_SIZE))
+        model.load_state_dict(ckpt["state_dict"])
+        model.eval()
+        evaluation = json.loads(eval_path.read_text(encoding="utf-8"))
+        return train_lstm, model, ckpt["stats"], evaluation
+    except Exception as e:  # 예전 형식(.pt)이거나 손상된 파일
+        raise ModelLoadError(f"{pt_path.name} 로드 실패: {e}") from e
 
 
 def _future_exog(target: str, history: pd.DataFrame, horizon_hours: int) -> pd.DataFrame:
@@ -158,6 +197,27 @@ def backtest(target: str, model, raw: pd.DataFrame,
 recursive_backtest = backtest
 
 
+def _lstm_forecast(target: str, train_lstm, model, stats: dict, history: pd.DataFrame,
+                   horizon_hours: int) -> pd.DataFrame:
+    """LSTM으로 미래 horizon_hours 시간을 이어서 예측한다.
+
+    과거 구간(history)과 미래 구간(달력·기상만 있고 정답은 비어 있음)을 이어 붙인 뒤,
+    학습 때 평가에 쓴 것과 같은 함수(train_lstm.recursive_backtest)로 예측한다.
+    """
+    target_col = TARGET_COLUMN[target]
+    past = train_lstm.prepare(history, target)
+    future = train_lstm.add_cyclic_features(_future_exog(target, history, horizon_hours))
+    future["y"] = np.nan
+    future[target_col] = np.nan
+    if "capacity_mw" in past:
+        future["capacity_mw"] = float(past["capacity_mw"].iloc[-1])
+    combined = pd.concat([past, future], ignore_index=True)
+
+    out = train_lstm.recursive_backtest(train_lstm.predict_fn(model), combined, target, stats,
+                                        [future["datetime"].iloc[0]], horizon_hours)
+    return pd.DataFrame({"datetime": future["datetime"], "predicted": out["pred"][0]})
+
+
 def _load_pi(target: str) -> dict | None:
     """train_lgbm.py가 저장한 PI margin + 시험구간 성적을 읽는다. 없으면 None."""
     path = SAVED_DIR / f"{target}_pi.json"
@@ -169,10 +229,14 @@ def _load_pi(target: str) -> dict | None:
 def interval(pi_info: dict, preds: np.ndarray,
              datetimes: pd.Series | pd.DatetimeIndex) -> tuple[np.ndarray, np.ndarray]:
     """pi.json의 margin 종류에 맞게 예측구간을 씌운다.
-    horizon: "몇 시간 뒤"별 margin (수요) / hourly: "몇 시"별 margin (태양광·풍력)"""
+    horizon_hour: "몇 시간 뒤 × 몇 시" 가변 폭 (이어서 예측하는 모델: 수요 LightGBM, LSTM)
+    horizon: "몇 시간 뒤"별 margin (예전 저장 파일 호환) / hourly: "몇 시"별 margin (direct)"""
+    hours = pd.DatetimeIndex(datetimes).hour
     if pi_info["pi_type"] == "hourly":
-        hours = pd.DatetimeIndex(datetimes).hour
         return apply_hourly_pi(preds, np.array(pi_info["margins"]), hours)
+    if pi_info["pi_type"] == "horizon_hour":
+        return apply_horizon_hour_pi(preds, pi_info["horizon_scale"], pi_info["hour_scale"],
+                                     pi_info["q"], hours)
     return apply_horizon_pi(preds, np.array(pi_info["margins"]))
 
 
@@ -181,16 +245,43 @@ def run_forecast(target: str, start_date: str, end_date: str,
                   pi_method: str = "conformal") -> dict:
     """단일 target에 대한 예측 + PI + metrics를 전부 만들어서 반환.
 
-    metrics: pi.json이 있으면 "학습에 안 쓴 시험 구간에서 API와 같은 방식으로 예측한" 성적
-             (24h 이하 요청이면 24h 성적, 그보다 길면 168h 성적)을 돌려준다.
+    model_name: "auto"면 SERVING_MODEL(target별 더 정확한 모델), "lightgbm"/"lstm"이면 그 모델.
+                auto인데 LSTM을 쓸 수 없으면(파일·torch 없음) LightGBM으로 대체한다.
+    metrics: 저장된 평가 파일이 있으면 "학습에 안 쓴 시험 구간에서 API와 같은 방식으로 예측한"
+             성적(24h 이하 요청이면 24h 성적, 그보다 길면 168h 성적)을 돌려준다.
     """
-    model, model_used = _load_model(target, model_name)
-    raw = get_mock_data(target, start=start_date, end=end_date)
+    if pi_method != "conformal":
+        # quantile regression 구간은 아직 구현하지 않았다.
+        # 조용히 conformal로 바꾸지 않고 501로 알린다.
+        raise NotImplementedError(
+            f"pi_method={pi_method!r}는 아직 지원하지 않음 (conformal만 구현)")
 
-    forecast_df = forecast_path(target, model, raw, horizon_hours)
+    raw = get_mock_data(target, start=start_date, end=end_date)
+    choice = SERVING_MODEL[target] if model_name == "auto" else model_name
+
+    lstm = None
+    if choice == "lstm":
+        try:
+            lstm = _load_lstm(target)
+        except (FileNotFoundError, NotImplementedError, ModelLoadError) as e:
+            if model_name != "auto":
+                raise
+            print(f"[forecast_engine] {target}: LSTM 사용 불가({e}) → LightGBM으로 대체")
+
+    if lstm is not None:
+        train_lstm, lstm_model, stats, evaluation = lstm
+        forecast_df = _lstm_forecast(target, train_lstm, lstm_model, stats, raw, horizon_hours)
+        model_used = "lstm"
+        model = None
+        pi_info = {k: evaluation[k] for k in ("margins", "horizon_scale", "hour_scale", "q",
+                                              "test_metrics") if k in evaluation}
+        pi_info["pi_type"] = evaluation.get("pi_type", "horizon")
+    else:
+        model, model_used = _load_model(target)
+        forecast_df = forecast_path(target, model, raw, horizon_hours)
+        pi_info = _load_pi(target)
     preds = forecast_df["predicted"].to_numpy()
 
-    pi_info = _load_pi(target)
     if pi_info is not None and "pi_type" in pi_info:
         lower, upper = interval(pi_info, preds, forecast_df["datetime"])
         key = "24h" if horizon_hours <= 24 else "168h"

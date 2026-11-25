@@ -1517,8 +1517,10 @@ def render_forecast(ctx: Context) -> None:
                    "점선 왼쪽이 24h ahead 구간.")
         return
 
-    # forecast_api 지표는 정의가 스펙 지표와 달라 기준 배지는 참고용이다 (logic.parse_forecast)
-    badges = kpi_badge(settings, "mape_24h_pct", "MAPE 1h", metrics["mape_1h_pct"])
+    # forecast_api 지표는 시험 구간에서 API 와 같은 방식으로 잰 성적이다 (logic.parse_forecast)
+    horizon = metrics["mape_horizon"]
+    badges = kpi_badge(settings, f"mape_{horizon}_pct", f"MAPE {horizon}",
+                       metrics[f"mape_{horizon}_pct"])
     badges += kpi_badge(settings, "pi_coverage_pct", "PI Coverage", metrics["pi_coverage_pct"])
     for code, label in (("solar", "태양광"), ("wind", "풍력")):
         if f"nmae_{code}_pct" in metrics:
@@ -1528,9 +1530,8 @@ def render_forecast(ctx: Context) -> None:
     re_start = metrics.get("solar_start")
     st.caption(
         f"{metrics['model']} · 예측 시작 {fc.ts.iloc[0]:%m/%d %H}시 (수요 데이터 끝 다음 시각). "
-        "지표는 forecast_api 가 보정 구간에서 잰 값이다 — MAPE 는 1시간 앞 예측이라 "
-        "24h·168h 기준과 다르고, nMAE 는 실측 평균 기준, Coverage 는 구간을 맞춘 같은 "
-        "구간에서 잰 값이다. 168h MAPE 는 백테스트가 없어 표시하지 않는다."
+        f"지표는 forecast_api 가 학습에 안 쓴 시험 구간(2주)에서 {horizon} 를 실제로 이어서 "
+        "예측해 잰 값이다. nMAE 는 설비용량 기준, Coverage 는 같은 시험 구간의 90% 구간 적중률."
         + (f" 태양광·풍력 예측은 {re_start:%m/%d}부터 (발전원 데이터 끝)." if re_start else "")
     )
 

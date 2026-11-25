@@ -8,7 +8,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, HTTPException
 
-from forecast_engine import run_forecast
+from forecast_engine import ModelLoadError, run_forecast
 from schemas import ForecastRequest, ForecastResponse
 
 router = APIRouter(prefix="/api/v1")
@@ -31,7 +31,7 @@ def forecast(req: ForecastRequest) -> ForecastResponse:
                 model_name=req.model,
                 pi_method=req.pi_method,
             )
-        except FileNotFoundError as e:
+        except (FileNotFoundError, ModelLoadError) as e:
             raise HTTPException(
                 status_code=500,
                 detail={"result_code": "21", "result_msg": "MODEL_LOAD_ERROR", "detail": str(e)},

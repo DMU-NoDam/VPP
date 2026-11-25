@@ -7,6 +7,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
+# 수요·풍력 LSTM 예측에 torch가 필요하다. 기본 빌드는 GPU용이라 수 GB여서 CPU 전용을 먼저 설치한다.
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
