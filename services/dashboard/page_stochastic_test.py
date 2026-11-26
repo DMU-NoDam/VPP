@@ -19,6 +19,9 @@ import streamlit as st
 import vss_mix as mix
 
 SCENE = Path(__file__).with_name("scene3d.html")
+# three.js r128 (MIT). CDN 대신 이 파일들을 HTML 에 넣어 인터넷 없이도 3D 가 뜨게 한다
+VENDOR = Path(__file__).with_name("vendor")
+VENDOR_FILES = ("three.min.js", "OrbitControls.js")
 APP_HEIGHT = 860  # scene3d.html 의 #app 높이(840) + 여백
 
 
@@ -30,7 +33,10 @@ def load_data() -> dict | None:
 
 @st.cache_data
 def scene_template() -> str:
-    return SCENE.read_text(encoding="utf-8")
+    html = SCENE.read_text(encoding="utf-8")
+    for name in VENDOR_FILES:
+        html = html.replace(f"/*__VENDOR:{name}__*/", (VENDOR / name).read_text(encoding="utf-8"))
+    return html
 
 
 def scene_html(payload: dict) -> str:

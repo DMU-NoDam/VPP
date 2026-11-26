@@ -160,7 +160,7 @@
         <div class="seg" id="blocks"></div>
         <div class="rng">내일 수요 <input type="range" id="scn" min="0" step="1"><b id="scnVal"></b></div>
       </div>
-      <div id="err">3D 장면을 불러오지 못했습니다.<br>three.js 를 인터넷(CDN)에서 받아야 합니다.</div>
+      <div id="err">3D 장면을 불러오지 못했습니다.<br>브라우저가 WebGL 을 지원하는지 확인하세요.</div>
     </div>
   </main>
 
@@ -192,8 +192,9 @@
   </aside>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<!-- three.js r128 + OrbitControls: 인터넷 없이도 뜨도록 page_stochastic_test.scene_template 이 vendor/ 파일을 끼워 넣는다 -->
+<script>/*__VENDOR:three.min.js__*/</script>
+<script>/*__VENDOR:OrbitControls.js__*/</script>
 <script>
 const VM = __DATA__;
 // 발전원 색은 대시보드 다른 탭과 같다 (vss_mix.COLOR = app.py FUEL_COLOR)

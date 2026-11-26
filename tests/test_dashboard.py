@@ -938,6 +938,16 @@ def test_two_stage_scene_html_cannot_close_script_tag() -> None:
     assert "</script><b>" not in html and r"<\/script>" in html
 
 
+def test_two_stage_scene_html_needs_no_internet() -> None:
+    # 발표장처럼 인터넷이 없어도 3D 가 떠야 한다: three.js 를 CDN 이 아니라 HTML 안에 넣는다
+    sys.path.insert(0, str(DASHBOARD_DIR))
+    import page_stochastic_test as page
+
+    html = page.scene_html({})
+    assert "<script src=" not in html
+    assert "THREE.OrbitControls" in html and "REVISION" in html
+
+
 # ── collector 실측 ───────────────────────────────────────────────────────────
 
 
