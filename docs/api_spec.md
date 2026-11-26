@@ -143,7 +143,8 @@ UC 포함 경제급전 MILP. 스키마는 `shared/schemas.py` 의 `MilpRequest` 
 | 필드 | 뜻 |
 |---|---|
 | `horizon_h` | 1~168, 기본 24 |
-| `net_demand_mw` | 순수요 배열(MW, 길이 = `horizon_h`). 수요 - (태양광+풍력+신재생). 비우면 수집 데이터의 **최신 연속 구간**을 쓴다 |
+| `net_demand_mw` | 순수요 배열(MW, 길이 = `horizon_h`). 수요 - (태양광+풍력+신재생). 비우면 `demand_source` 를 따른다 |
+| `demand_source` | `net_demand_mw` 가 비었을 때 수요 출처. `forecast`(기본): forecast_api Day-ahead 예측의 순수요 (수요 - 태양광 - 풍력 - 기저 신재생 최근 실측 평균), `horizon_h` = 24 만 지원. 예측을 못 받으면 `data` 로 대신하고 `notes` 에 사유를 남긴다. `data`: 수집 데이터의 **최신 연속 구간** |
 | `start` | `net_demand_mw` 의 첫 시각. 비우면 현재 시(時), tz-aware |
 | `reserve_ratio` | 예비율 요건. 비우면 `config/settings.yaml` (0.10) |
 | `storage_rate_pct` | 저수율(%). 비우면 `dam_status` 최신 관측 평균 |
@@ -157,8 +158,8 @@ UC 포함 경제급전 MILP. 스키마는 `shared/schemas.py` 의 `MilpRequest` 
 | `include_units` | 유닛 x 시간 급전값 포함 (29기 x 24h = 696행) |
 | `solver` | 요청별 time limit / MIP gap |
 
-forecast_api 연동 전까지는 `net_demand_mw` 를 직접 주는 경로를 쓴다. `/api/v1/scenarios`
-의 시나리오 하나를 `demand - solar - wind` 로 합쳐 넣으면 시나리오별 재실행이 된다.
+`/api/v1/scenarios` 의 시나리오 하나를 `demand - solar - wind` 로 합쳐 `net_demand_mw` 로
+넣으면 시나리오별 재실행이 된다.
 
 ### 응답 (배열은 앞부분만, 숫자는 실제 실행값)
 
@@ -222,11 +223,16 @@ forecast_api 연동 전까지는 `net_demand_mw` 를 직접 주는 경로를 쓴
   },
   "reserve_ratio": 0.1,
   "hydro_factor": 1.0,
+  "demand_source": "forecast",
   "notes": ["유닛별 초기 출력(p_init_mw)이 없어 t=0 의 램프 제약을 생략했다"]
 }
 ```
 
 ### 읽는 법
+
+- `demand_source`: 실제로 푼 수요. `request`(요청의 `net_demand_mw`) / `forecast`
+  (forecast_api 예측) / `data`(수집 실측). 기본 요청인데 `data` 면 예측을 못 받은 것이다.
+  대시보드는 최적화 상세의 "MILP 수요" 줄에 표시한다.
 
 - `status`: `optimal` | `feasible` | `infeasible` | `time_limit` | `error`.
   **`optimal` 이 아니면 급전값은 유효하지 않다** (전부 0). `notes` 에 진단 순서가 담긴다.

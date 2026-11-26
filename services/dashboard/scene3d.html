@@ -1,0 +1,732 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    /* 관제 화면 팔레트: 차콜 그레이 + 청록 포인트 */
+    --bg: #15171a; --panel: #1d2024; --panel2: #262a2f; --line: rgba(255,255,255,.07); --text: #e8eaed;
+    --sub: #8b9099; --accent: #19e6c1; --accent2: #e8eaed; --ok: #19e6c1; --warn: #f5b942; --bad: #ff5d5d;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+               font-family: "Pretendard", "Noto Sans KR", "Malgun Gothic", system-ui, sans-serif; }
+  #app { display: grid; grid-template-columns: 262px 1fr 282px; grid-template-rows: 50px 1fr;
+         height: 840px; gap: 12px; padding: 12px; }
+  header { grid-column: 1 / 4; display: flex; align-items: center; justify-content: space-between;
+           padding: 0 18px; border-radius: 8px; color: var(--text); background: var(--panel);
+           border: 1px solid var(--line); }
+  header .brand { font-size: 17px; font-weight: 700; display: flex; gap: 10px; align-items: center; }
+  header .meta { font-size: 13px; color: var(--sub); }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+  .ph { display: flex; align-items: center; justify-content: flex-start; padding: 12px 14px 6px;
+        font-size: 13px; font-weight: 700; color: var(--text); gap: 8px; }
+  .ph::before { content: ""; flex: none; border-left: 6px solid var(--accent);
+                border-top: 4px solid transparent; border-bottom: 4px solid transparent; }
+  .ph em { margin-left: auto; font-style: normal; color: var(--accent); }
+  /* 왼쪽: 조합 목록 */
+  #left { display: flex; flex-direction: column; overflow: hidden; }
+  #list { overflow-y: auto; padding: 0 8px 10px; }
+  #list::-webkit-scrollbar { width: 6px; } #list::-webkit-scrollbar-thumb { background: #2a3550; border-radius: 3px; }
+  .sep { font-size: 11px; color: var(--sub); padding: 8px 6px 4px; }
+  .item { border: 1px solid var(--line); border-radius: 10px; padding: 7px 9px; margin-bottom: 5px;
+          cursor: pointer; background: var(--panel2); transition: all .2s; }
+  .item:hover { border-color: rgba(25,230,193,.4); }
+  .item.sel { border-color: var(--accent); background: rgba(25,230,193,.10); box-shadow: inset 3px 0 0 var(--accent); }
+  .item .top { display: flex; align-items: center; justify-content: space-between; }
+  .dots { display: flex; gap: 4px; }
+  .dot { width: 9px; height: 9px; border-radius: 3px; background: #363b42; }
+  .dot.on { background: var(--c); }
+  .item .vss { font-weight: 700; font-size: 14px; color: var(--accent2); }
+  .item .name { font-size: 12px; color: var(--sub); margin-top: 3px; white-space: nowrap;
+                overflow: hidden; text-overflow: ellipsis; }
+  .item.short .vss { color: var(--sub); font-weight: 500; }
+  .chip { font-size: 10px; padding: 1px 6px; border-radius: 999px; margin-left: 6px; }
+  .chip.ok { color: var(--ok); background: rgba(25,230,193,.12); }
+  .chip.short { color: var(--warn); background: rgba(245,158,11,.12); }
+  .chip.fail { color: var(--bad); background: rgba(239,68,68,.12); }
+  .delta { font-size: 11px; color: var(--sub); margin-left: 6px; }
+  /* 가운데: 아이소메트릭 장면 + 수요 그래프 */
+  #center { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  #stage { position: relative; flex: 1; overflow: hidden; }
+  #stage canvas { display: block; width: 100%; height: 100%; border-radius: 12px; }
+  #labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+  /* 3D 안의 정보 카드: 제목(색 점 + 이름) + 출력 + 가동/이용률. 뒷줄은 모형 위, 앞줄은 타일 아래 */
+  .lbl { position: absolute; transform: translate(-50%, -100%); min-width: 132px; padding: 7px 10px 6px;
+         border-radius: 4px; background: rgba(32,35,40,.92); border: 1px solid rgba(255,255,255,.09);
+         box-shadow: 0 6px 18px rgba(0,0,0,.35); font-size: 12px; color: var(--sub); transition: opacity .4s; }
+  .lbl::after { content: ""; position: absolute; left: 50%; bottom: -6px; margin-left: -5px; border: 5px solid transparent;
+                border-top-color: rgba(32,35,40,.92); border-bottom: 0; }
+  .lbl .t { display: flex; align-items: center; gap: 6px; color: var(--text); font-weight: 700; font-size: 13px;
+            padding-bottom: 4px; margin-bottom: 3px; border-bottom: 1px solid rgba(255,255,255,.06); }
+  .lbl .t i { width: 8px; height: 8px; border-radius: 2px; background: var(--c); box-shadow: 0 0 6px var(--c); }
+  .lbl .r { display: flex; justify-content: space-between; gap: 14px; line-height: 1.6; }
+  .lbl .r b { color: var(--text); font-weight: 700; }
+  .lbl .r b.on { color: var(--accent); }
+  .lbl.off .t i, .lbl.out .t i { background: #4b5058; box-shadow: none; }
+  .lbl.out { opacity: .45; }
+  .lbl.below { transform: translate(-50%, 10px); }
+  .lbl.below::after { bottom: auto; top: -6px; border-top: 0; border-bottom: 5px solid rgba(32,35,40,.92); }
+  .lbl.hub { border-color: rgba(25,230,193,.45); --c: #19e6c1; }
+  .lbl.hub .t { font-size: 14px; }
+  /* 위쪽 KPI 줄 */
+  #kpis { position: absolute; left: 14px; right: 14px; top: 12px; display: flex; gap: 10px; pointer-events: none; }
+  .kpi { flex: 1; display: flex; align-items: center; gap: 9px; padding: 7px 10px; border-radius: 6px;
+         background: rgba(29,32,36,.88); border: 1px solid var(--line); min-width: 0; }
+  .kpi .ic { flex: none; width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center;
+             border: 1px solid rgba(25,230,193,.5); color: var(--accent); font-size: 13px; font-weight: 700;
+             box-shadow: inset 0 0 8px rgba(25,230,193,.25); }
+  .kpi > div { min-width: 0; }
+  .kpi small { display: block; font-size: 11px; color: var(--sub); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .kpi b { display: block; font-size: 15px; color: var(--text); white-space: nowrap; }
+  #banner { position: absolute; left: 14px; bottom: 64px; padding: 7px 11px; border-radius: 6px;
+            background: rgba(29,32,36,.88); border: 1px solid var(--line); font-size: 13px; font-weight: 700; }
+  #banner small { display: block; color: var(--sub); font-size: 11px; font-weight: 400; margin-top: 2px; }
+  #err { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+         color: var(--sub); font-size: 13px; text-align: center; padding: 20px; }
+  #controls { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); display: flex; gap: 18px;
+              align-items: center; padding: 8px 14px; border-radius: 8px; background: rgba(29,32,36,.94); border: 1px solid var(--line); }
+  .seg { display: flex; white-space: nowrap; }
+  .seg button { background: transparent; color: var(--sub); border: 1px solid var(--line);
+                padding: 3px 11px; cursor: pointer; font-size: 12px; font-family: inherit; }
+  .seg button:first-child { border-radius: 6px 0 0 6px; } .seg button:last-child { border-radius: 0 6px 6px 0; }
+  .seg button.on { color: #10221e; background: var(--accent); border-color: var(--accent); }
+  .rng { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--sub); white-space: nowrap; }
+  .rng input { width: 140px; accent-color: var(--accent); }
+  .rng b { color: var(--text); min-width: 42px; }
+  /* 오른쪽: 지표 */
+  #right { display: flex; flex-direction: column; gap: 12px; overflow: hidden; }
+  #right .panel { padding-bottom: 10px; }
+  .gauge { display: flex; align-items: center; gap: 12px; padding: 2px 14px 0; }
+  .gauge .txt { font-size: 12px; color: var(--sub); line-height: 1.7; }
+  .gauge .txt b { color: var(--text); }
+  .kv { display: flex; justify-content: space-between; padding: 3px 14px; font-size: 12px; color: var(--sub); }
+  .kv b { color: var(--text); font-size: 14px; }
+  .big { font-size: 22px; font-weight: 700; padding: 0 14px; color: var(--accent2); }
+  .big small { font-size: 12px; font-weight: 500; margin-left: 6px; }
+  .bar { padding: 3px 14px; font-size: 11px; color: var(--sub); }
+  .bar .row { display: flex; justify-content: space-between; margin-bottom: 2px; }
+  .bar .row small { color: var(--sub); opacity: .8; }
+  .bar .track { height: 6px; background: var(--panel2); border-radius: 1px; overflow: hidden; }
+  .bar .fill { height: 100%; background: repeating-linear-gradient(90deg, var(--c) 0 5px, transparent 5px 7px);
+               transition: width .5s; }
+  .bar .no { display: inline-grid; place-items: center; width: 16px; height: 16px; margin-right: 6px; border-radius: 3px;
+             font-size: 10px; font-weight: 700; color: #15171a; background: var(--c); }
+  .bar .row b { color: var(--text); font-size: 12px; }
+  .up { color: var(--bad); } .down { color: var(--ok); } .flat { color: var(--sub); }
+  /* 결과 요약: 왼쪽 맨 위에 늘 떠 있는 최고·최저 조합 카드 */
+  #leftcol { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+  #leftcol #left { flex: 1; min-height: 0; }
+  #summary { padding-bottom: 10px; border-color: rgba(25,230,193,.35); box-shadow: 0 0 24px rgba(25,230,193,.07); }
+  #summary .sub { padding: 0 14px 8px; font-size: 11px; color: var(--sub); }
+  .card { margin: 0 8px 6px; padding: 8px 10px; border-radius: 10px; background: var(--panel2);
+          border: 1px solid var(--line); cursor: pointer; transition: transform .15s, border-color .15s;
+          animation: pop .55s cubic-bezier(.2,1.6,.4,1) both; }
+  .card:nth-of-type(2) { animation-delay: .12s; }
+  .card:hover { transform: translateY(-1px); border-color: var(--c); }
+  .card.sel { border-color: var(--c); box-shadow: inset 3px 0 0 var(--c); }
+  @keyframes pop { 0% { transform: scale(.7); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
+  .card .tag { font-size: 11px; font-weight: 700; color: var(--c); }
+  .card .row { display: flex; align-items: baseline; justify-content: space-between; margin-top: 2px; }
+  .card .num { font-size: 24px; font-weight: 800; color: var(--c); line-height: 1.15; }
+  .card .num small { font-size: 12px; font-weight: 600; margin-left: 4px; }
+  .card .nm { font-size: 12px; font-weight: 700; margin-top: 1px; }
+  .item .badge { margin-left: 6px; font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 8px;
+                 color: #15171a; background: var(--c); }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="brand">Two-Stage · VSS 통합 모니터링</div>
+    <div class="meta" id="meta"></div>
+  </header>
+
+  <aside id="leftcol">
+    <div id="summary" class="panel"></div>
+    <div id="left" class="panel">
+      <div class="ph">발전원 조합 <em id="ncombo"></em></div>
+      <div id="list"></div>
+    </div>
+  </aside>
+
+  <main id="center">
+    <div id="stage" class="panel">
+      <canvas id="c"></canvas>
+      <div id="labels"></div>
+      <div id="kpis"></div>
+      <div id="banner"></div>
+      <div id="controls">
+        <div class="seg" id="blocks"></div>
+        <div class="rng">내일 수요 <input type="range" id="scn" min="0" step="1"><b id="scnVal"></b></div>
+      </div>
+      <div id="err">3D 장면을 불러오지 못했습니다.<br>three.js 를 인터넷(CDN)에서 받아야 합니다.</div>
+    </div>
+  </main>
+
+  <aside id="right">
+    <div class="panel">
+      <div class="ph">VSS <em id="vssTarget"></em></div>
+      <div class="gauge">
+        <svg width="112" height="112" viewBox="0 0 112 112">
+          <circle cx="56" cy="56" r="44" fill="none" stroke="#262a2f" stroke-width="11"/>
+          <circle id="arc" cx="56" cy="56" r="44" fill="none" stroke="#19e6c1" stroke-width="11"
+                  stroke-linecap="round" transform="rotate(-90 56 56)" stroke-dasharray="0 999"
+                  style="transition: stroke-dasharray .6s, stroke .6s"/>
+          <line id="tick" x1="56" y1="6" x2="56" y2="18" stroke="#f59e0b" stroke-width="2"/>
+          <text id="vssText" x="56" y="60" text-anchor="middle" fill="#e8eaed" font-size="20" font-weight="700"></text>
+          <text x="56" y="78" text-anchor="middle" fill="#8b9099" font-size="10">VSS</text>
+        </svg>
+        <div class="txt" id="vssInfo"></div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="ph">공급 구성 <em id="blockName"></em></div>
+      <div class="kv" style="padding-top:0"><span>막대 = 출력 / 설비용량</span></div>
+      <div id="bars"></div>
+    </div>
+    <div class="panel">
+      <div class="ph">설비 vs 내일 최대 순수요</div>
+      <div id="capbar"></div>
+    </div>
+  </aside>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+const VM = __DATA__;
+// 발전원 색은 대시보드 다른 탭과 같다 (vss_mix.COLOR = app.py FUEL_COLOR)
+const SHOW = ["원자력", "석탄", "LNG", "수력", "태양광", "풍력"];
+const TARGET = 3.0;      // 과제 기준 VSS ≥ 3%
+const GAUGE_MAX = 20.0;  // 게이지 한 바퀴 = 20%
+const $ = (id) => document.getElementById(id);
+const fmt = (v, d = 1) => v == null ? "-" : (Math.abs(v) < 0.5 * Math.pow(10, -d) ? 0 : v)
+  .toLocaleString("ko-KR", { minimumFractionDigits: d, maximumFractionDigits: d });
+const gw = (mw) => fmt(mw / 1000, 1) + " GW";
+const eok = (v) => v == null ? "-" : Math.round(v).toLocaleString("ko-KR") + "억원";
+const signed = (v, d, unit) => v == null ? "" : (v > 0 ? "+" : "") + fmt(v, d) + unit;
+
+const state = { key: VM.baseline, block: VM.blocks[0], scn: VM.expected };
+const combo = () => VM.combos.find(c => c.key === state.key);
+
+// ── 패널 ─────────────────────────────────────────────────────────────────────
+$("meta").textContent = `계획일 ${VM.plan_day} · forecast_api Day-ahead · 수요 시나리오 10개 (±2~10%)`;
+$("ncombo").textContent = VM.combos.length;
+$("vssTarget").textContent = `기준 ${TARGET}% 이상`;
+$("tick").setAttribute("transform", `rotate(${TARGET / GAUGE_MAX * 360} 56 56)`);
+
+// 전체 켬 대비 VSS 가 가장 오른 / 가장 내린 조합 (공급 충분한 조합끼리만)
+const RANKED = VM.combos.filter(c => c.status === "정상" && c.key !== VM.baseline && c.delta != null)
+  .sort((a, b) => b.delta - a.delta);
+const BEST = RANKED[0], WORST = RANKED.length > 1 ? RANKED[RANKED.length - 1] : null;
+const badge = (c) => c === BEST ? `<span class="badge" style="--c:#22c55e">최고</span>`
+  : c === WORST ? `<span class="badge" style="--c:#f59e0b">최저</span>` : "";
+
+function renderSummary() {
+  if (!BEST) { $("summary").style.display = "none"; return; }
+  const card = (c, tag, color) => {
+    const dots = SHOW.filter(g => VM.groups.includes(g)).map(g =>
+      `<span class="dot ${c.groups.includes(g) ? "on" : ""}" style="--c:${VM.colors[g]}" title="${g}"></span>`).join("");
+    return `<div class="card" data-key="${c.key}" style="--c:${color}"><div class="tag">${tag}</div>
+      <div class="row"><div class="num">${fmt(c.vss, 1)}%<small>${signed(c.delta, 1, "%p")}</small></div>
+      <div class="dots">${dots}</div></div><div class="nm">${c.key}</div></div>`;
+  };
+  const base = VM.combos.find(c => c.key === VM.baseline);
+  $("summary").innerHTML = `<div class="ph">결과 요약 <em>★</em></div>
+    <div class="sub">전체 켬 VSS ${base && base.vss != null ? fmt(base.vss, 1) + "%" : "-"} 대비 · 공급 충분 조합끼리</div>
+    ${card(BEST, BEST.delta > 0 ? "▲ 가장 많이 오른 조합" : "가장 적게 내린 조합", "#22c55e")}
+    ${WORST ? card(WORST, "▼ 가장 많이 내린 조합", "#f59e0b") : ""}`;
+  document.querySelectorAll("#summary .card").forEach(el => el.onclick = () => { state.key = el.dataset.key; update(); });
+}
+
+function renderList() {
+  const groups = [["정상", "공급 충분"], ["공급 부족", "공급 부족 — 설비가 최대 순수요보다 작음"], ["풀이 실패", "풀이 실패"]];
+  let html = "";
+  groups.forEach(([st, title]) => {
+    const items = VM.combos.filter(c => c.status === st);
+    if (!items.length) return;
+    html += `<div class="sep">${title} (${items.length})</div>`;
+    items.forEach(c => {
+      const dots = SHOW.filter(g => VM.groups.includes(g)).map(g =>
+        `<span class="dot ${c.groups.includes(g) ? "on" : ""}" style="--c:${VM.colors[g]}" title="${g}"></span>`).join("");
+      const chip = st === "정상" ? "ok" : st === "공급 부족" ? "short" : "fail";
+      const delta = c.key === VM.baseline ? "기준" : c.delta == null ? "" : signed(c.delta, 1, "%p");
+      html += `<div class="item ${st !== "정상" ? "short" : ""}" data-key="${c.key}">
+        <div class="top"><div class="dots">${dots}</div>
+          <div><span class="vss">${c.vss == null ? "-" : fmt(c.vss, 1) + "%"}</span><span class="delta">${delta}</span></div></div>
+        <div class="name">${c.key}<span class="chip ${chip}">${st}</span>${badge(c)}</div></div>`;
+    });
+  });
+  $("list").innerHTML = html;
+  document.querySelectorAll(".item").forEach(el => el.onclick = () => { state.key = el.dataset.key; update(); });
+}
+
+$("blocks").innerHTML = VM.blocks.map(b => `<button data-b="${b}">${b}</button>`).join("");
+document.querySelectorAll("#blocks button").forEach(b => b.onclick = () => { state.block = b.dataset.b; update(); });
+const scnInput = $("scn");
+scnInput.max = VM.scenarios.length - 1;
+scnInput.value = VM.scenarios.indexOf(VM.expected);
+scnInput.oninput = () => { state.scn = VM.scenarios[+scnInput.value]; update(); };
+
+function shedNow(c) {
+  // 시나리오를 고르면 그날의 부하차단, 평균이면 설비가 모자란 조합만 정전으로 본다
+  if (!c || c.status === "풀이 실패") return true;
+  if (state.scn === VM.expected) return c.status !== "정상";
+  const r = c.scen[state.scn];
+  return r ? r.shed_mwh > 0.5 : false;
+}
+
+function renderPanels() {
+  const c = combo();
+  document.querySelectorAll(".item, #summary .card").forEach(el => el.classList.toggle("sel", el.dataset.key === state.key));
+  document.querySelectorAll("#blocks button").forEach(b => b.classList.toggle("on", b.dataset.b === state.block));
+  $("scnVal").textContent = state.scn;
+  const ok = c.status === "정상";
+  $("banner").innerHTML = `${c.key}<small>${ok ? "공급 충분" : c.status} · 설비 ${gw(c.capacity_mw)} · ${state.block} · 수요 ${state.scn}</small>`;
+
+  const v = c.vss == null ? 0 : Math.max(0, c.vss);
+  const arc = $("arc");
+  arc.setAttribute("stroke-dasharray", `${2 * Math.PI * 44 * Math.min(1, v / GAUGE_MAX)} 999`);
+  arc.setAttribute("stroke", !ok ? "#5b6068" : v >= TARGET ? "#19e6c1" : "#f5b942");
+  $("vssText").textContent = c.vss == null ? "-" : fmt(c.vss, 1) + "%";
+  const dcls = c.delta == null ? "flat" : c.delta > 0.05 ? "up" : c.delta < -0.05 ? "down" : "flat";
+  $("vssInfo").innerHTML = `상한 <b>${c.bound == null ? "-" : fmt(c.bound, 1) + "%"}</b><br>` +
+    (c.key === VM.baseline ? "기준 조합" : `전체 켬 대비 <b class="${dcls}">${signed(c.delta, 1, "%p") || "-"}</b>`) +
+    (ok ? "" : `<br><span style="color:#f5b942">${c.status === "공급 부족" ? "정전 비용이 대부분" : "풀이 실패"}</span>`);
+
+  // 위쪽 KPI 줄: 기대 비용 · 전체 대비 · 고른 날 비용 · 부하차단 · 메인 공급
+  const cd = c.cost_delta_eok;
+  const r = state.scn === VM.expected ? null : c.scen[state.scn];
+  const supNow = c.supply ? c.supply[state.block] : null;
+  const total = supNow ? SHOW.reduce((t, g) => t + (supNow[g] ? supNow[g].mw : 0), 0) : 0;
+  const shedTxt = r ? (r.shed_mwh > 0.5 ? `<span class="up">${fmt(r.shed_mwh, 0)} MWh</span>` : "없음")
+    : (ok ? "없음" : `<span class="up">발생</span>`);
+  const kpi = (ic, label, value) => `<div class="kpi"><span class="ic">${ic}</span><div><small>${label}</small><b>${value}</b></div></div>`;
+  const delta = c.key === VM.baseline ? "기준" : cd == null ? "-"
+    : `<span class="${cd > 0 ? "up" : "flat"}">${cd > 0 ? "+" : ""}${eok(cd)}</span>`;
+  $("kpis").innerHTML =
+    kpi("₩", "내일 기대 비용", eok(c.cost_eok)) +
+    kpi("Δ", "전체 켬 대비", delta) +
+    kpi("◎", state.scn === VM.expected ? "고른 날 비용" : `수요 ${state.scn} 인 날`, r ? eok(r.cost_eok) : "슬라이더로 선택") +
+    kpi("!", "부하차단", shedTxt) +
+    kpi("⚡", `메인 공급 · ${state.block}`, gw(total));
+
+  $("blockName").textContent = state.block;
+  const sup = c.supply ? c.supply[state.block] : null;
+  // 3D 배터리와 같은 값: 막대 = 출력 / 설비용량. 기수·가동률은 여기에만 적는다
+  $("bars").innerHTML = SHOW.map(g => {
+    const s = sup ? sup[g] : { mw: 0, on: 0, units: 0 };
+    const off = VM.groups.includes(g) && !c.groups.includes(g);
+    const cap = VM.capacity_mw[g] || 0, ratio = cap ? s.mw / cap : 0;
+    const units = VM.renewables.includes(g) ? "" : ` · ${off ? 0 : s.on}/${s.units}기`;
+    const right = off ? "제외" : `${gw(s.mw)}${cap ? ` (${Math.round(ratio * 100)}%)` : ""}`;
+    return `<div class="bar"><div class="row"><span><span class="no" style="--c:${VM.colors[g]}">${SHOW.indexOf(g) + 1}</span>${g}<small>${off ? "" : units}</small></span><b>${right}</b></div>
+      <div class="track"><div class="fill" style="--c:${VM.colors[g]};width:${off ? 0 : Math.min(100, ratio * 100)}%"></div></div></div>`;
+  }).join("");
+  const need = VM.peak_net_mw, cap = c.capacity_mw, top = Math.max(need, cap) * 1.05;
+  $("capbar").innerHTML =
+    `<div class="bar"><div class="row"><span>켜 둘 수 있는 설비</span><span>${gw(cap)}</span></div>
+      <div class="track"><div class="fill" style="--c:${cap >= need ? "#19e6c1" : "#ff5d5d"};width:${cap / top * 100}%"></div></div></div>
+     <div class="bar"><div class="row"><span>최대 순수요 (수요 +10%)</span><span>${gw(need)}</span></div>
+      <div class="track"><div class="fill" style="--c:#8b9099;width:${need / top * 100}%"></div></div></div>`;
+}
+
+// ── 3D 발전 단지 (정면) ──────────────────────────────────────────────────────
+// 맨 뒤 가운데 = 메인 발전(전력망 허브: 변전 설비·송전탑·관제동), 그 앞 두 줄 = 발전소 6곳.
+// 가동 중이면 창문·포인트 색에 불이 들어오고 연기·물줄기·터빈이 움직이며 메인으로 전력이 흐른다
+// (출력이 클수록 많고 빠르게). 정지하면 불이 꺼지고, 조합에 없으면 모형이 흐려진다.
+// 타일 앞 가장자리의 누운 배터리 = 출력 / 설비용량.
+const scene3d = (function build() {
+  if (typeof THREE === "undefined" || !THREE.OrbitControls) { $("err").style.display = "flex"; return null; }
+  const host = $("stage"), canvas = $("c");
+  const W = () => host.clientWidth, H = () => host.clientHeight;
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); renderer.setSize(W(), H(), false);
+  renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  const scene = new THREE.Scene();
+  const bgDay = new THREE.Color(0x2a2d32), bgNight = new THREE.Color(0x1a1c1f);
+  const TEAL = new THREE.Color(0x19e6c1), OFF = new THREE.Color(0x3a3f46);
+  scene.background = bgDay.clone();
+  scene.fog = new THREE.Fog(scene.background, 220, 420);
+
+  // 왼쪽 앞에서 비스듬히 내려다보는 관제 화면 시점 (좁은 화각 = 아이소메트릭에 가깝게)
+  const camera = new THREE.PerspectiveCamera(26, W() / H(), 1, 1200);
+  camera.position.set(-128, 196, 228);
+  const controls = new THREE.OrbitControls(camera, canvas);
+  controls.target.set(8, 0, -2); controls.enableDamping = true; controls.enablePan = false;
+  controls.minPolarAngle = .5; controls.maxPolarAngle = 1.0;
+  controls.minAzimuthAngle = -.95; controls.maxAzimuthAngle = .35;
+  controls.minDistance = 180; controls.maxDistance = 420;
+
+  const hemi = new THREE.HemisphereLight(0xf2f4f7, 0x1a1c1f, .7); scene.add(hemi);
+  const sun = new THREE.DirectionalLight(0xffffff, .75);
+  sun.position.set(-60, 110, 80); sun.castShadow = true; sun.shadow.mapSize.set(2048, 2048);
+  Object.assign(sun.shadow.camera, { left: -120, right: 120, top: 120, bottom: -120, near: 1, far: 320 });
+  sun.shadow.bias = -.0005; scene.add(sun);
+  const rim = new THREE.DirectionalLight(0x9ff5e4, .2); rim.position.set(80, 40, -90); scene.add(rim);
+
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(900, 900), new THREE.MeshStandardMaterial({ color: 0x25282c, roughness: 1 }));
+  ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
+  const grid = new THREE.GridHelper(600, 100, 0x33373d, 0x2c2f34); grid.position.y = .02; scene.add(grid);
+
+  // ── 도우미 ──
+  let seed = 7;
+  const rnd = () => (seed = (seed * 9301 + 49297) % 233280) / 233280;
+  function rbox(w, h, d, r = .5) {  // 모서리를 둥글린 상자, 밑면이 y = 0
+    const s = new THREE.Shape(), x = -w / 2 + r, z = -d / 2 + r, ww = w - 2 * r, dd = d - 2 * r;
+    s.moveTo(x, z); s.lineTo(x + ww, z); s.lineTo(x + ww, z + dd); s.lineTo(x, z + dd); s.lineTo(x, z);
+    const g = new THREE.ExtrudeGeometry(s, { depth: Math.max(.01, h - 2 * r), bevelEnabled: true, bevelThickness: r,
+      bevelSize: r, bevelSegments: 3, curveSegments: 4 });
+    g.rotateX(-Math.PI / 2); g.translate(0, r, 0); return g;
+  }
+  const std = (color, o = {}) => new THREE.MeshStandardMaterial(Object.assign({ color, roughness: .62, metalness: .08 }, o));
+  const CONCRETE = 0xd3d6db, STEEL = 0x9aa0a8, DARK = 0x4b5058;
+  const winTex = (() => {  // 창문 띠 (밝은 칸 = 불 켜진 창)
+    const c = document.createElement("canvas"); c.width = 128; c.height = 32; const x = c.getContext("2d");
+    x.fillStyle = "#000"; x.fillRect(0, 0, 128, 32);
+    for (let i = 0; i < 16; i++) { if (rnd() < .82) { x.fillStyle = `rgb(255,${220 + (rnd() * 30 | 0)},${150 + (rnd() * 50 | 0)})`; x.fillRect(i * 8 + 1.5, 6, 5, 20); } }
+    const t = new THREE.CanvasTexture(c); t.wrapS = THREE.RepeatWrapping; return t;
+  })();
+
+  const glowTex = (() => {  // 가운데가 밝고 가장자리로 사라지는 발광
+    const c = document.createElement("canvas"); c.width = c.height = 128; const x = c.getContext("2d");
+    const gr = x.createRadialGradient(64, 64, 8, 64, 64, 64);
+    gr.addColorStop(0, "rgba(255,255,255,1)"); gr.addColorStop(.55, "rgba(255,255,255,.45)"); gr.addColorStop(1, "rgba(255,255,255,0)");
+    x.fillStyle = gr; x.fillRect(0, 0, 128, 128); return new THREE.CanvasTexture(c); })();
+  const plants = {};
+  function part(p, geo, color, x, y, z, o = {}) {  // 모형 조각. 조합에 없으면 같이 흐려진다
+    const m = std(color, Object.assign({ transparent: true }, o));
+    const mesh = new THREE.Mesh(geo, m); mesh.position.set(x, y, z);
+    mesh.castShadow = true; mesh.receiveShadow = true; p.top.add(mesh); p.mats.push(m); return mesh;
+  }
+  function accent(p, geo, x, y, z) {  // 발전원 색 포인트 (가동 중이면 빛난다)
+    const m = std(p.color, { emissive: p.color, emissiveIntensity: 0, transparent: true });
+    const mesh = new THREE.Mesh(geo, m); mesh.position.set(x, y, z); mesh.castShadow = true; p.top.add(mesh);
+    p.mats.push(m); p.accents.push(m); return mesh;
+  }
+  function windows(p, w, h, x, y, z, ry = 0) {  // 건물 벽에 붙이는 창문 띠
+    const t = winTex.clone(); t.needsUpdate = true; t.repeat.set(Math.max(1, w / 6), 1);
+    const m = new THREE.MeshStandardMaterial({ color: 0x1b2333, emissive: 0xffd9a0, emissiveMap: t, emissiveIntensity: 0, transparent: true });
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), m); mesh.position.set(x, y, z); mesh.rotation.y = ry;
+    p.top.add(mesh); p.mats.push(m); p.wins.push(m); return mesh;
+  }
+  function puffs(p, x, y, z, size, color = 0xe5ebf3) {
+    for (let i = 0; i < 7; i++) {
+      const s = new THREE.Mesh(new THREE.SphereGeometry(1, 14, 10), new THREE.MeshStandardMaterial({ color, transparent: true, opacity: 0, roughness: 1 }));
+      s.position.set(x, y, z); p.top.add(s); p.smoke.push({ s, b: new THREE.Vector3(x, y, z), t: i / 7, size });
+    }
+  }
+
+  // ── 배치: 메인은 맨 뒤 가운데, 발전소는 그 앞에 두 줄 (정면에서 서로 덜 가리게) ──
+  const HUB = new THREE.Vector3(0, 0, -64);
+  const ORDER = ["원자력", "석탄", "LNG", "수력", "태양광", "풍력"];
+  const POS = { 원자력: [-34, -8], 석탄: [0, -8], LNG: [34, -8], 수력: [-34, 30], 태양광: [0, 30], 풍력: [34, 30] };
+  ORDER.forEach(name => {
+    const [x, z] = POS[name];
+    const g = new THREE.Group(); g.position.set(x, 0, z); scene.add(g);
+    const color = new THREE.Color(VM.colors[name]);
+    const p = { name, g, color, mats: [], accents: [], wins: [], smoke: [], cur: 0, target: 0, dim: 1, tdim: 1,
+                pos: new THREE.Vector3(x, 0, z),
+                // 앞줄 라벨은 타일 아래에 (위에 두면 뒷줄 타일을 가린다)
+                below: z > 0, anchor: z > 0 ? new THREE.Vector3(x, 0, z + 14) : new THREE.Vector3(x, 25, z) };
+    const tile = new THREE.Mesh(rbox(27, 1.6, 25, .4), std(0x33373d, { roughness: .85, transparent: true }));
+    tile.receiveShadow = true; g.add(tile); p.mats.push(tile.material);
+    const trim = new THREE.Mesh(rbox(27.8, .6, 25.8, .2), std(OFF, { emissive: TEAL, emissiveIntensity: 0, transparent: true }));
+    trim.position.y = -.1; g.add(trim); p.mats.push(trim.material); p.trim = trim.material;
+    // 가동 중이면 판 아래에서 청록 빛이 번진다
+    const glowM = new THREE.MeshBasicMaterial({ map: glowTex, color: TEAL, transparent: true, opacity: 0, depthWrite: false,
+      blending: THREE.AdditiveBlending });
+    const glow = new THREE.Mesh(new THREE.PlaneGeometry(42, 40), glowM); glow.rotation.x = -Math.PI / 2; glow.position.y = .06;
+    g.add(glow); p.glow = glowM;
+    const top = new THREE.Group(); top.position.y = 1.6; g.add(top); p.top = top;
+    // 누운 배터리 (출력 / 설비)
+    const BL = 19, BT = 2.2, BW = 3.4;
+    const batt = new THREE.Group(); batt.position.set(-1, 1.6 + BT / 2 + .2, 10.4); g.add(batt);
+    batt.add(new THREE.Mesh(rbox(BL, BT, BW, .5).translate(0, -BT / 2, 0),
+      new THREE.MeshStandardMaterial({ color: 0x15171a, transparent: true, opacity: .4, depthWrite: false })));
+    batt.add(new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(BL, BT, BW)), new THREE.LineBasicMaterial({ color: 0x8b9099 })));
+    const nub = new THREE.Mesh(new THREE.BoxGeometry(1, BT * .55, BW * .5), std(0x8b9099)); nub.position.x = BL / 2 + .5; batt.add(nub);
+    const fluidM = std(0x19e6c1, { emissive: 0x0f9e85, emissiveIntensity: .8 });
+    const fluid = new THREE.Mesh(new THREE.BoxGeometry(1, BT - .5, BW - .5), fluidM); batt.add(fluid);
+    Object.assign(p, { fluid, fluidM, battL: BL - .5, fill: 0, tfill: 0 });
+    plants[name] = p;
+  });
+
+  // 원자력: 쌍곡선 냉각탑 + 격납 돔 + 터빈동
+  (function () {
+    const p = plants["원자력"];
+    const prof = []; for (let i = 0; i <= 30; i++) { const k = i / 30; prof.push(new THREE.Vector2(5.4 - 2.3 * Math.sin(Math.PI * k * .82), k * 17)); }
+    const ct = part(p, new THREE.LatheGeometry(prof, 56), CONCRETE, 5, 0, -4, { side: THREE.DoubleSide, roughness: .85 });
+    accent(p, new THREE.TorusGeometry(3.95, .28, 10, 48), 5, 16.8, -4).rotation.x = Math.PI / 2;
+    puffs(p, 5, 17.5, -4, 3.2);
+    part(p, new THREE.CylinderGeometry(4.6, 4.6, 7, 48), 0xdde3eb, -6, 3.5, 1);
+    part(p, new THREE.SphereGeometry(4.6, 48, 24, 0, Math.PI * 2, 0, Math.PI / 2), 0xe8edf3, -6, 7, 1);
+    accent(p, new THREE.CylinderGeometry(4.65, 4.65, .7, 48), -6, 5.6, 1);
+    part(p, rbox(10, 5, 5.5, .4), 0xb8c3d1, -2, 0, 7.5);
+    windows(p, 9, 1.4, -2, 3, 10.3);
+    part(p, new THREE.CylinderGeometry(.45, .6, 9, 16), STEEL, -10.5, 4.5, -5);
+    ct.castShadow = true;
+  })();
+
+  // 석탄: 보일러동 + 톱니 지붕 터빈동 + 줄무늬 굴뚝 2 + 컨베이어 + 저탄
+  (function () {
+    const p = plants["석탄"];
+    part(p, rbox(7, 13, 7, .4), 0xb8c3d1, -6.5, 0, -2);
+    windows(p, 6, 1.2, -6.5, 10.5, 1.55); windows(p, 6, 1.2, -6.5, 7.5, 1.55);
+    part(p, rbox(13, 5.5, 7, .4), 0xc9d2de, 3.5, 0, 2);
+    for (let k = 0; k < 3; k++) {
+      const shape = new THREE.Shape(); shape.moveTo(0, 0); shape.lineTo(4.2, 0); shape.lineTo(0, 2.2); shape.lineTo(0, 0);
+      const g = new THREE.ExtrudeGeometry(shape, { depth: 7, bevelEnabled: false }); g.translate(-2.1, 0, -3.5);
+      accent(p, g, -.6 + k * 4.2, 5.5, 2);
+    }
+    windows(p, 12, 1.3, 3.5, 2.6, 5.55);
+    [-1, 2.4].forEach((x, i) => {
+      part(p, new THREE.CylinderGeometry(.8, 1.15, 21, 24), 0xe8edf3, x, 10.5, -6);
+      [15.5, 19.5].forEach(y => part(p, new THREE.CylinderGeometry(.84 - (y - 10) * .016, .86 - (y - 10) * .016, 1.4, 24), 0xd4473f, x, y, -6));
+      puffs(p, x, 21.6, -6, 2.4, 0x9aa4b2);
+    });
+    const conv = part(p, new THREE.BoxGeometry(13, .6, 1.4), STEEL, 7, 6, -5.5); conv.rotation.z = -.5;
+    for (let i = 0; i < 9; i++) part(p, new THREE.SphereGeometry(1.1 + rnd() * .5, 12, 8), 0x1f232b, 9 + (i % 3) * 1.8, .9, -9 + Math.floor(i / 3) * 1.6, { roughness: 1 });
+  })();
+
+  // LNG: 대형 저장탱크 2 + 배관 랙 + 복합화력동 + 배열회수 굴뚝 2
+  (function () {
+    const p = plants["LNG"];
+    [[-6, -4], [3.5, -5.5]].forEach(([x, z]) => {
+      part(p, new THREE.CylinderGeometry(4.4, 4.4, 8.5, 48), 0xe8edf3, x, 4.25, z, { metalness: .25, roughness: .4 });
+      const cap = part(p, new THREE.SphereGeometry(4.4, 48, 16, 0, Math.PI * 2, 0, Math.PI / 2), 0xdde3eb, x, 8.5, z, { metalness: .25, roughness: .4 });
+      cap.scale.y = .32;
+      accent(p, new THREE.TorusGeometry(4.45, .22, 8, 48), x, 6, z).rotation.x = Math.PI / 2;
+    });
+    const rack = part(p, new THREE.BoxGeometry(16, .5, 1.6), STEEL, -1, 5.2, 2.2);
+    [-8, -3, 2, 6].forEach(x => part(p, new THREE.CylinderGeometry(.22, .22, 5.2, 8), STEEL, x, 2.6, 2.2));
+    [-.4, .4].forEach(dz => part(p, new THREE.CylinderGeometry(.3, .3, 16, 12), 0xc08457, -1, 5.75, 2.2 + dz).rotation.z = Math.PI / 2);
+    part(p, rbox(11, 5, 5.5, .4), 0xb8c3d1, 2.5, 0, 7);
+    windows(p, 10, 1.3, 2.5, 2.8, 9.8);
+    [6.5, 9].forEach(x => { part(p, new THREE.CylinderGeometry(.75, .9, 12, 20), STEEL, x, 6, 3.5); puffs(p, x, 12.3, 3.5, 1.6); });
+    rack.castShadow = true;
+  })();
+
+  // 수력: 곡면 댐 + 수문 + 저수지 + 발전동 + 흘러내리는 물
+  const fallTex = (() => { const c = document.createElement("canvas"); c.width = 32; c.height = 128; const x = c.getContext("2d");
+    x.fillStyle = "#3d8fd6"; x.fillRect(0, 0, 32, 128);
+    for (let i = 0; i < 40; i++) { x.fillStyle = `rgba(255,255,255,${.35 + rnd() * .5})`; x.fillRect(rnd() * 32, rnd() * 128, 1.5, 12 + rnd() * 16); }
+    const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; return t; })();
+  (function () {
+    const p = plants["수력"];
+    const dam = part(p, new THREE.CylinderGeometry(26, 26, 10, 64, 1, true, Math.PI * .91, Math.PI * .18), 0xc9d2de, 0, 5, 22, { side: THREE.DoubleSide });
+    part(p, new THREE.BoxGeometry(17, 1, 2.6), 0xb8c3d1, 0, 10.4, -3.6);
+    [-4.5, 0, 4.5].forEach(x => accent(p, new THREE.BoxGeometry(2.4, 3.2, .5), x, 7.6, -2.8));
+    const water = new THREE.Mesh(new THREE.BoxGeometry(18, 8.6, 7), new THREE.MeshStandardMaterial({ color: 0x1f5f99, roughness: .15, metalness: .4, transparent: true, opacity: .9 }));
+    water.position.set(0, 4.3, -8.5); p.top.add(water); p.mats.push(water.material);
+    const fallM = new THREE.MeshBasicMaterial({ map: fallTex, transparent: true, opacity: 0 });
+    [-4.5, 0, 4.5].forEach(x => { const f = new THREE.Mesh(new THREE.PlaneGeometry(2.2, 7.4), fallM); f.position.set(x, 3.8, -2.4); f.rotation.x = -.12; p.top.add(f); });
+    part(p, rbox(15, 3.4, 5, .4), 0xb8c3d1, 0, 0, 3.5);
+    windows(p, 13, 1.1, 0, 1.8, 6.05);
+    const river = new THREE.Mesh(new THREE.BoxGeometry(8, .3, 4), new THREE.MeshStandardMaterial({ color: 0x2a6fb0, roughness: .2, transparent: true, opacity: .8 }));
+    river.position.set(0, .2, 8.2); p.top.add(river); p.mats.push(river.material);
+    p.fall = fallM; dam.receiveShadow = true;
+  })();
+
+  // 태양광: 프레임 있는 패널 배열 + 인버터
+  (function () {
+    const p = plants["태양광"];
+    const cell = (() => { const c = document.createElement("canvas"); c.width = c.height = 64; const x = c.getContext("2d");
+      x.fillStyle = "#1c3d7a"; x.fillRect(0, 0, 64, 64); x.strokeStyle = "#7ea6e6"; x.lineWidth = 1.5;
+      for (let i = 0; i <= 8; i++) { x.beginPath(); x.moveTo(i * 8, 0); x.lineTo(i * 8, 64); x.stroke(); }
+      for (let i = 0; i <= 4; i++) { x.beginPath(); x.moveTo(0, i * 16); x.lineTo(64, i * 16); x.stroke(); }
+      const t = new THREE.CanvasTexture(c); return t; })();
+    const pm = new THREE.MeshStandardMaterial({ map: cell, roughness: .25, metalness: .5, emissive: 0xffe08a, emissiveIntensity: 0, transparent: true });
+    p.mats.push(pm); p.panel = pm;
+    for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) {
+      const g = new THREE.Group(); g.position.set(-7.5 + c * 6.2, 2, -6 + r * 5); g.rotation.x = -.55; p.top.add(g);
+      const pn = new THREE.Mesh(new THREE.BoxGeometry(5.6, .18, 3.6), pm); pn.castShadow = true; g.add(pn);
+      const fr = new THREE.Mesh(new THREE.BoxGeometry(5.8, .12, 3.8), std(STEEL, { transparent: true })); fr.position.y = -.12; g.add(fr); p.mats.push(fr.material);
+      part(p, new THREE.CylinderGeometry(.12, .12, 2, 8), STEEL, -7.5 + c * 6.2, 1, -6 + r * 5);
+    }
+    part(p, rbox(3, 2.4, 2.2, .3), 0xb8c3d1, 9.5, 0, 5);
+    accent(p, new THREE.BoxGeometry(3.05, .4, 2.25), 9.5, 2.1, 5);
+  })();
+
+  // 풍력: 언덕 + 날렵한 터빈 3
+  const rotors = [];
+  (function () {
+    const p = plants["풍력"];
+    const hill = part(p, new THREE.SphereGeometry(13, 40, 16, 0, Math.PI * 2, 0, Math.PI / 2), 0x2a3a2e, 0, 0, -2, { roughness: 1 });
+    hill.scale.y = .22;
+    const blade = new THREE.Shape(); blade.moveTo(0, 0); blade.quadraticCurveTo(.9, 2, .35, 9); blade.lineTo(0, 9.2); blade.quadraticCurveTo(-.25, 3, 0, 0);
+    const bladeGeo = new THREE.ExtrudeGeometry(blade, { depth: .12, bevelEnabled: false });
+    [[-6, -2, 20], [1, -5, 23], [7, 1, 18]].forEach(([x, z, h]) => {
+      const y0 = 2.6 - Math.hypot(x, z + 2) * .12;
+      part(p, new THREE.CylinderGeometry(.28, .62, h, 20), 0xf1f4f8, x, y0 + h / 2, z);
+      const nac = part(p, rbox(1.4, 1.2, 3, .4), 0xf1f4f8, x, y0 + h - .5, z);
+      const hub = new THREE.Group(); hub.position.set(x, y0 + h + .1, z + 1.7); p.top.add(hub);
+      const cone = new THREE.Mesh(new THREE.ConeGeometry(.45, 1, 16), std(0xf1f4f8, { transparent: true })); cone.rotation.x = Math.PI / 2; cone.position.z = .4; hub.add(cone); p.mats.push(cone.material);
+      for (let k = 0; k < 3; k++) {
+        const arm = new THREE.Group(); arm.rotation.z = k * Math.PI * 2 / 3; hub.add(arm);
+        const bm = std(0xf1f4f8, { transparent: true }); p.mats.push(bm);
+        const b = new THREE.Mesh(bladeGeo, bm); b.castShadow = true; arm.add(b);
+      }
+      accent(p, new THREE.BoxGeometry(1.45, .3, 3.05), x, y0 + h + .25, z);
+      rotors.push(hub); nac.castShadow = true;
+    });
+  })();
+
+  // 메인 발전: 둥근 받침 + 청록 링 + 빛나는 원통(윗면 번개 표시). 부하차단이면 빨간색으로 깜빡인다
+  const hub = { mats: [], cur: 0, target: 1 };
+  (function () {
+    const g = new THREE.Group(); g.position.copy(HUB); scene.add(g); hub.g = g;
+    const pad = new THREE.Mesh(new THREE.CylinderGeometry(17, 18, 1.6, 72), std(0x33373d, { roughness: .85 }));
+    pad.position.y = .8; pad.receiveShadow = true; g.add(pad);
+    const ringM = new THREE.MeshBasicMaterial({ color: 0x19e6c1, transparent: true, opacity: .6 });
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(13.5, .35, 12, 96), ringM);
+    ring.rotation.x = Math.PI / 2; ring.position.y = 1.8; g.add(ring); hub.ring = ringM;
+    const haloM = new THREE.MeshBasicMaterial({ map: glowTex, color: 0x19e6c1, transparent: true, opacity: .35, depthWrite: false,
+      blending: THREE.AdditiveBlending });
+    const halo = new THREE.Mesh(new THREE.PlaneGeometry(64, 64), haloM); halo.rotation.x = -Math.PI / 2; halo.position.y = .07;
+    g.add(halo); hub.halo = haloM;
+    const body = new THREE.Mesh(new THREE.CylinderGeometry(8.5, 8.5, 6, 72),
+      std(0x19e6c1, { emissive: 0x19e6c1, emissiveIntensity: .8, roughness: .3 }));
+    body.position.y = 4.6; body.castShadow = true; g.add(body); hub.sign = body.material;
+    const bolt = (() => {  // 윗면 번개 표시
+      const c = document.createElement("canvas"); c.width = c.height = 256; const x = c.getContext("2d");
+      x.fillStyle = "#0d6b5b"; x.fillRect(0, 0, 256, 256); x.fillStyle = "#ffffff"; x.beginPath();
+      [[146, 34], [74, 140], [122, 140], [104, 222], [184, 108], [134, 108]].forEach(([u, w], i) => i ? x.lineTo(u, w) : x.moveTo(u, w));
+      x.closePath(); x.fill(); return new THREE.CanvasTexture(c); })();
+    const topM = new THREE.MeshStandardMaterial({ map: bolt, emissive: 0xffffff, emissiveMap: bolt, emissiveIntensity: 1 });
+    const top = new THREE.Mesh(new THREE.CircleGeometry(8.5, 72), topM); top.rotation.x = -Math.PI / 2; top.position.y = 7.62; g.add(top);
+    hub.win = topM;
+    hub.beacon = new THREE.Object3D();
+    hub.anchor = new THREE.Vector3(HUB.x + 2, 22, HUB.z - 8);  // 번개 원통을 가리지 않게 그 위에
+  })();
+
+  // 발전소 → 메인 전력선 (바닥을 따라 휘는 선 + 흐르는 빛)
+  const flows = [];
+  ORDER.forEach(name => {
+    const p = plants[name];
+    const a = p.pos.clone(); a.y = .5;
+    const b = HUB.clone(); b.y = .5; b.x += (p.pos.x - HUB.x) * .45; b.z += 16;
+    const mid = new THREE.Vector3(a.x, .5, b.z + (a.z - b.z) * .35);  // 바닥을 따라 꺾이는 길
+    const curve = new THREE.QuadraticBezierCurve3(a, mid, b);
+    const lineM = new THREE.MeshBasicMaterial({ color: OFF, transparent: true, opacity: .95 });
+    scene.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 60, .55, 8, false), lineM));
+    const dots = [];
+    for (let i = 0; i < 10; i++) {
+      const d = new THREE.Mesh(new THREE.SphereGeometry(.85, 10, 8), new THREE.MeshBasicMaterial({ color: 0xc8fff3, transparent: true, opacity: 0 }));
+      scene.add(d); dots.push({ d, t: i / 10 });
+    }
+    flows.push({ p, curve, dots, lineM });
+  });
+
+  // 라벨
+  const labels = {};
+  const mkLabel = (key, cls = "") => { const el = document.createElement("div"); el.className = "lbl " + cls; $("labels").appendChild(el); labels[key] = el; };
+  ORDER.forEach(n => mkLabel(n)); mkLabel("hub", "hub");
+
+  let night = state.block !== VM.blocks[0], windRate = .3, applied = false;  // 첫 프레임부터 고른 시간대로
+  function apply() {
+    const first = !applied; applied = true;
+    const c = combo(), sup = c.supply ? c.supply[state.block] : null;
+    night = state.block !== VM.blocks[0];
+    const max = Math.max(1, ...ORDER.map(g => sup ? sup[g].mw : 0));
+    let total = 0;
+    ORDER.forEach(name => {
+      const p = plants[name], s = sup ? sup[name] : { mw: 0, on: 0, units: 0 };
+      const renew = VM.renewables.includes(name);
+      const inCombo = renew || c.groups.includes(name);
+      const on = inCombo && s.mw > 1 && (renew || s.on > 0);
+      if (on) total += s.mw;
+      p.target = on ? .35 + .65 * Math.min(1, s.mw / max) : 0;
+      p.on = on; p.tdim = inCombo ? 1 : .3;
+      const cap = VM.capacity_mw[name] || 0, ratio = cap ? s.mw / cap : 0;
+      p.tfill = on ? Math.max(.05, Math.min(1, ratio)) : 0;
+      if (first) p.fill = p.tfill;  // 처음 열 때는 바로 제 값, 그 뒤엔 차오르는 애니메이션
+      const el = labels[name];
+      el.className = "lbl" + (p.below ? " below" : "") + (!inCombo ? " out" : on ? "" : " off");
+      el.style.setProperty("--c", VM.colors[name]);
+      const val = !inCombo ? "제외" : on ? gw(s.mw) : (name === "태양광" ? "해 없음" : "정지");
+      const second = renew ? ["이용률", `${Math.round(ratio * 100)}%`] : ["가동", `${inCombo ? s.on : 0}/${s.units}기`];
+      el.innerHTML = `<div class="t"><i></i>${name}</div><div class="r"><span>출력</span><b class="${on ? "on" : ""}">${val}</b></div>` +
+        `<div class="r"><span>${second[0]}</span><b>${second[1]}</b></div>`;
+    });
+    windRate = sup ? .4 + 3 * Math.min(1, sup["풍력"].mw / 1500) : .2;
+    hub.target = c.status === "풀이 실패" ? .15 : 1;
+    hub.shed = shedNow(c);
+    // VSS·설비 여유는 오른쪽 패널에 있으니 메인 이름표는 총 공급만
+    labels.hub.style.setProperty("--c", hub.shed ? "#ff5d5d" : "#19e6c1");
+    labels.hub.innerHTML = `<div class="t"><i></i>메인 발전</div><div class="r"><span>총 공급</span><b class="on">${gw(total)}</b></div>` +
+      `<div class="r"><span>상태</span><b>${hub.shed ? '<span class="up">부하차단</span>' : "정상"}</b></div>`;
+  }
+
+  const v = new THREE.Vector3(), clock = new THREE.Clock(), gray = new THREE.Color(0x4b5058);
+  let dayMix = -1;
+  function place(el, pos) {
+    v.copy(pos).project(camera);
+    el.style.left = ((v.x + 1) / 2 * W()) + "px"; el.style.top = ((1 - v.y) / 2 * H()) + "px";
+    el.style.display = v.z < 1 ? "" : "none";  // 보일 때는 CSS(flex)를 따른다
+  }
+  function tick() {
+    const dt = Math.min(.05, clock.getDelta()), t = clock.elapsedTime, k = Math.min(1, dt * 2.6);
+    const goal = night ? 0 : 1;
+    dayMix = dayMix < 0 ? goal : dayMix + (goal - dayMix) * k;
+    scene.background.copy(bgNight).lerp(bgDay, dayMix); scene.fog.color.copy(scene.background);
+    hemi.intensity = .45 + .3 * dayMix; sun.intensity = .45 + .4 * dayMix;
+    ORDER.forEach(name => {
+      const p = plants[name];
+      p.cur += (p.target - p.cur) * k; p.dim += (p.tdim - p.dim) * k;
+      const glow = p.cur * (.9 + .1 * Math.sin(t * 2.2 + p.pos.x));
+      p.mats.forEach(m => { m.opacity = p.dim; });
+      p.accents.forEach(m => { m.emissiveIntensity = glow * 1.1; m.color.copy(gray).lerp(p.color, Math.min(1, p.cur * 1.8)); });
+      p.trim.color.copy(OFF).lerp(TEAL, Math.min(1, p.cur * 1.8)); p.trim.emissiveIntensity = glow * 1.2;
+      p.glow.opacity = .55 * Math.min(1, p.cur * 1.5) * p.dim;
+      p.wins.forEach(m => { m.emissiveIntensity = glow * (1.4 - .5 * dayMix); });
+      if (p.fall) { p.fall.opacity = .9 * Math.min(1, p.cur * 1.8) * p.dim; fallTex.offset.y -= dt * 1.4 * p.cur; }
+      if (p.panel) p.panel.emissiveIntensity = .18 * glow * dayMix;
+      p.fill += (p.tfill - p.fill) * k;
+      p.fluid.visible = p.fill > .01;
+      p.fluid.scale.x = Math.max(.01, p.battL * p.fill); p.fluid.position.x = -p.battL / 2 + p.battL / 2 * p.fill;
+      p.smoke.forEach(q => {
+        q.t = (q.t + dt * .16) % 1;
+        q.s.position.set(q.b.x + q.t * 3.2, q.b.y + q.t * 7.5, q.b.z);
+        q.s.scale.setScalar(q.size * (.5 + q.t * 1.15)); q.s.material.opacity = .8 * p.cur * Math.sin(Math.PI * q.t) * p.dim;
+      });
+      place(labels[name], p.anchor);
+    });
+    rotors.forEach(r => { r.rotation.z += dt * windRate; });
+    flows.forEach(f => {
+      f.lineM.color.copy(OFF).lerp(TEAL, Math.min(1, f.p.cur * 1.6) * .85);
+      f.dots.forEach(dd => {
+        dd.t = (dd.t + dt * (.1 + .3 * f.p.cur)) % 1;
+        dd.d.position.copy(f.curve.getPointAt(dd.t));
+        dd.d.material.opacity = f.p.on ? Math.min(1, f.p.cur * 1.8) * Math.sin(dd.t * Math.PI) : 0;
+      });
+    });
+    hub.cur += (hub.target - hub.cur) * k;
+    const blink = hub.shed ? (Math.sin(t * 6) > 0 ? 1 : .25) : 1;
+    const hc = hub.shed ? 0xff5d5d : 0x19e6c1;
+    hub.ring.color.set(hc); hub.ring.opacity = .9 * hub.cur * blink;
+    hub.halo.color.set(hc); hub.halo.opacity = .4 * hub.cur * blink;
+    hub.sign.color.set(hc); hub.sign.emissive.set(hc); hub.sign.emissiveIntensity = .75 * hub.cur * blink;
+    hub.win.emissiveIntensity = .9 * hub.cur;
+    hub.beacon.visible = Math.sin(t * 3) > .2;
+    place(labels.hub, hub.anchor);
+    controls.update();
+    renderer.render(scene, camera);
+    requestAnimationFrame(tick);
+  }
+  window.addEventListener("resize", () => { renderer.setSize(W(), H(), false); camera.aspect = W() / H(); camera.updateProjectionMatrix(); });
+  tick();
+  return { apply };
+})();
+
+function update() {
+  renderPanels();
+  if (scene3d) scene3d.apply();
+}
+renderSummary();
+renderList();
+update();
+</script>
+</body>
+</html>

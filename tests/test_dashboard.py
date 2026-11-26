@@ -285,6 +285,24 @@ def test_parse_milp_latency_falls_back_to_server_time() -> None:
     assert logic.parse_milp(_milp_response())["latency_s"] == pytest.approx(1.6)
 
 
+@pytest.mark.parametrize(("source", "text"), [
+    ("forecast", "예측 수요"),
+    ("data", "실측 수요 (예측 대신)"),
+    ("request", "지정 수요"),
+])
+def test_parse_milp_reads_demand_source(source: str, text: str) -> None:
+    data = _milp_response()
+    data["demand_source"] = source
+    milp = logic.parse_milp(data)
+    assert milp["demand_source"] == source
+    assert logic.demand_source_text(milp) == text
+
+
+def test_parse_milp_demand_source_defaults_to_data() -> None:
+    # demand_source 가 없던 dispatch_api (2026-11-20 이전) 는 수집 실측으로 풀었다
+    assert logic.parse_milp(_milp_response())["demand_source"] == "data"
+
+
 @pytest.mark.parametrize("status", ["infeasible", "error"])
 def test_parse_milp_without_solution_is_none(status: str) -> None:
     assert logic.parse_milp(_milp_response(status)) is None
@@ -777,11 +795,108 @@ def test_scenario_page_helpers() -> None:
     assert page_scenarios.scenario_frame(data).loc[0, "라벨"] == "고수요"
 
 
-# ── Two-Stage 성능 비교 (테스트) 페이지 ──────────────────────────────────────
+# ── Two-Stage · VSS 페이지 (발전원 조합 3D) ──────────────────────────────────
 
 
-def _stochastic_page_script() -> None:
-    """AppTest 가 실행할 스크립트: Two-Stage 테스트 페이지만 단독으로 띄운다."""
+def _mix_data() -> dict:
+    """scripts/measure_vss_mix.py 결과 모양의 작은 가짜 데이터 (24시간, 조합 3개)."""
+    hours = 24
+    solar = [500.0 if 7 <= h < 19 else 0.0 for h in range(hours)]
+
+    def plan(**mw):
+        return {g: {"units": 2 if g in mw else 0, "on": [2 if g in mw else 0] * hours,
+                    "mw": [mw.get(g, 0.0)] * hours} for g in ("원자력", "석탄", "LNG", "수력")}
+
+    def row(combo, vss, rp, short=False, shed=0.0, **mw):
+        return {"combo": list(combo), "capacity_mw": 60_000.0, "short": short,
+                "status": "optimal", "vss_pct": vss, "bound_pct": vss + 1, "shed_mwh": shed,
+                "rp_won": rp, "eev_won": rp * 1.05, "ws_won": rp * 0.99, "plan": plan(**mw),
+                "scenarios": [{"id": "D-02", "probability": 0.5, "total_won": rp, "shed_mwh": 0.0},
+                              {"id": "D+02", "probability": 0.5, "total_won": rp,
+                               "shed_mwh": shed}]}
+
+    return {
+        "plan_day": "2026-10-28", "start": "2026-10-28T00:00:00+09:00",
+        "base_issued_at": "2026-10-27T11:00:00+09:00",
+        "base": {"demand_mw": [50_000.0] * hours, "solar_mw": solar, "wind_mw": [300.0] * hours},
+        "scenarios": [{"id": "D-02", "probability": 0.5, "demand_mw": [49_000.0] * hours},
+                      {"id": "D+02", "probability": 0.5, "demand_mw": [51_000.0] * hours}],
+        "rows": [
+            row(("원자력", "석탄", "LNG", "수력"), 5.0, 1.0e11, 원자력=20_000.0, LNG=29_000.0),
+            row(("원자력", "LNG"), 8.0, 1.1e11, 원자력=20_000.0, LNG=29_000.0),
+            row(("석탄", "LNG"), 4.0, 1.2e11, 석탄=20_000.0, LNG=29_000.0),
+            row(("수력",), 90.0, 9.9e11, short=True, shed=1e5, 수력=1_800.0),
+        ],
+    }
+
+
+def _vss_mix():
+    sys.path.insert(0, str(DASHBOARD_DIR))
+    import vss_mix
+
+    return vss_mix
+
+
+def test_vss_mix_rows_and_scenario_options() -> None:
+    mix = _vss_mix()
+    data = _mix_data()
+    assert mix.baseline(data)["vss_pct"] == 5.0
+    assert mix.find_row(data, ["LNG", "원자력"])["vss_pct"] == 8.0
+    assert mix.find_row(data, []) is None
+    assert mix.scenario_options(data) == ["-2%", "평균", "+2%"]
+    assert mix.scenario_demand(data, "평균")[0] == 50_000.0
+    assert mix.scenario_demand(data, "+2%")[0] == 51_000.0
+
+
+def test_vss_mix_block_supply_day_and_night() -> None:
+    mix = _vss_mix()
+    data = _mix_data()
+    row = mix.baseline(data)
+    day, night = mix.block_supply(data, row, mix.DAY), mix.block_supply(data, row, mix.NIGHT)
+    assert day["태양광"] == pytest.approx(500.0) and night["태양광"] == 0.0
+    assert day["원자력"] == pytest.approx(20_000.0) and day["석탄"] == 0.0
+    assert len(mix.hours(mix.DAY)) + len(mix.hours(mix.NIGHT)) == 24
+
+
+def test_vss_mix_view_model_orders_combos_and_packs_supply() -> None:
+    mix = _vss_mix()
+    vm = mix.view_model(_mix_data())
+    # 정상 조합은 VSS 큰 순, 공급 부족은 뒤로
+    assert [c["key"] for c in vm["combos"]] == [
+        "원자력 + LNG", "원자력 + 석탄 + LNG + 수력", "석탄 + LNG", "수력"]
+    nuc_lng = vm["combos"][0]
+    assert nuc_lng["delta"] == pytest.approx(3.0)
+    assert nuc_lng["cost_delta_eok"] == pytest.approx(100.0)
+    night = nuc_lng["supply"][mix.NIGHT]
+    assert night["원자력"] == {"mw": pytest.approx(20_000.0), "on": 2, "units": 2}
+    assert night["석탄"]["on"] == 0 and night["태양광"]["on"] == 0  # 밤에는 해가 없다
+    assert nuc_lng["supply"][mix.DAY]["태양광"]["on"] == 1
+    assert vm["combos"][-1]["status"] == "공급 부족"
+    assert vm["combos"][-1]["scen"]["+2%"]["shed_mwh"] == pytest.approx(1e5)
+    assert vm["scenarios"] == ["-2%", "평균", "+2%"]
+    assert vm["demand"][mix.DAY]["+2%"] == pytest.approx(51_000.0)
+    # 최대 순수요 = 높은 수요 시나리오 - 밤(태양광 0)의 풍력
+    assert vm["peak_net_mw"] == pytest.approx(51_000.0 - 300.0)
+    # 3D 물결선: 시나리오마다 24시간 수요 곡선
+    assert len(vm["hourly"]["demand"]["+2%"]) == 24
+    assert vm["hourly"]["demand"]["평균"][0] == pytest.approx(50_000.0)
+    assert vm["capacity_mw"] == {}  # 설비용량이 없는 옛 결과 파일
+    data = dict(_mix_data(), group_capacity_mw={"원자력": 20_840.0, "태양광": 12_000.0})
+    assert mix.view_model(data)["capacity_mw"]["태양광"] == pytest.approx(12_000.0)
+
+
+def test_vss_mix_comparison_and_extremes() -> None:
+    mix = _vss_mix()
+    frame = mix.comparison_frame(_mix_data())
+    assert list(frame["상태"]) == ["정상", "정상", "정상", "공급 부족"]
+    assert frame.loc[1, "기준 대비(%p)"] == pytest.approx(3.0)
+    assert frame.loc[2, "비용 차이(억원)"] == pytest.approx(200.0)
+    up, down = mix.extremes(frame)
+    assert up["조합"] == "원자력 + LNG" and down["조합"] == "석탄 + LNG"  # 공급 부족은 빠진다
+
+
+def _two_stage_page_script() -> None:
+    """AppTest 가 실행할 스크립트: Two-Stage 페이지만 단독으로 띄운다."""
     import page_stochastic_test
     import ui
 
@@ -789,139 +904,38 @@ def _stochastic_page_script() -> None:
     page_stochastic_test.render()
 
 
-def _stochastic_body(req: dict, status: str = "optimal", rp: float = 9.5e10) -> dict:
-    """StochasticResponse 모양의 가짜 응답 (솔버를 돌리지 않는다)."""
-    eev = 1.0e11
-    cost = {"fuel_won": rp * 0.9, "startup_won": rp * 0.04, "recourse_won": rp * 0.06,
-            "shed_won": 0.0, "total_won": rp}
-    ws = rp * 0.99 if req.get("compute_ws") else None
-    return {
-        "status": status, "solve_time_s": 12.3, "start": req["start"],
-        "horizon_h": 2, "n_scenarios": len(req["scenarios"]),
-        "first_stage": [
-            {"timestamp": f"2026-09-22T0{t}:00:00", "unit_id": uid, "on": on, "p_mw": 100.0}
-            for uid, on in (("nuclear_1", True), ("lng_1", False)) for t in range(2)
-        ],
-        "expected_cost": cost, "expected_hours": [],
-        "scenarios": [
-            {"scenario_id": sc["scenario_id"], "probability": sc["probability"], "cost": cost,
-             "shed_mwh": 0.0, "rt_adjust_mwh": 120.0, "hours": None}
-            for sc in req["scenarios"]
-        ],
-        "vss": {"rp_won": rp, "ev_won": 9.0e10, "eev_won": eev, "vss_won": eev - rp,
-                "vss_pct": (eev - rp) / eev * 100, "ws_won": ws,
-                "evpi_won": None if ws is None else rp - ws, "target_met": True},
-    }
-
-
-def _fake_dispatch_with_stochastic(monkeypatch):
-    """/scenarios 는 생성기를 직접 부르고, /dispatch/stochastic 은 가짜 응답을 준다."""
-    sys.path.insert(0, str(DASHBOARD_DIR.parent / "dispatch_api"))
-    import scenarios
-    from shared.schemas import ScenarioRequest
-
-    calls = []
-
-    class Resp:
-        status_code = 200
-
-        def __init__(self, body):
-            self._body = body
-
-        def json(self):
-            return self._body
-
-    def fake(method, url, json=None, **kwargs):
-        calls.append((url, json, kwargs.get("timeout")))
-        if url.endswith("/dispatch/stochastic"):
-            return Resp(_stochastic_body(json))
-        return Resp(scenarios.generate(ScenarioRequest(**json)).model_dump(mode="json"))
-
-    monkeypatch.setattr(logic.requests, "request", fake)
-    return calls
-
-
-def test_stochastic_page_waits_then_runs(monkeypatch) -> None:
-    from streamlit.testing.v1 import AppTest
-
-    calls = _fake_dispatch_with_stochastic(monkeypatch)
-    monkeypatch.syspath_prepend(str(DASHBOARD_DIR))
-
-    at = AppTest.from_function(_stochastic_page_script, default_timeout=60).run()
-    assert not at.exception
-    assert at.info and not calls  # '실행'을 누르기 전에는 호출하지 않는다
-
-    next(b for b in at.button if b.label == "실행").click().run()
-    assert not at.exception
-    url, body, timeout = calls[-1]
-    assert url.endswith("/dispatch/stochastic")
-    # 기본값은 제한 없음: solver 에 null 을 보내고 HTTP 응답도 끝까지 기다린다
-    assert len(body["scenarios"]) == 10 and body["solver"]["time_limit_s"] is None
-    assert timeout is None
-    assert any("VSS 목표 달성" in m.value for m in at.markdown)
-    assert len(at.session_state.sto_history) == 1
-
-    next(b for b in at.button if b.label == "이력 지우기").click().run()
-    assert not at.exception
-
-
-def test_stochastic_page_shows_error_when_dispatch_down(monkeypatch) -> None:
+def test_two_stage_page_renders(monkeypatch) -> None:
     import streamlit as st
     from streamlit.testing.v1 import AppTest
 
+    mix = _vss_mix()
     st.cache_data.clear()
-
-    def down(*a, **k):
-        raise requests.ConnectionError()
-
-    monkeypatch.setattr(logic.requests, "request", down)
-    monkeypatch.syspath_prepend(str(DASHBOARD_DIR))
-
-    at = AppTest.from_function(_stochastic_page_script, default_timeout=60)
-    at.session_state.sto_params = {"seed": 1, "n_scenarios": 10, "time_limit_s": 10,
-                                   "mip_gap_pct": 0.5, "compute_ws": False}
-    at.run()
+    monkeypatch.setattr(mix, "load", lambda path=None: _mix_data())
+    at = AppTest.from_function(_two_stage_page_script, default_timeout=30).run()
     assert not at.exception
-    assert at.error and "dispatch_api" in at.error[0].value
+    # 아이콘 붙은 expander 를 Streamlit 1.67 전 AppTest 는 status 로 분류한다
+    labels = [e.label for e in list(at.expander) + list(at.status)]
+    assert not at.warning and "발전원 조합 15개 비교표" in labels
 
 
-def test_stochastic_page_helpers() -> None:
+def test_two_stage_page_without_result_warns(monkeypatch) -> None:
+    import streamlit as st
+    from streamlit.testing.v1 import AppTest
+
+    mix = _vss_mix()
+    st.cache_data.clear()
+    monkeypatch.setattr(mix, "load", lambda path=None: None)
+    at = AppTest.from_function(_two_stage_page_script, default_timeout=30).run()
+    assert not at.exception
+    assert at.warning and "vss_mix.json" in at.warning[0].value
+
+
+def test_two_stage_scene_html_cannot_close_script_tag() -> None:
     sys.path.insert(0, str(DASHBOARD_DIR))
     import page_stochastic_test as page
 
-    req = {"start": "2026-09-22T00:00:00", "compute_ws": True,
-           "scenarios": [{"scenario_id": "S01", "probability": 1.0}]}
-    good = page.summarize(_stochastic_body(req), mip_gap=0.005)
-    assert good["vss_pct"] == pytest.approx(5.0) and good["order_ok"] and good["significant"]
-    assert good["evpi_won"] == pytest.approx(9.5e10 * 0.01)
-    assert page.verdict(good, 3.0)[1] == "ok"
-    assert page.verdict(good, 6.0)[1] == "critical"
-
-    # RP 가 덜 풀려 EEV 보다 비싸면 VSS 가 음수 — 판정을 보류한다
-    stuck = page.summarize(_stochastic_body(req, status="time_limit", rp=1.09e11), 0.005)
-    assert stuck["vss_pct"] < 0 and not stuck["order_ok"]
-    assert page.verdict(stuck, 3.0) == ("판정 보류 — 미수렴 (time_limit)", "warn")
-    broken = page.summarize(_stochastic_body(req, rp=1.09e11), 0.005)
-    assert page.verdict(broken, 3.0)[1] == "critical"
-    # 수렴했어도 gap x EEV 보다 작은 VSS 는 솔버 오차와 구분되지 않는다
-    tiny = page.summarize(_stochastic_body(req, rp=0.998e11), 0.005)
-    assert tiny["order_ok"] and not tiny["significant"]
-    assert page.verdict(tiny, 3.0)[1] == "warn"
-
-    body = _stochastic_body(req)
-    assert list(page.problem_frame(good)["문제"]) == ["WS", "RP", "EEV", "EV"]
-    assert page.breakdown_frame(body)["비중(%)"].sum() == pytest.approx(100.0)
-    assert page.scenario_frame(body, {"S01": "고수요"}).loc[0, "라벨"] == "고수요"
-    # 표시용 표는 원 → 억원. 원본 표는 그대로 둔다
-    problems = page.problem_frame(good)
-    shown = page.eok_table(problems)
-    assert list(shown.columns) == ["문제", "비용(억원)", "RP 대비(억원)", "의미"]
-    assert shown.loc[1, "비용(억원)"] == pytest.approx(problems.loc[1, "비용(원)"] / 1e8)
-    assert "비용(원)" in problems.columns
-    matrix = page.commitment_matrix(body)
-    assert list(matrix.index) == ["nuclear_1", "lng_1"]
-    assert matrix.loc["nuclear_1", 1] == 100.0 and matrix.loc["lng_1", 0] == 0.0
-    assert page.request_timeout(10, 10, True) == 10 * 13 + 60
+    html = page.scene_html({"title": "</script><b>"})
+    assert "</script><b>" not in html and r"<\/script>" in html
 
 
 # ── collector 실측 ───────────────────────────────────────────────────────────

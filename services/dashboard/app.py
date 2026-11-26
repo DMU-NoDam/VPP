@@ -30,8 +30,9 @@ config/dashboard.yaml 에 있다.
 위기 시나리오는 collector 실측 하루(수요·공급능력·태양광)에 시나리오를 적용한 예비율이다
 (시나리오별 재급전은 dispatch_api 에 아직 없다). 수급 게이지의 공급능력·예비율은 collector
 power_demand 의 supply_mw 실측을 쓰고, collector 가 supply_mw 를 주지 않으면 목업으로 돌아간다.
-MILP 계획은 수집 데이터의 최신 연속 24h(관측 시각과 다른 날일 수 있음) 기준이라 실시간 게이지에
-바로 쓰지 않았다.
+MILP 계획은 forecast_api Day-ahead 예측(못 받으면 수집 데이터의 최신 연속 24h) 기준이라 관측
+시각과 다른 날일 수 있어 실시간 게이지에 바로 쓰지 않았다. 어느 수요로 풀었는지는 최적화 상세에
+적는다.
 """
 
 from __future__ import annotations
@@ -370,7 +371,8 @@ def stochastic_result(ctx: Context, label: str = "") -> tuple[dict, str]:
 @st.cache_data(ttl=CFG.api.ttl_range_s, show_spinner="MILP 급전 계획 계산 중…")
 def fetch_milp(base_url: str, ess_mode: str | None, timeout: float,
                use_ess: bool = True, include_units: bool = False) -> ApiResult:
-    """POST /dispatch/milp. 수요를 주지 않으면 dispatch_api 가 수집 데이터의 최신 연속 24h 를 쓴다.
+    """POST /dispatch/milp. 수요를 주지 않으면 dispatch_api 가 forecast_api Day-ahead 예측을 쓰고,
+    예측을 못 받으면 수집 데이터의 최신 연속 24h 로 대신한다 (응답 demand_source).
 
     ess_mode None 은 config/ess.yaml 기본(cost). 유닛 x 시간 급전값(응답 ~70KB)은 Merit Order
     스택이 쓰는 기본 계획에서만 받는다.
@@ -410,7 +412,7 @@ def milp_carbon_pair(ctx: Context) -> tuple[dict, dict] | None:
 
 
 def milp_tag(milp: dict, label: str = "MILP") -> str:
-    """MILP 계획 태그. 계획 날짜(수집 데이터의 최신 연속 24h)를 같이 쓴다."""
+    """MILP 계획 태그. 계획 날짜(응답 timestamps 의 첫날)를 같이 쓴다."""
     if _CHART["style"].short_tags:
         return real_tag(label)
     return real_tag(f"{label} {milp['day']:%m/%d} 계획")
@@ -1576,8 +1578,10 @@ def render_optimization_detail(ctx: Context) -> None:
         "전 시나리오로 평가한 기대비용 (docs/formulation.md 3장)." + cond
     )
     if live:
-        # dispatch_api 가 남긴 모델링 선택·가정 (절감률 비교 조건 등). 그대로 보여 준다
-        st.caption("MILP 조건: " + " · ".join(live["notes"]))
+        # 어느 수요로 풀었는지 + dispatch_api 가 남긴 모델링 선택·가정 (예측 대신 사유 포함)
+        notes = " · ".join(live["notes"])
+        st.caption(f"MILP 수요: {logic.demand_source_text(live)}."
+                   + (f" 조건: {notes}" if notes else ""))
 
 
 def render_crisis_detail(ctx: Context) -> None:

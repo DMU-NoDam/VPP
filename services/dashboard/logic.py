@@ -450,6 +450,14 @@ def reserve_text(reserve_ratio: float, reserve_mw: float = 0.0) -> str:
 # 해가 있는 MILP 상태 (shared/schemas.py SolveStatus). infeasible·error 면 화면은 목업으로 둔다.
 MILP_SOLVED = ("optimal", "feasible", "time_limit")
 
+# MilpResponse.demand_source → 화면 문구. 대시보드는 demand_source 를 보내지 않아(기본 forecast)
+# data 가 오면 forecast_api 예측을 못 받아 수집 실측으로 대신 푼 것이다 (사유는 notes).
+DEMAND_SOURCE_TEXT = {
+    "forecast": "예측 수요",
+    "data": "실측 수요 (예측 대신)",
+    "request": "지정 수요",
+}
+
 
 def parse_milp(data: dict, latency_s: float | None = None) -> dict | None:
     """MilpResponse(POST /dispatch/milp) → 화면 값. 해가 없거나 baseline 이 없으면 None.
@@ -474,6 +482,8 @@ def parse_milp(data: dict, latency_s: float | None = None) -> dict | None:
         "constraints": {c["name"]: bool(c["ok"]) for c in data["constraints"]},
         "ess": data.get("ess"),
         "notes": list(data.get("notes", [])),
+        # 실제로 푼 수요. 이 필드가 없던 dispatch_api 는 수집 실측으로 풀었다
+        "demand_source": data.get("demand_source", "data"),
         "carbon_ton": float(data["carbon"]["total_ton"]),
         "carbon_hourly_ton": [float(v) for v in data["carbon"]["hourly_ton"]],
         "carbon_by_fuel_ton": {k: float(v) for k, v in data["carbon"]["by_fuel_ton"].items()},
@@ -486,6 +496,11 @@ def parse_milp(data: dict, latency_s: float | None = None) -> dict | None:
         "ess_mw": [float(h["ess_mw"]) for h in data["hours"]],
         "units": data.get("units") or [],
     }
+
+
+def demand_source_text(milp: dict) -> str:
+    """parse_milp 결과의 수요 출처 → 화면 문구 (DEMAND_SOURCE_TEXT)."""
+    return DEMAND_SOURCE_TEXT.get(milp["demand_source"], milp["demand_source"])
 
 
 def milp_fuel_stack(milp: dict, unit_fuel: dict[str, str]) -> pd.DataFrame:
